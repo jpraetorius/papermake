@@ -4,33 +4,41 @@ use std::sync::{Arc, Mutex};
 
 use once_cell::sync::Lazy;
 use typst::Library;
+use typst::LibraryExt;
 use typst::diag::{FileError, FileResult};
-use typst::foundations::{Bytes, Datetime, Dict, IntoValue};
+use typst::foundations::{Bytes, Datetime, Dict, Duration, IntoValue};
 use typst::syntax::{FileId, Source};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
-use typst_kit::fonts::{FontSearcher, FontSlot};
+use typst_kit::fonts::FontSource;
 
 // Define a static lazy variable to hold the cached fonts
 static CACHED_FONTS: Lazy<(FontBook, Vec<Font>)> = Lazy::new(|| {
-    let mut font_searcher = FontSearcher::new();
-    let font_searcher = font_searcher.include_system_fonts(true);
+    let mut book = FontBook::new();
+    let mut fonts = Vec::new();
 
-    let fonts = match std::env::var_os("FONTS_DIR") {
-        Some(fonts_dir) => {
-            let fonts_dir = PathBuf::from(fonts_dir);
-            font_searcher.search_with([&fonts_dir])
+    // Embedded fonts are always available and load infallibly.
+    for (font, info) in typst_kit::fonts::embedded() {
+        book.push(info);
+        fonts.push(font);
+    }
+
+    // System fonts, plus an optional user-provided directory (`FONTS_DIR`).
+    // Sources are loaded eagerly so `book` and `fonts` stay index-aligned.
+    for (path, info) in typst_kit::fonts::system() {
+        if let Some(font) = path.load() {
+            book.push(info);
+            fonts.push(font);
         }
-        None => font_searcher.search(),
-    };
-
-    let book = fonts.book;
-    let fonts = fonts
-        .fonts
-        .iter()
-        .map(FontSlot::get)
-        .filter_map(|f| f)
-        .collect::<Vec<_>>();
+    }
+    if let Some(fonts_dir) = std::env::var_os("FONTS_DIR") {
+        for (path, info) in typst_kit::fonts::scan(&PathBuf::from(fonts_dir)) {
+            if let Some(font) = path.load() {
+                book.push(info);
+                fonts.push(font);
+            }
+        }
+    }
 
     (book, fonts)
 });
@@ -102,7 +110,7 @@ impl PapermakeWorld {
         let library = Library::builder().with_inputs(inputs_dict).build();
 
         let source_text = format!(
-            "#let data = json.decode(sys.inputs.data)\n{}",
+            "#let data = json(bytes(sys.inputs.data))\n{}",
             template_content
         );
 
@@ -201,16 +209,9 @@ impl PapermakeWorld {
 
     /// Convert FileId to file path
     fn id_to_path(&self, id: FileId) -> FileResult<String> {
-        // Extract the actual path from FileId
-        let id_str = format!("{:?}", id);
-        if id_str.starts_with("FileId(") && id_str.ends_with(")") {
-            let path = &id_str[7..id_str.len() - 1];
-            if path.starts_with("\"") && path.ends_with("\"") {
-                return Ok(path[1..path.len() - 1].to_string());
-            }
-            return Ok(path.to_string());
-        }
-        Ok(id_str)
+        // Use the virtual path's rooted form (e.g. `/header.typ`). File system
+        // backends are responsible for interpreting the leading slash.
+        Ok(id.vpath().get_with_slash().to_string())
     }
 }
 
@@ -253,9 +254,11 @@ impl typst::World for PapermakeWorld {
     /// Get the current date.
     ///
     /// Optionally, an offset in hours is given.
-    fn today(&self, offset: Option<i64>) -> Option<Datetime> {
-        let offset = offset.unwrap_or(0);
-        let offset = time::UtcOffset::from_hms(offset.try_into().ok()?, 0, 0).ok()?;
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        let seconds = offset
+            .map(|o| time::Duration::from(o).whole_seconds())
+            .unwrap_or(0);
+        let offset = time::UtcOffset::from_whole_seconds(seconds.try_into().ok()?).ok()?;
         let time = self.time.checked_to_offset(offset)?;
         Some(Datetime::Date(time.date()))
     }

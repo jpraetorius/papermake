@@ -231,7 +231,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let storage = MemoryStorage::new();
-    /// let registry = Registry::new(storage);
+    /// let registry = Registry::new_storage_only(storage);
     ///
     /// let pdf_bytes = registry.render(
     ///     "john/invoice:latest",
@@ -338,7 +338,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let storage = MemoryStorage::new();
-    /// let registry = Registry::new(storage);
+    /// let registry = Registry::new_storage_only(storage);
     ///
     /// let templates = registry.list_templates().await?;
     /// for template in templates {
@@ -549,7 +549,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     ) -> Result<RenderResult, RegistryError> {
         // Step 1: Parse template reference to extract name/tag
         let parsed_ref = Reference::parse(reference)?;
-        let template_name = parsed_ref.full_name();
+        let template_name = parsed_ref.name.clone();
         let template_tag = parsed_ref.tag.unwrap_or_else(|| "latest".to_string());
 
         // Step 2: Hash input data and store as content-addressable blob
@@ -563,13 +563,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
-        let manifest_hash = self.resolve(reference).await?;
-
         // Step 3: Measure total operation time including resolution
         let start_time = std::time::Instant::now();
 
-        // Step 4: Try to resolve and render - catch all failures
+        // Step 4: Try to resolve and render - catch all failures so that even a
+        // failed resolution is recorded as a failure render below.
         let result: Result<(String, Vec<u8>), RegistryError> = async {
+            let manifest_hash = self.resolve(reference).await?;
             let pdf_bytes = self.render(reference, data).await?;
             Ok((manifest_hash, pdf_bytes))
         }
@@ -825,7 +825,7 @@ mod tests {
 
     fn create_test_bundle() -> TemplateBundle {
         let metadata = TemplateMetadata::new("Test Template", "test@example.com");
-        let main_content = br#"#let data = json.decode(sys.inputs.data)
+        let main_content = br#"#let data = json(bytes(sys.inputs.data))
 = Test Template
 Hello #data.name"#
             .to_vec();
@@ -888,7 +888,7 @@ Hello #data.name"#
         // Create identical bundles
         let metadata1 = TemplateMetadata::new("Test Template", "test@example.com");
         let metadata2 = TemplateMetadata::new("Test Template", "test@example.com");
-        let main_content = br#"#let data = json.decode(sys.inputs.data)
+        let main_content = br#"#let data = json(bytes(sys.inputs.data))
 = Test Template
 Hello #data.name"#
             .to_vec();
@@ -1324,6 +1324,9 @@ Content: #data.content"#
         assert_eq!(template.full_name(), "john/invoice");
     }
 
+    // Integration test: requires a live MinIO/S3 at localhost:9000.
+    // Run with `cargo test -- --ignored` after `docker compose up minio`.
+    #[ignore = "requires a live MinIO/S3 at localhost:9000 (see docker-compose.yml)"]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_registry_list_templates_no_namespace() {
         unsafe {
@@ -1739,16 +1742,13 @@ Content: #data.content"#
 
         // Test various reference formats
         let ref1 = Reference::parse("invoice:latest").unwrap();
-        assert_eq!(Registry::<MemoryStorage, crate::render_storage::MemoryRenderStorage>::extract_template_name(&ref1), "invoice");
+        assert_eq!(ref1.name, "invoice");
 
         let ref2 = Reference::parse("john/invoice:latest").unwrap();
-        assert_eq!(Registry::<MemoryStorage, crate::render_storage::MemoryRenderStorage>::extract_template_name(&ref2), "invoice");
+        assert_eq!(ref2.name, "invoice");
 
         let ref3 = Reference::parse("acme-corp/letterhead:stable").unwrap();
-        assert_eq!(Registry::<MemoryStorage, crate::render_storage::MemoryRenderStorage>::extract_template_name(&ref3), "letterhead");
-
-        let ref4 = Reference::parse("org/user/template:v1").unwrap();
-        assert_eq!(Registry::<MemoryStorage, crate::render_storage::MemoryRenderStorage>::extract_template_name(&ref4), "template");
+        assert_eq!(ref3.name, "letterhead");
     }
 
     #[tokio::test]

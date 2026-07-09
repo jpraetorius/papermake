@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use minio::s3::{
-    client::Client,
+    client::{MinioClient, MinioClientBuilder},
     creds::StaticProvider,
     http::BaseUrl,
     segmented_bytes::SegmentedBytes,
@@ -19,13 +19,13 @@ use crate::{BlobStorage, storage::blob_storage::StorageError};
 
 /// S3-compatible storage implementation using MinIO client
 pub struct S3Storage {
-    client: Client,
+    client: MinioClient,
     bucket: String,
 }
 
 impl S3Storage {
     /// Create a new S3 storage instance
-    pub fn new(client: Client, bucket: impl Into<String>) -> Self {
+    pub fn new(client: MinioClient, bucket: impl Into<String>) -> Self {
         Self {
             client,
             bucket: bucket.into(),
@@ -65,13 +65,10 @@ impl S3Storage {
         let creds_provider = StaticProvider::new(&access_key, &secret_key, None);
 
         // Create client
-        let client = Client::new(
-            base_url,
-            Some(Box::new(creds_provider)),
-            None, // Default region
-            None, // No custom HTTP client
-        )
-        .map_err(|e| StorageError::Backend(format!("Failed to create S3 client: {}", e)))?;
+        let client = MinioClientBuilder::new(base_url)
+            .provider(Some(creds_provider))
+            .build()
+            .map_err(|e| StorageError::Backend(format!("Failed to create S3 client: {}", e)))?;
 
         Ok(Self::new(client, bucket))
     }
@@ -79,13 +76,23 @@ impl S3Storage {
     /// Ensure bucket exists (create if it doesn't)
     pub async fn ensure_bucket(&self) -> Result<(), StorageError> {
         // Check if bucket exists
-        match self.client.bucket_exists(&self.bucket).send().await {
+        let bucket_exists_req = self
+            .client
+            .bucket_exists(&self.bucket)
+            .map_err(|e| StorageError::Backend(format!("Invalid bucket name: {}", e)))?
+            .build();
+        match bucket_exists_req.send().await {
             Ok(response) => {
-                if response.exists {
+                if response.exists() {
                     Ok(()) // Bucket exists
                 } else {
                     // Bucket doesn't exist, try to create it
-                    match self.client.create_bucket(&self.bucket).send().await {
+                    let create_bucket_req = self
+                        .client
+                        .create_bucket(&self.bucket)
+                        .map_err(|e| StorageError::Backend(format!("Invalid bucket name: {}", e)))?
+                        .build();
+                    match create_bucket_req.send().await {
                         Ok(_) => Ok(()),
                         Err(e) => Err(StorageError::Backend(format!(
                             "Failed to create bucket '{}': {}",
@@ -124,8 +131,10 @@ impl S3Storage {
         let mut stream = self
             .client
             .list_objects(&self.bucket)
+            .map_err(|e| StorageError::Backend(format!("Invalid list request: {}", e)))?
             .prefix(Some(prefix.to_string()))
             .recursive(true)
+            .build()
             .to_stream()
             .await;
 
@@ -159,6 +168,8 @@ impl BlobStorage for S3Storage {
 
         self.client
             .put_object(&self.bucket, key, bytes)
+            .map_err(|e| StorageError::Backend(format!("Invalid put request for '{}': {}", key, e)))?
+            .build()
             .send()
             .await
             .map_err(|e| StorageError::Backend(format!("Failed to put file '{}': {}", key, e)))?;
@@ -172,6 +183,8 @@ impl BlobStorage for S3Storage {
         let response = self
             .client
             .get_object(&self.bucket, key)
+            .map_err(|e| StorageError::Backend(format!("Invalid get request for '{}': {}", key, e)))?
+            .build()
             .send()
             .await
             .map_err(|e| {
@@ -183,9 +196,16 @@ impl BlobStorage for S3Storage {
                 }
             })?;
 
-        let content = response.content.to_segmented_bytes().await.map_err(|e| {
-            StorageError::Backend(format!("Failed to read file '{}' content: {}", key, e))
-        })?;
+        let content = response
+            .content()
+            .map_err(|e| {
+                StorageError::Backend(format!("Failed to read file '{}' content: {}", key, e))
+            })?
+            .to_segmented_bytes()
+            .await
+            .map_err(|e| {
+                StorageError::Backend(format!("Failed to read file '{}' content: {}", key, e))
+            })?;
 
         Ok(content.to_bytes().to_vec())
     }
@@ -193,7 +213,12 @@ impl BlobStorage for S3Storage {
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
         self.validate_key(key)?;
 
-        match self.client.stat_object(&self.bucket, key).send().await {
+        let stat_req = self
+            .client
+            .stat_object(&self.bucket, key)
+            .map_err(|e| StorageError::Backend(format!("Invalid stat request for '{}': {}", key, e)))?
+            .build();
+        match stat_req.send().await {
             Ok(_) => Ok(true),
             Err(e) => {
                 // Check if it's a not found error
@@ -214,6 +239,10 @@ impl BlobStorage for S3Storage {
 
         self.client
             .delete_object(&self.bucket, key)
+            .map_err(|e| {
+                StorageError::Backend(format!("Invalid delete request for '{}': {}", key, e))
+            })?
+            .build()
             .send()
             .await
             .map_err(|e| {
@@ -301,13 +330,9 @@ mod tests {
 
     #[test]
     fn test_key_validation() {
-        let client = minio::s3::client::Client::new(
-            BaseUrl::from_str("http://localhost:9000").unwrap(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        let client = MinioClientBuilder::new(BaseUrl::from_str("http://localhost:9000").unwrap())
+            .build()
+            .unwrap();
         let storage = S3Storage::new(client, "test-bucket");
 
         // Valid keys

@@ -9,7 +9,8 @@ impl ContentAddress {
         let mut hasher = Sha256::new();
         hasher.update(content);
         let result = hasher.finalize();
-        format!("sha256:{:x}", result)
+        let hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
+        format!("sha256:{}", hex)
     }
 
     /// Generate storage key for blob content

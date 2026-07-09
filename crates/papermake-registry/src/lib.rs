@@ -24,11 +24,11 @@
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a registry with memory storage
 //! let storage = MemoryStorage::new();
-//! let registry = Registry::new(storage);
+//! let registry = Registry::new_storage_only(storage);
 //!
 //! // Create a template bundle
 //! let metadata = TemplateMetadata::new("Invoice Template", "alice@company.com");
-//! let main_content = b"#let data = json.decode(sys.inputs.data)\n= Invoice\nFor: #data.customer_name".to_vec();
+//! let main_content = b"#let data = json(bytes(sys.inputs.data))\n= Invoice\nFor: #data.customer_name".to_vec();
 //! let bundle = TemplateBundle::new(main_content, metadata);
 //!
 //! // Publish the template

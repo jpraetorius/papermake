@@ -6,4 +6,4 @@ edition = "2021"
 [dependencies]
 papermake = { path = "../papermake" }
 tokio = { version = "1", features = ["full"] }
-redis = { version = "0.23", features = ["tokio-comp"] }
+redis = { version = "1.3", features = ["tokio-comp"] }

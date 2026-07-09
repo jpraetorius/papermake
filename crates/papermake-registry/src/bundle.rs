@@ -215,7 +215,7 @@ mod tests {
     }
 
     fn sample_template_content() -> Vec<u8> {
-        br#"#let data = json.decode(sys.inputs.data)
+        br#"#let data = json(bytes(sys.inputs.data))
 
 = Invoice
 
@@ -292,7 +292,7 @@ mod tests {
         let bundle = TemplateBundle::new(content, metadata);
 
         let main_string = bundle.main_typ_string().unwrap();
-        assert!(main_string.contains("#let data = json.decode(sys.inputs.data)"));
+        assert!(main_string.contains("#let data = json(bytes(sys.inputs.data))"));
         assert!(main_string.contains("= Invoice"));
     }
 

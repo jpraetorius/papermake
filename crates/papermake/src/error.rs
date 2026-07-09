@@ -219,7 +219,7 @@ pub fn convert_typst_diagnostic(diagnostic: SourceDiagnostic) -> DiagnosticInfo 
         message: diagnostic.message.to_string(),
         severity: DiagnosticSeverity::Error, // Typst diagnostics are typically errors
         location: None, // Will be filled in by the caller with file context
-        hints: diagnostic.hints.into_iter().map(|h| h.to_string()).collect(),
+        hints: diagnostic.hints.into_iter().map(|h| h.v.to_string()).collect(),
     }
 }
 
@@ -322,6 +322,12 @@ impl From<FileError> for PapermakeError {
                 PapermakeError::FileSystem(FileSystemError::ReadError {
                     path: "<package>".to_string(),
                     reason: format!("Package error: {:?}", pkg_error),
+                })
+            }
+            FileError::Realize(realize_error) => {
+                PapermakeError::FileSystem(FileSystemError::ReadError {
+                    path: "<unknown>".to_string(),
+                    reason: format!("Realization error: {:?}", realize_error),
                 })
             }
         }

@@ -167,7 +167,7 @@ impl RenderStorage for ClickHouseStorage {
     async fn store_render(&self, record: RenderRecord) -> Result<(), RenderStorageError> {
         let ch_record = ClickHouseRenderRecord::from(record);
         
-        let mut insert = self.client.insert("renders")?;
+        let mut insert = self.client.insert::<ClickHouseRenderRecord>("renders").await?;
         insert.write(&ch_record).await?;
         insert.end().await?;
         
