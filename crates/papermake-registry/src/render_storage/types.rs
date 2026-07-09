@@ -89,21 +89,21 @@ impl RenderRecord {
 }
 
 /// Analytics data point for render volume over time
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumePoint {
     pub date: Date,
     pub renders: u64,
 }
 
 /// Analytics data for template render statistics
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateStats {
     pub template_name: String,
     pub total_renders: u64,
 }
 
 /// Analytics data point for average render duration over time
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurationPoint {
     pub date: Date,
     pub avg_duration_ms: f64,

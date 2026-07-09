@@ -2,6 +2,10 @@
 
 pub mod types;
 
+pub mod layout;
+pub mod s3_buffered;
+pub mod summary;
+
 #[cfg(feature = "clickhouse")]
 pub mod clickhouse;
 
