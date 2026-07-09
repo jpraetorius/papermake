@@ -39,12 +39,12 @@ docker-compose up -d
 This starts:
 - **Papermake Server** on `localhost:8080`
 - **MinIO** (S3-compatible storage) on `localhost:9000`, inspectable at `http://localhost:9001`
-- **ClickHouse** (analytics) on `localhost:8123`
+- **Papermake Worker** (aggregates analytics into S3, prunes expired outputs)
 
 ### Manual Setup
 
 ```bash
-# Copy and update .env with your S3 and Clickhouse credentials
+# Copy and update .env with your S3 credentials
 cp .env.example .env
 
 # Run the server
@@ -123,7 +123,7 @@ curl localhost:8080/renders?limit=10
 curl localhost:8080/analytics/templates
 
 # Performance over time
-curl localhost:8080/analytics/duration?days=30
+curl localhost:8080/api/analytics/performance?days=30
 ```
 
 ## 🏗️ Architecture

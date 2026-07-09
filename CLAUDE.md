@@ -265,17 +265,29 @@ let pdf_bytes = registry.render(
 
 ## Tech Stack & Decisions
 - **Framework**: Axum/Tokio for async HTTP server
-- **Storage**: S3 for blobs (templates, data, PDFs) + ClickHouse for render analytics
+- **Storage**: S3 for **everything** — blobs (templates/assets/manifests, content-addressed) and render outputs (`renders/{render_id}/{meta.json,pdf,data}`, keyed by render_id). No always-on database.
+- **Analytics**: **buffered-S3** — each server instance stages `RenderRecord`s in memory and flushes them to S3 as NDJSON (`analytics/raw/dt=…`); the **papermake-worker** binary aggregates all raw into `analytics/agg/summary.json` and prunes expired outputs. Queries are always answered from `summary.json` (globally eventually consistent). ClickHouse has been removed.
+- **UI**: server-side-rendered (maud + vendored KelpUI + a tiny htmx sprinkle). No SPA/build step. (The old Next.js `./webui` was deleted.)
 - **Auth**: None initially, optional API keys later
 - **Namespaces**: Simplified `name:tag` format (no user/org prefixes)
 - **Config**: Environment variables only
-- **Deployment**: Docker container
+- **Deployment**: Docker containers (server + worker + MinIO)
+
+### Analytics/output storage design (see `docs/analytics-storage-and-ssr.md`)
+- **Artifacts** are keyed by `render_id`: `get_render_pdf` reads `renders/{id}/meta.json` (missing → 404, `success=false` → 422/`RenderFailed`, else serves `renders/{id}/pdf`); `get_render_data` is a direct blob read. Immediate, flush-independent.
+- **Records** flow: `render_and_store` → in-memory buffer → periodic `flush()` → `analytics/raw` NDJSON + an `expiry/dt=<expiry-date>/…` index → worker `aggregator::run` → `summary.json`; worker `retention::prune` deletes due-partition artifacts and old raw.
+- **Retention** precedence: per-render (`retain_days` on the render request) → per-template (`TemplateMetadata.retain_days`) → global (`RENDER_RETENTION_DAYS`); `0` = keep forever.
+
+### Environment variables
+- Server/worker S3: `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
+- Server buffered analytics/retention: `PAPERMAKE_INSTANCE_ID`, `FLUSH_INTERVAL_SECONDS`, `FLUSH_MAX_RECORDS`, `RENDER_RETENTION_DAYS`.
+- Worker: `WORKER_INTERVAL_SECONDS`, `ANALYTICS_RETENTION_DAYS`.
 
 ## Phase 1: Basic HTTP Server
 - [x] Set up Axum server with basic routing
-- [x] Add environment variable configuration (S3 + ClickHouse credentials)
+- [x] Add environment variable configuration (S3 credentials + analytics/retention)
 - [x] Implement health check endpoint `GET /health`
-- [x] Add startup validation (required S3/ClickHouse connectivity)
+- [x] Add startup validation (required S3 connectivity)
 - [x] Basic error handling and JSON response structure
 
 ## Phase 2: Template Management
@@ -284,42 +296,24 @@ let pdf_bytes = registry.render(
 - [x] Implement `GET /templates` - list all templates with metadata
 - [x] Implement `GET /templates/{name}/tags` - list tags for template
 - [x] Implement `GET /templates/{reference}` - get template metadata
+- [x] Implement `GET /templates/{reference}/source` - entrypoint source for the editor
 
 ## Phase 3: Render Functionality
-- [x] Set up ClickHouse connection and table creation
-```sql
-CREATE TABLE renders (
-    render_id UUID,
-    timestamp DateTime64(3),
-    template_ref String,
-    manifest_hash String,
-    data_hash String,
-    pdf_hash String,
-    success Bool,
-    duration_ms UInt32,
-    pdf_size_bytes UInt32,
-    error String,
-    template_name String,
-    template_tag String
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(timestamp)
-ORDER BY (timestamp, template_name);
-```
-- [x] Implement `POST /render/{reference}` endpoint
+- [x] Buffered-S3 render store (`S3BufferedRenderStorage`) + worker aggregation to `summary.json`
+- [x] Implement `POST /render/{reference}` endpoint (optional `retain_days` override)
 
 ## Phase 4: Render History & Analytics
-- [ ] Implement `GET /renders?limit=10` - latest N renders from ClickHouse
-- [ ] Implement `GET /renders/{render_id}/data` - fetch original input data from S3
-- [x] Implement `GET /renders/{render_id}/pdf` - fetch rendered PDF from S3
-- [ ] Add basic analytics endpoints:
-  - [ ] `GET /analytics/volume?days=30` - render volume over time
-  - [ ] `GET /analytics/templates` - total renders per template
-  - [ ] `GET /analytics/performance?days=30` - average duration over time
+- [x] `GET /renders?limit=N` - recent renders (from the aggregate)
+- [x] `GET /renders/{render_id}/pdf` - fetch rendered PDF from S3 (by render_id)
+- [x] Analytics endpoints backed by `summary.json`:
+  - [x] `GET /analytics/volume?days=30` - render volume over time
+  - [x] `GET /analytics/templates` - total renders per template
+  - [x] `GET /analytics/performance?days=30` - average duration over time
 
 ## Phase 5: Docker & Deployment
-- [ ] Create Dockerfile with multi-stage build
-- [x] Add docker-compose.yml with ClickHouse and MinIO for local dev
-- [x] Document required environment variables:
+- [x] Multi-stage Dockerfiles (server + worker)
+- [x] docker-compose.yml with MinIO + papermake-worker for local dev (no ClickHouse)
+- [x] Document required environment variables (see above)
 - [ ] Add startup scripts and health checks
 
 ## Phase 6: Error Handling & Observability
@@ -329,15 +323,15 @@ ORDER BY (timestamp, template_name);
 - [ ] Version tag immutability enforcement (409 Conflict for duplicate versions)
 
 ## Phase 7: Testing & Documentation
-- [x] Integration tests with test ClickHouse and S3 (partially in papermake-registry)
+- [x] Integration tests with test S3/MinIO (partially in papermake-registry)
 - [ ] API documentation (OpenAPI/Swagger)
 - [ ] Example templates and curl commands
 - [ ] Performance testing under load
 
 **Dependencies:**
 - `papermake-registry` crate (completed phases 1-4)
-- ClickHouse instance
 - S3-compatible storage (MinIO for dev)
+- `papermake-worker` (aggregator + pruner)
 
 ## HTTP API Endpoints
 
@@ -350,19 +344,28 @@ ORDER BY (timestamp, template_name);
 ### Route Structure
 ```
 /health (GET)
+/ (GET) - SSR dashboard
+/templates/{reference} (GET) - SSR template detail (editor + test render + publish)
+/ui/templates/{name}/render (POST) - htmx test-render fragment
+/ui/templates/{name}/publish (POST) - publish form -> redirect
+/assets/* - vendored kelp.css / htmx.min.js (ServeDir)
 /api/
 ├── templates/
 │   ├── / (GET) - List all templates
 │   ├── /{name}/publish (POST) - Publish template (multipart)
 │   ├── /{name}/publish-simple (POST) - Publish template (JSON)
 │   ├── /{name}/tags (GET) - List template tags
-│   └── /{reference} (GET) - Get template metadata
+│   ├── /{reference} (GET) - Get template metadata
+│   └── /{reference}/source (GET) - Entrypoint source (text/plain)
 ├── render/
-│   └── /{reference} (POST) - Render template to PDF
+│   └── /{reference} (POST) - Render template to PDF (optional retain_days)
 ├── renders/
+│   ├── / (GET) - List recent renders
 │   └── /{render_id}/pdf (GET) - Download rendered PDF
 └── analytics/
-    (empty - no endpoints implemented)
+    ├── /volume?days=N (GET) - render volume over time
+    ├── /templates (GET) - total renders per template
+    └── /performance?days=N (GET) - average duration over time
 ```
 
 ### 1. Health Check
@@ -425,12 +428,15 @@ ORDER BY (timestamp, template_name);
   - Response: PDF file with `application/pdf` content-type
 
 ### 5. Analytics (`/api/analytics`)
-- **Status**: Placeholder router - no endpoints implemented yet
-- **Planned**: Volume metrics, template analytics, performance metrics
+- Backed by the S3 aggregate (`summary.json`); refreshed by the worker each cycle.
+- **`GET /api/analytics/volume?days=N`** - render volume over time
+- **`GET /api/analytics/templates`** - total renders per template
+- **`GET /api/analytics/performance?days=N`** - average render duration over time
 
 ### Error Handling
 - **400 Bad Request**: Invalid input or malformed requests
-- **404 Not Found**: Template or resource not found
+- **404 Not Found**: Template or resource not found (incl. unknown/pruned render_id)
+- **422 Unprocessable Entity**: PDF requested for a render that failed
 - **409 Conflict**: Version tag conflicts (planned)
 - **500 Internal Server Error**: Server or storage errors
 - All errors return JSON with error details
