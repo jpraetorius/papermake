@@ -6,3 +6,5 @@ pub mod render;
 // Retrieve renders
 pub mod renders;
 pub mod templates;
+// Server-side-rendered UI
+pub mod ui;

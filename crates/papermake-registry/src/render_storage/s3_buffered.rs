@@ -223,6 +223,10 @@ impl<B: BlobStorage + 'static> RenderStorage for S3BufferedRenderStorage<B> {
             .filter(|d| d.date >= cutoff)
             .collect())
     }
+
+    async fn summary(&self) -> Result<Summary, RenderStorageError> {
+        self.load_summary().await
+    }
 }
 
 #[cfg(test)]

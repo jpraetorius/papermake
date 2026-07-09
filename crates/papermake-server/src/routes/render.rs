@@ -19,6 +19,10 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 pub struct RenderRequest {
     pub data: serde_json::Value,
+    /// Per-render retention override in days (`0` = keep forever). Falls back to
+    /// the template default, then the global default, when absent.
+    #[serde(default)]
+    pub retain_days: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,7 +40,7 @@ pub async fn render_template(
 ) -> ApiResult<Json<ApiResponse<RenderResponse>>> {
     let result = state
         .registry
-        .render_and_store(&reference, &request.data)
+        .render_and_store_with_retention(&reference, &request.data, request.retain_days)
         .await
         .map_err(|e| ApiError::RenderFailed(e.to_string()))?;
 

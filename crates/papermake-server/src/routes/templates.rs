@@ -7,7 +7,10 @@ use crate::{
 };
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Multipart, Path, Query, State},
+    http::header::CONTENT_TYPE,
+    response::Response,
     routing::{get, post},
 };
 use papermake_registry::{
@@ -78,7 +81,21 @@ pub fn router() -> Router<AppState> {
         .route("/{name}/publish", post(publish_template))
         .route("/{name}/publish-simple", post(publish_template_simple))
         .route("/{name}/tags", get(list_template_tags))
+        .route("/{reference}/source", get(get_template_source))
         .route("/{reference}", get(get_template_metadata))
+}
+
+/// Get the entrypoint (`main.typ`) source for a template reference, for the
+/// editor. GET /api/templates/{reference}/source (text/plain)
+pub async fn get_template_source(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+) -> Result<Response<Body>> {
+    let source = state.registry.get_template_source(&reference).await?;
+    Ok(Response::builder()
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from(source))
+        .unwrap())
 }
 
 /// List all templates in the registry

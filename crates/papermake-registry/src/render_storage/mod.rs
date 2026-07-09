@@ -178,6 +178,10 @@ pub trait RenderStorage: Send + Sync {
         &self,
         days: u32,
     ) -> Result<Vec<DurationPoint>, RenderStorageError>;
+
+    /// Get the full aggregated analytics summary (totals, rollups, recent lists).
+    /// Backs the SSR dashboard in a single read.
+    async fn summary(&self) -> Result<summary::Summary, RenderStorageError>;
 }
 
 /// In-memory render storage implementation for testing
@@ -316,5 +320,14 @@ impl RenderStorage for MemoryRenderStorage {
 
         result.sort_by_key(|a| a.date);
         Ok(result)
+    }
+
+    async fn summary(&self) -> Result<summary::Summary, RenderStorageError> {
+        let records = self.records.read().await;
+        Ok(summary::compute_summary(
+            &records,
+            aggregator::DEFAULT_RECENT_N,
+            time::OffsetDateTime::now_utc(),
+        ))
     }
 }

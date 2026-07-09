@@ -728,6 +728,68 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         manifest.metadata.retain_days
     }
 
+    /// Fetch the entrypoint (`main.typ`) source for a template reference, for
+    /// the editor. Resolves reference → manifest → entrypoint blob.
+    pub async fn get_template_source(&self, reference: &str) -> Result<String, RegistryError> {
+        let manifest_hash = self.resolve(reference).await?;
+        let manifest_key = ContentAddress::manifest_key(&manifest_hash);
+        let manifest_bytes = self.storage.get(&manifest_key).await.map_err(|e| {
+            RegistryError::Storage(StorageError::backend(format!(
+                "Failed to load manifest {}: {}",
+                manifest_hash, e
+            )))
+        })?;
+        let manifest = Manifest::from_bytes(&manifest_bytes).map_err(|e| {
+            RegistryError::ContentAddressing(crate::error::ContentAddressingError::manifest_error(
+                e.to_string(),
+            ))
+        })?;
+        let entrypoint_hash = manifest.entrypoint_hash().ok_or_else(|| {
+            RegistryError::Template(crate::error::TemplateError::invalid(
+                "Manifest missing entrypoint hash",
+            ))
+        })?;
+        let bytes = self
+            .storage
+            .get(&ContentAddress::blob_key(entrypoint_hash))
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        String::from_utf8(bytes).map_err(|e| {
+            RegistryError::Template(crate::error::TemplateError::invalid(format!(
+                "Entrypoint file is not valid UTF-8: {}",
+                e
+            )))
+        })
+    }
+
+    /// Fetch the full aggregated analytics summary (for the SSR dashboard).
+    pub async fn render_summary(
+        &self,
+    ) -> Result<crate::render_storage::summary::Summary, RegistryError> {
+        let render_storage = self.render_storage.as_ref().ok_or_else(|| {
+            RegistryError::RenderStorage(RenderStorageError::Connection(
+                "No render storage configured".to_string(),
+            ))
+        })?;
+        Ok(render_storage.summary().await?)
+    }
+
+    /// List recent renders for a specific template (from the aggregate).
+    pub async fn list_template_renders(
+        &self,
+        template_name: &str,
+        limit: u32,
+    ) -> Result<Vec<RenderRecord>, RegistryError> {
+        let render_storage = self.render_storage.as_ref().ok_or_else(|| {
+            RegistryError::RenderStorage(RenderStorageError::Connection(
+                "No render storage configured".to_string(),
+            ))
+        })?;
+        Ok(render_storage
+            .list_template_renders(template_name, limit)
+            .await?)
+    }
+
     /// Persist a render record as its `renders/{id}/meta.json` blob.
     async fn put_render_meta(&self, record: &RenderRecord) -> Result<(), RegistryError> {
         let meta_bytes = serde_json::to_vec(record)

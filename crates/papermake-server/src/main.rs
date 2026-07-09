@@ -8,7 +8,7 @@ use papermake_registry::{Registry, S3BufferedRenderStorage, S3Storage};
 use serde_json::{Value, json};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::{error, info};
 
 mod config;
@@ -132,6 +132,10 @@ fn create_router(state: AppState) -> Router {
         .route("/health", get(health_check))
         // API routes
         .nest("/api", api_routes())
+        // Server-side-rendered UI (dashboard, template detail, htmx endpoints)
+        .merge(routes::ui::router())
+        // Vendored static assets (kelp.css, htmx.min.js)
+        .nest_service("/assets", ServeDir::new("crates/papermake-server/assets"))
         // Middleware
         .layer(
             ServiceBuilder::new()
