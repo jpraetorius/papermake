@@ -33,11 +33,8 @@ services:
     restart: unless-stopped
     networks:
       - papermake
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
-      interval: 2s
-      timeout: 10s
-      retries: 3
+    # No container healthcheck: the distroless runtime image has no shell/curl.
+    # Probe from the host instead: curl -f http://localhost:3000/health
 
   # Papermake Worker - aggregates raw analytics into summary.json and prunes
   # expired outputs. One aggregator regardless of render-instance count.

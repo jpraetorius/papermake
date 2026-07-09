@@ -20,28 +20,13 @@ RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     cargo build --locked --release -p papermake-worker && \
     cp ./target/release/papermake-worker /bin/worker
 
-FROM debian:bookworm-slim AS final
-ARG UID=10001
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl3 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN adduser \
-    --disabled-password \
-    --gecos "" \
-    --home "/nonexistent" \
-    --shell "/sbin/nologin" \
-    --no-create-home \
-    --uid "${UID}" \
-    appuser
-
-USER appuser
+# Distroless runtime: ships glibc, libssl3, ca-certificates, and a nonroot
+# user (uid 65532) — no shell, no package manager, nothing else. The `cc`
+# variant adds libgcc/libstdc++ needed by the dynamically-linked Rust binary.
+FROM gcr.io/distroless/cc-debian12:nonroot AS final
 
 # Copy the executable from the "build" stage.
-COPY --from=build /bin/worker /bin/
+COPY --from=build /bin/worker /app/worker
 
 # What the container should run when it is started.
-CMD ["/bin/worker"]
+CMD ["/app/worker"]
