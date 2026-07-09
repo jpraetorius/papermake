@@ -6,6 +6,7 @@
 use axum::{
     Router,
     extract::{Form, Path, State},
+    http::header::{CACHE_CONTROL, CONTENT_TYPE},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -26,6 +27,35 @@ pub fn router() -> Router<AppState> {
         .route("/templates/{reference}", get(template_detail))
         .route("/ui/templates/{name}/render", post(ui_render))
         .route("/ui/templates/{name}/publish", post(ui_publish))
+        // Vendored assets embedded in the binary (no filesystem dependency —
+        // works under distroless and regardless of the working directory).
+        .route("/assets/kelp.css", get(kelp_css))
+        .route("/assets/htmx.min.js", get(htmx_js))
+}
+
+/// Vendored KelpUI stylesheet (kelpui@1.17.2), embedded at compile time.
+const KELP_CSS: &[u8] = include_bytes!("../../assets/kelp.css");
+/// Vendored htmx (htmx@4.0.0-beta5), embedded at compile time.
+const HTMX_JS: &[u8] = include_bytes!("../../assets/htmx.min.js");
+
+async fn kelp_css() -> impl IntoResponse {
+    (
+        [
+            (CONTENT_TYPE, "text/css; charset=utf-8"),
+            (CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        KELP_CSS,
+    )
+}
+
+async fn htmx_js() -> impl IntoResponse {
+    (
+        [
+            (CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        HTMX_JS,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +497,13 @@ mod tests {
         assert!(html.contains("hx-post=\"/ui/templates/invoice/render\""));
         assert!(html.contains("= Hello")); // source prefilled
         assert!(html.contains("/ui/templates/invoice/publish"));
+    }
+
+    #[test]
+    fn test_vendored_assets_are_embedded() {
+        // Non-empty and recognizably the right files (compile-time embedded).
+        assert!(KELP_CSS.starts_with(b"/*! kelpui"));
+        assert!(HTMX_JS.starts_with(b"var htmx"));
     }
 
     #[test]

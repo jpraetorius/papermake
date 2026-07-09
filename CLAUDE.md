@@ -348,7 +348,7 @@ let pdf_bytes = registry.render(
 /templates/{reference} (GET) - SSR template detail (editor + test render + publish)
 /ui/templates/{name}/render (POST) - htmx test-render fragment
 /ui/templates/{name}/publish (POST) - publish form -> redirect
-/assets/* - vendored kelp.css / htmx.min.js (ServeDir)
+/assets/kelp.css, /assets/htmx.min.js - vendored assets embedded in the binary
 /api/
 ├── templates/
 │   ├── / (GET) - List all templates
