@@ -2,180 +2,263 @@
 
 **Content-addressable template registry with server-side rendering for [Typst](https://typst.app/) documents.**
 
-Turn your Typst templates into APIs. Publish once, render anywhere.
+Turn your Typst templates into APIs. Publish once, render anywhere — no local Typst install, no database to operate.
 
 ```bash
-# Publish a template
-curl -X POST http://localhost:8080/templates/invoice/publish?tag=latest \
-  -F "main_typ=@invoice.typ" \
-  -F "schema=@schema.json" \
-  -F "metadata={\"name\":\"Invoice\",\"author\":\"you@company.com\"}"
+# 1. Bring up the stack
+docker compose up -d
 
-# Render with data → PDF
-curl -X POST http://localhost:8080/render/invoice:latest \
-  -H "Content-Type: application/json" \
-  -d '{"company": "Acme Corp", "amount": 1500}' \
-  --output invoice.pdf
+# 2. Publish a template
+curl -X POST "http://localhost:3000/api/templates/invoice/publish-simple?tag=latest" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "main_typ": "#let data = json(bytes(sys.inputs.data))\n= Invoice #data.number\nBill to: #data.customer",
+        "metadata": { "name": "Invoice", "author": "you@company.com" }
+      }'
+
+# 3. Render it with data (returns a render_id)
+curl -X POST "http://localhost:3000/api/render/invoice:latest" \
+  -H 'Content-Type: application/json' \
+  -d '{"data": {"number": "INV-001", "customer": "Acme Corp"}}'
+
+# 4. Download the PDF by render_id
+curl "http://localhost:3000/api/renders/<render_id>/pdf" --output invoice.pdf
 ```
+
+Or just open the web UI at **http://localhost:3000/** and publish / test-render in the browser.
 
 ## 🚀 Why Papermake?
 
-- **🏗️ Template as Code** - Version your document templates like software
-- **⚡ Server-side Rendering** - No local Typst installation needed
-- **🔒 Content-Addressable** - Immutable, deduplicated storage (like Git for documents)
-- **📊 Built-in Analytics** - Track usage, performance, and errors
-- **🐳 Self-hostable** - Deploy anywhere with Docker
+- **🏗️ Templates as code** — version document templates like software; immutable, deduplicated storage (Git-style content addressing).
+- **⚡ Server-side rendering** — the Typst engine runs in the server; clients only send data.
+- **🗄️ S3 is the only dependency** — templates, rendered PDFs, input data, and analytics all live in S3. No always-on database.
+- **📊 Built-in analytics** — every render is logged; a background worker rolls it up into per-template volume, success rate, and p90 latency.
+- **🧹 Retention built in** — outputs expire on a schedule (per-render, per-template, or global) and are pruned automatically.
+- **🖥️ Server-rendered UI** — a dependency-light dashboard + template editor (KelpUI + a touch of htmx), no SPA build step.
+- **🐳 Self-hostable** — `docker compose up` and you're running.
 
-## 🏃‍♂️ Quick Start
+## 🏃 Quick Start
 
-### Using Docker Compose
+### Bring up the stack (Docker Compose)
 
 ```bash
 git clone https://github.com/rkstgr/papermake
 cd papermake
-docker-compose up -d
+docker compose up -d      # older Docker: docker-compose up -d
 ```
 
-This starts:
-- **Papermake Server** on `localhost:8080`
-- **MinIO** (S3-compatible storage) on `localhost:9000`, inspectable at `http://localhost:9001`
-- **Papermake Worker** (aggregates analytics into S3, prunes expired outputs)
+This starts three services on the `papermake` network:
 
-### Manual Setup
+| Service | What it is | Where |
+|---|---|---|
+| **papermake-server** | HTTP API + server-rendered UI | http://localhost:3000 |
+| **papermake-worker** | Aggregates analytics → `summary.json`, prunes expired outputs | (no exposed port) |
+| **minio** | S3-compatible object storage | API `:9000`, console http://localhost:9001 (`minioadmin` / `minioadmin`) |
+
+The server creates its bucket on startup. Check health with `curl http://localhost:3000/health`, then open **http://localhost:3000/** for the dashboard.
+
+To follow logs or tear down:
 
 ```bash
-# Copy and update .env with your S3 credentials
-cp .env.example .env
+docker compose logs -f papermake-server papermake-worker
+docker compose down          # add -v to also wipe MinIO data
+```
 
-# Run the server
+### Run from source
+
+```bash
+# 1. Start just MinIO (Docker or Podman)
+docker compose up -d minio         # or: podman-compose up -d minio
+
+# 2. Configure the environment
+cp .env.example .env               # defaults already point at local MinIO
+
+# 3. Run the server and (optionally) the worker
 cargo run -r -p papermake-server
+cargo run -r -p papermake-worker   # in a second shell, for analytics rollups
+```
+
+## 📝 Writing a template
+
+A template is a Typst file plus metadata (and optionally a JSON schema and extra asset files). Input data is injected as JSON on `sys.inputs.data`; the idiomatic first line decodes it into `data`:
+
+```typst
+// invoice.typ
+#let data = json(bytes(sys.inputs.data))
+
+= Invoice #data.number
+
+*Bill to:* #data.customer.name \
+*Amount:* $#data.amount
 ```
 
 ## 📚 Usage
 
-### Publishing Templates
+All API routes are under `/api`. Health (`/health`) and the UI (`/`, `/templates/{name}`) are served at the root.
 
-Templates consist of:
-- `main.typ` - Your Typst template file
-- files: Images, fonts, other files (optional)
-- Metadata - Name, author, description
+### Publish a template
 
-```typst
-// invoice.typ
-// #data is automatically populated with the input data
-= Invoice #data.number
-
-*Bill To:* #data.customer.name
-*Amount:* $#data.amount
-```
+Simple JSON publish (inline source):
 
 ```bash
-curl -X POST localhost:8080/templates/invoice/publish?tag=latest \
-  -F "main_typ=@invoice.typ" \
-  -F "files[]=@logo.png" \
-  -F "metadata={\"name\":\"Professional Invoice\",\"author\":\"finance@company.com\"}"
-
-# simple publish endpoint
-curl -X POST http://localhost:3000/api/templates/invoice/publish-simple \
+curl -X POST "http://localhost:3000/api/templates/invoice/publish-simple?tag=latest" \
   -H 'Content-Type: application/json' \
   -d '{
-  "main_typ": "#set text(font: \"Arial\")\nhello #data.name",
-  "metadata": {
-    "author": "dev@bigbank.com"
-    "name": "Customer Invoice",
-  }
-}'
+    "main_typ": "#let data = json(bytes(sys.inputs.data))\n= Invoice #data.number",
+    "metadata": { "name": "Customer Invoice", "author": "dev@company.com" }
+  }'
 ```
 
-Returns
+Multipart publish (files from disk, optional schema and extra assets):
+
+```bash
+curl -X POST "http://localhost:3000/api/templates/invoice/publish?tag=latest" \
+  -F "main_typ=@invoice.typ" \
+  -F "schema=@schema.json" \
+  -F "files[assets/logo.png]=@logo.png" \
+  -F 'metadata={"name":"Professional Invoice","author":"finance@company.com"}'
+```
+
+Both return the manifest hash and reference:
+
 ```json
 {
   "data": {
     "message": "Template 'invoice:latest' published successfully",
-    "manifest_hash": "sha256:8e0e58437230ce87a69a77edec3a24412a2f656bc42456f7f87c61d5de1ad5f9",
+    "manifest_hash": "sha256:8e0e5843…",
     "reference": "invoice:latest"
   },
   "message": "Template published with reference 'invoice:latest'"
 }
 ```
 
-### Rendering Documents
+> **Tip:** set a per-template retention default by adding `"retain_days": 7` to `metadata` (`0` = keep forever).
+
+### Render a document
+
+Rendering is a two-step flow: `POST /api/render/...` runs the render and returns a `render_id`; you then fetch the PDF by id. (The PDF is written to S3 at render time, so it's fetchable immediately.)
 
 ```bash
-# Render to PDF
-curl -X POST localhost:8080/render/invoice:latest \
-  -H "Content-Type: application/json" \
+# Render — note the data goes under a "data" key
+curl -X POST "http://localhost:3000/api/render/invoice:latest" \
+  -H 'Content-Type: application/json' \
   -d '{
-    "number": "INV-001",
-    "customer": {"name": "Acme Corp"},
-    "amount": 1500
-  }' \
-  --output invoice.pdf
+        "data": { "number": "INV-001", "customer": {"name": "Acme Corp"}, "amount": 1500 },
+        "retain_days": 14
+      }'
+# → { "data": { "render_id": "0192…", "pdf_hash": "sha256:…", "duration_ms": 42 } }
+
+# Download the rendered PDF
+curl "http://localhost:3000/api/renders/0192…/pdf" --output invoice.pdf
 ```
 
-### Analytics & History
+`retain_days` is optional and overrides the template/global default for this render. A PDF request for a render that **failed** returns `422`; an unknown or already-pruned `render_id` returns `404`.
+
+### Analytics & history
+
+Analytics are answered from the S3 aggregate (`summary.json`) that the worker refreshes each cycle, so they're eventually consistent across server instances.
 
 ```bash
-# Recent renders
-curl localhost:8080/renders?limit=10
-
-# Template usage stats
-curl localhost:8080/analytics/templates
-
-# Performance over time
-curl localhost:8080/api/analytics/performance?days=30
+curl "http://localhost:3000/api/renders?limit=10"                 # recent renders
+curl "http://localhost:3000/api/analytics/templates"              # total renders per template
+curl "http://localhost:3000/api/analytics/volume?days=30"         # render volume over time
+curl "http://localhost:3000/api/analytics/performance?days=30"    # avg duration over time
 ```
+
+### Web UI
+
+- **`/`** — dashboard: 24h totals (count, success rate, p90 latency), volume sparkline, per-template bars, recent renders, template list.
+- **`/templates/{name}`** — template detail: metadata/tags, an editor prefilled with the source, a **Test Render** button (htmx-powered, shows the PDF inline in an `<iframe>` with no page reload), and a publish form.
+
+## 🗄️ How storage works
+
+Two decoupled concerns, both on S3:
+
+- **Artifacts** are keyed by `render_id`: `renders/{id}/meta.json`, `renders/{id}/pdf`, `renders/{id}/data`. By-id lookups are direct blob reads — immediate, no database.
+- **Analytics** flow: each server buffers `RenderRecord`s in memory → flushes NDJSON to `analytics/raw/` on an interval/size threshold → the worker aggregates all raw into `analytics/agg/summary.json` and writes an `expiry/` index → the worker prunes expired outputs and old raw.
+
+Templates, assets, and manifests keep **content addressing** (SHA-256) for dedup.
+
+## ⚙️ Configuration
+
+All configuration is via environment variables (see [`.env.example`](.env.example)).
+
+**Server & worker (S3):** `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`
+
+**Server:** `HOST`, `PORT`, `PAPERMAKE_INSTANCE_ID`, `FLUSH_INTERVAL_SECONDS`, `FLUSH_MAX_RECORDS`, `RENDER_RETENTION_DAYS`
+
+**Worker:** `WORKER_INTERVAL_SECONDS`, `ANALYTICS_RETENTION_DAYS`
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌────────────────┐
-│   Templates     │───▶│   Papermake      │───▶│    Registry    │
-│   (Multipart)   │    │   Server         │    │   (S3 + CH)    │
-└─────────────────┘    └──────────────────┘    └────────────────┘
-                                │
-                                ▼
-                       ┌──────────────────┐
-                       │   Typst Engine   │
-                       │   (Rendering)    │
-                       └──────────────────┘
+                        ┌──────────────────────────────┐
+  data ───▶  POST /api/render                          │
+                        │  papermake-server            │
+  browser ─▶  GET /  ───┤   • Typst engine (render)    │
+                        │   • SSR UI (maud + htmx)      │
+                        │   • buffers RenderRecords     │
+                        └───────────────┬──────────────┘
+                                        │ put artifacts + flush NDJSON
+                                        ▼
+                        ┌──────────────────────────────┐
+                        │  S3 / MinIO                   │
+                        │   renders/{id}/{meta,pdf,data}│
+                        │   analytics/raw · agg · expiry│
+                        │   blobs · manifests · refs    │
+                        └───────────────▲──────────────┘
+                                        │ aggregate + prune
+                        ┌───────────────┴──────────────┐
+                        │  papermake-worker             │
+                        │   summary.json + retention    │
+                        └──────────────────────────────┘
 ```
 
-- **Content-Addressable Storage** - Templates stored by hash, deduplicated automatically
-- **Immutable Versions** - `invoice:v1.0.0` never changes, `invoice:latest` is mutable
-- **Render Tracking** - Every render logged with input/output hashes for full auditability
+Crates:
+- **`papermake`** — Typst compilation engine with a virtual filesystem.
+- **`papermake-registry`** — content-addressable storage, rendering, buffered-S3 analytics, aggregator, retention.
+- **`papermake-server`** — HTTP API + server-rendered UI.
+- **`papermake-worker`** — analytics aggregator + output pruner.
 
-## 🛠️ API Reference
+## 🛠️ API reference
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/templates/{name}/publish?tag={tag}` | Upload template |
-| `GET` | `/templates` | List all templates |
-| `GET` | `/templates/{name}/tags` | List template versions |
-| `POST` | `/render/{name}:{tag}` | Render template to PDF |
-| `GET` | `/renders?limit=N` | Recent render history |
-| `GET` | `/renders/{id}/pdf` | Download rendered PDF |
-| `GET` | `/analytics/volume?days=N` | Render volume over time |
+| `GET`  | `/health` | Health check |
+| `GET`  | `/` | Dashboard UI |
+| `GET`  | `/templates/{name}` | Template detail UI (editor, test render, publish) |
+| `GET`  | `/api/templates` | List templates (`?limit=&offset=`) |
+| `POST` | `/api/templates/{name}/publish?tag={tag}` | Publish (multipart) |
+| `POST` | `/api/templates/{name}/publish-simple?tag={tag}` | Publish (JSON) |
+| `GET`  | `/api/templates/{name}/tags` | List a template's tags |
+| `GET`  | `/api/templates/{reference}` | Template metadata |
+| `GET`  | `/api/templates/{reference}/source` | Entrypoint source (`text/plain`) |
+| `POST` | `/api/render/{reference}` | Render → `{ render_id, pdf_hash, duration_ms }` |
+| `GET`  | `/api/renders?limit=N&offset=M` | Recent render history |
+| `GET`  | `/api/renders/{render_id}/pdf` | Download rendered PDF |
+| `GET`  | `/api/analytics/volume?days=N` | Render volume over time |
+| `GET`  | `/api/analytics/templates` | Total renders per template |
+| `GET`  | `/api/analytics/performance?days=N` | Average render duration over time |
 
+## 🎯 Use cases
 
-## 🎯 Use Cases
+- **Document generation APIs** — invoices, contracts, reports
+- **Transactional documents** — receipts, tickets, certificates, labels
+- **Report automation** — scheduled financial / analytics reports
 
-- **📑 Document Generation APIs** - Invoices, contracts, reports
-- **📧 Email Templates** - Marketing campaigns, notifications
-- **📋 Form Processing** - Applications, certificates, labels
-- **📊 Report Automation** - Analytics dashboards, financial reports
-
-
-## 🤝 Contributing
+## 🤝 Development
 
 ```bash
-git clone https://github.com/rkstgr/papermake
-cd papermake
-cargo test
+# Unit + doc tests (no infra required — uses in-memory storage)
+cargo test --workspace
+
+# Formatting and lints
+cargo fmt --all
+cargo clippy --workspace --all-targets
+
+# Integration tests that need live S3 run against MinIO:
+#   docker compose up -d minio      # or: podman-compose up -d minio
+cargo test --workspace -- --ignored
 ```
 
 Built with Rust 🦀 • Powered by [Typst](https://typst.app/) • Inspired by Docker registry & Git's content addressing
-
----
-
-**Documentation** (coming soon)
