@@ -2,6 +2,7 @@
 
 pub mod types;
 
+pub mod aggregator;
 pub mod layout;
 pub mod s3_buffered;
 pub mod summary;
