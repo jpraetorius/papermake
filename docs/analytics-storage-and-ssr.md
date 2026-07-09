@@ -16,7 +16,10 @@ The render-analytics stack currently requires **two heavy moving parts** that ar
 
 ## Confirmed decisions
 - Aggregator runs as the **papermake-worker** binary (one aggregator regardless of render-instance count).
-- **Outputs are keyed by `render_id`, not by content hash.** Store rendered PDFs/input data at `renders/{render_id}/pdf` and `renders/{render_id}/data`. By-id lookups (`/renders/{id}/pdf|data`) become a **direct `blob.get`** — no record lookup, no UUIDv7 date-decoding, no partition scan. (Content-addressing is kept only for templates/assets, where dedup actually helps.)
+- **Outputs are keyed by `render_id`, not by content hash.** Store each render's artifacts under `renders/{render_id}/`: a small **`meta.json`** (`{success, error?, template_ref, timestamp, sizes}`) written on **both** success and failure, plus `pdf` (success only) and `data`. By-id lookups are **direct `blob.get`s** keyed by `render_id` — no aggregate consulted, no UUIDv7 date-decoding, no partition scan — so they work **immediately** after a render, before any flush. (Content-addressing is kept only for templates/assets, where dedup actually helps.)
+- **`get_render_pdf(id)` distinguishes failed from missing** via `meta.json`: meta absent → **404** (unknown/pruned id); `success == false` → **4xx** (e.g. `410 Gone`, carrying the render error); meta present + success but pdf blob absent → **404**. `meta.json` also makes `RenderStorage::get_render(id)` a real direct read rather than a stub.
+- **Per-template recent renders come from the S3 aggregate**, not a raw scan: `summary.json` carries a bounded `recent: [RenderRecord; N]` list **per template** (alongside per-template counts) plus a global `recent` list. `list_template_renders` slices the per-template list.
+- **Vendored UI assets are pinned**: specific released versions of `kelp.css` and `htmx.min.js` are committed under `crates/papermake-server/assets/` (exact versions/hashes recorded at vendor time). No CDN at runtime.
 - Analytics queries are **always answered from the S3 aggregation**, never from local memory → one consistent view for all instances, refreshed per flush.
 - Editor test-render = SSR + **tiny htmx sprinkle** (no full reload; native `<iframe>` PDF, no PDF.js).
 - **Delete `./webui`.**
@@ -37,10 +40,11 @@ The render-analytics stack currently requires **two heavy moving parts** that ar
 2. **Analytics records** — `RenderRecord` (timing, success, sizes, refs). These are what move off ClickHouse: staged in memory, flushed to S3 as NDJSON, aggregated by the worker.
 
 ### A0. Registry changes for render_id-keyed outputs (`crates/papermake-registry/src/registry.rs`, `address.rs`)
-- `render_and_store`: generate `render_id` up front; `put` the PDF to `renders/{render_id}/pdf` and input data to `renders/{render_id}/data` (replaces the `ContentAddress::pdf_key`/`data_key` content-hash writes).
-- `get_render_pdf(id)` / `get_render_data(id)`: become **direct `blob.get("renders/{id}/pdf"|"/data")`**, mapping S3 NotFound → `RenderNotFound`. They no longer touch `RenderStorage` at all.
-- `address.rs`: drop `pdf_key`/`data_key` (content-hash) helpers; add `render_pdf_key(id)`/`render_data_key(id)`. Keep `blob_key`/`manifest_key`/`ref_key`.
+- `render_and_store`: generate `render_id` up front; on **both** success and failure `put` a `renders/{render_id}/meta.json` (`RenderMeta { success, error, template_ref, timestamp, pdf_size_bytes, data_size_bytes }`); on success also `put` the PDF to `renders/{render_id}/pdf` and input data to `renders/{render_id}/data` (replaces the `ContentAddress::pdf_key`/`data_key` content-hash writes). These artifact writes do **not** depend on `RenderStorage` — the metadata *record* staging (A1) is separate.
+- `get_render_pdf(id)`: read `renders/{id}/meta.json` first — S3 NotFound → `RenderNotFound` (404); parse and if `!success` → `RenderFailed` (a **4xx**, e.g. `410 Gone`, carrying `error`); else `blob.get("renders/{id}/pdf")`, NotFound → `RenderNotFound`. `get_render_data(id)`: **direct `blob.get("renders/{id}/data")`**, NotFound → `RenderNotFound`. Neither touches the analytics buffer/aggregate.
+- `address.rs`: drop `pdf_key`/`data_key` (content-hash) helpers; add `render_meta_key(id)`/`render_pdf_key(id)`/`render_data_key(id)`. Keep `blob_key`/`manifest_key`/`ref_key`.
 - `RenderRecord.pdf_hash`/`data_hash` become optional integrity metadata (keep computing them if cheap, or drop from the record); `manifest_hash` stays. `render_id` is the durable handle to the artifacts.
+- Add a new `RenderStorageError::RenderFailed { error: String }` (→ server 4xx) distinct from `RenderNotFound` (→ 404); wire the mapping in `papermake-server/src/error.rs`.
 
 **Read model — analytics queries answered from S3, never from memory.** The in-memory buffer is *write-only staging*; never a read source. `list_recent_renders` and the rollups read the S3 aggregation → one globally-consistent view for every instance, refreshed each flush+aggregate cycle (a record becomes queryable after the next flush → plain global eventual consistency, no per-instance divergence). Serving artifacts by id does **not** depend on this (it's a direct blob read), so a just-finished render's PDF is fetchable immediately even before its analytics record is flushed.
 
@@ -48,14 +52,14 @@ The render-analytics stack currently requires **two heavy moving parts** that ar
 Implements the existing `RenderStorage` trait (`render_storage/mod.rs`) over the existing `BlobStorage` (`storage/blob_storage.rs`: `put`/`get`/`list_keys`/`exists`/`delete`) — reuse `S3Storage`, no new S3 code.
 - Fields: `blob: Arc<dyn BlobStorage>`, in-memory `buffer: RwLock<Vec<RenderRecord>>` (staging only), `instance_id` (env `PAPERMAKE_INSTANCE_ID`, else a generated uuid), flush config.
 - `store_render` → push to buffer (fast, no network). PDF/data artifacts are already persisted to S3 by `render_and_store` (A0) — this only stages the metadata record.
-- `flush()` → drain buffer → NDJSON (records already `Serialize` with rfc3339 time, `types.rs`) → `put` to `analytics/raw/dt=YYYY-MM-DD/{instance_id}/{unix_millis}-{seq}.ndjson`. Called by a background task on **interval OR when buffer ≥ N** (bounds memory during 100k batches).
-- `list_recent_renders`, `render_volume_over_time`, `total_renders_per_template`, `average_duration_over_time` → read the aggregate `analytics/agg/summary.json` and slice it. **No buffer merge** — same answer everywhere.
-- `get_render(id)` (single-record fetch) is **no longer on any artifact-serving path** (A0 made those direct blob reads). Keep it in the trait only if a per-render *analytics* detail view needs it; if so, serve it from the aggregate/recent set (or a bounded UUIDv7 day-partition scan of raw NDJSON). Not required for the core flows — can be a stub/`unimplemented` initially.
+- `flush()` → drain buffer → NDJSON (records already `Serialize` with rfc3339 time, `types.rs`) → `put` to `analytics/raw/dt=YYYY-MM-DD/{instance_id}/{unix_millis}-{seq}.ndjson`. Called by a background task on **interval OR when buffer ≥ N** (bounds memory during 100k batches). **Also flush on graceful shutdown** (SIGTERM handler in the server) so at most zero records are lost, not up-to-one-window — the buffer is the only unpersisted state (artifacts are already on S3 from render time).
+- `list_recent_renders`, `list_template_renders`, `render_volume_over_time`, `total_renders_per_template`, `average_duration_over_time` → read the aggregate `analytics/agg/summary.json` and slice it (`list_template_renders` slices the per-template `recent` list). **No buffer merge** — same answer everywhere.
+- `get_render(id)` → **direct read of `renders/{id}/meta.json`** (the same blob `get_render_pdf` consults), mapped into a `RenderRecord`. Immediate and by-id — not a stub, not dependent on the aggregate.
 
 ### A2. Aggregator (`crates/papermake-registry/src/render_storage/aggregator.rs`)
 Pure function over `BlobStorage` (testable offline with `MemoryStorage`):
 - `list_keys("analytics/raw/")` → `get` each → parse NDJSON → `Vec<RenderRecord>`.
-- Compute a `Summary { generated_at, volume_by_day, duration_by_day, templates, recent (top-N), totals { renders_24h, success_rate_24h, p90_latency_ms_24h } }`. Reuse the aggregation logic already in `MemoryRenderStorage` (extract the HashMap-counting into shared helpers).
+- Compute a `Summary { generated_at, volume_by_day, duration_by_day, templates: [{ name, total_renders, recent: [RenderRecord; N] }], recent (global top-N), totals { renders_24h, success_rate_24h, p90_latency_ms_24h } }`. The per-template `recent` list backs `list_template_renders` (and the template detail page) entirely from the aggregate — no raw scan. Reuse the aggregation logic already in `MemoryRenderStorage` (extract the HashMap-counting into shared helpers).
 - Write `analytics/agg/summary.json`. Re-scan a rolling window (e.g. last 90 days) each run — idempotent; incremental watermarking is a later optimization (note in code).
 
 ### A3. `papermake-worker` becomes the aggregator + housekeeper (`crates/papermake-worker/`)
@@ -73,7 +77,7 @@ Pure function over `BlobStorage` (testable offline with `MemoryStorage`):
 
 ### B1. Templating + assets
 - Add **`maud`** (with the `axum` feature → `Markup: IntoResponse`) to `crates/papermake-server/Cargo.toml`. Single dep, compile-time HTML, XSS-safe, no template files/build.rs. (Alternative: askama with `.html` files — not chosen, to avoid build wiring.)
-- Vendor **`kelp.css`** and **`htmx.min.js`** into `crates/papermake-server/assets/`; serve via `tower-http` `ServeDir` at `/assets` (the `fs` feature is already enabled). Keeps everything self-contained (no CDN).
+- Vendor **`kelp.css`** and **`htmx.min.js`** (specific pinned released versions, committed; record the exact versions/hashes at vendor time) into `crates/papermake-server/assets/`; serve via `tower-http` `ServeDir` at `/assets` (the `fs` feature is already enabled). Keeps everything self-contained (no CDN).
 - Shared `layout(title, body)` maud fn (Kelp classes, `<link>` to `/assets/kelp.css`, `<script>` htmx). Small inline-SVG helpers for bar/sparkline charts (Kelp has no charts).
 
 ### B2. Pages (`crates/papermake-server/src/routes/ui.rs`, mounted at `/` in `routes/mod.rs`)
@@ -88,7 +92,7 @@ Pure function over `BlobStorage` (testable offline with `MemoryStorage`):
 
 ### B4. Server wiring (`crates/papermake-server/src/main.rs`)
 - `AppState.registry: Arc<Registry<S3Storage, S3BufferedRenderStorage>>`.
-- Startup: build `S3BufferedRenderStorage`, **`tokio::spawn` the flush loop**; drop all ClickHouse init.
+- Startup: build `S3BufferedRenderStorage`, **`tokio::spawn` the flush loop**; drop all ClickHouse init. On shutdown signal (SIGTERM/ctrl-c via axum `with_graceful_shutdown`), call `flush()` once more so no staged records are dropped.
 - Keep existing `/api/*` JSON routes; add `/` UI routes + `/assets`.
 
 ### B5. Delete `./webui` and update `CLAUDE.md`
@@ -125,7 +129,7 @@ The flush task already buckets buffered records; have it **also** write an expir
 - After an artifact is pruned, its analytics record may still exist → a by-id PDF fetch simply 404s; analytics/rollups are unaffected. (Whether to also drop the record is an analytics-retention choice, handled by the analytics-raw prune above.)
 
 ## Verification
-- **Unit (offline, `MemoryStorage` as blob backend):** `S3BufferedRenderStorage` store→flush→ raw-blob roundtrip; aggregator over synthetic raw NDJSON → assert `summary.json` totals/rollups (mirror existing `render_storage` tests); artifact keying (`render_and_store` writes `renders/{id}/pdf|data`; `get_render_pdf/data` round-trip by id). **Retention:** effective-retain precedence (render > template > global; `0` = keep forever → no index entry); expiry-index written under the right `expiry/dt=<expiry>/…`; `retention::prune` deletes only due-partition artifacts + index files and leaves not-yet-due ones intact.
+- **Unit (offline, `MemoryStorage` as blob backend):** `S3BufferedRenderStorage` store→flush→ raw-blob roundtrip; aggregator over synthetic raw NDJSON → assert `summary.json` totals/rollups (mirror existing `render_storage` tests); artifact keying (`render_and_store` writes `renders/{id}/meta.json|pdf|data`; `get_render_pdf/data` round-trip by id). **Failed-vs-missing:** a failed render writes `meta.json` (no pdf) → `get_render_pdf` yields `RenderFailed` (4xx); an unknown id → `RenderNotFound` (404); per-template `recent` list in `summary.json` backs `list_template_renders`. **Retention:** effective-retain precedence (render > template > global; `0` = keep forever → no index entry); expiry-index written under the right `expiry/dt=<expiry>/…`; `retention::prune` deletes only due-partition artifacts + index files and leaves not-yet-due ones intact.
 - **SSR handler tests:** pages return 200 and contain expected text (template names, metric labels).
 - **Integration (live MinIO via `podman-compose up -d minio`; there is no `docker` on this machine — see `docker-compose.yml`):** run server + worker; POST a render; confirm the PDF lands at `renders/{id}/pdf` and is fetchable by id immediately; confirm raw NDJSON under `analytics/raw/...` + an `expiry/dt=.../` entry; worker writes `analytics/agg/summary.json` and `GET /` shows the render. Retention: render with a past/short `retain_days`, run the worker prune, confirm `renders/{id}/*` is deleted while a longer-retained render survives.
 - **Full gates:** `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets` (clean), `cargo fmt --all --check`.

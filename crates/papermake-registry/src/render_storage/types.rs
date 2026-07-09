@@ -140,6 +140,9 @@ pub enum RenderStorageError {
     #[error("Render record not found: {0}")]
     NotFound(String),
 
+    #[error("Render failed, no PDF available: {0}")]
+    RenderFailed(String),
+
     #[error("Invalid query parameters: {0}")]
     InvalidQuery(String),
 }

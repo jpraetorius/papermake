@@ -552,21 +552,26 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let template_name = parsed_ref.name.clone();
         let template_tag = parsed_ref.tag.unwrap_or_else(|| "latest".to_string());
 
-        // Step 2: Hash input data and store as content-addressable blob
+        // Step 2: Generate the render_id up front. All artifacts for this render
+        // (input data, metadata, PDF) are keyed by render_id under `renders/{id}/`
+        // so by-id lookups are a direct blob read (no record consulted, immediate
+        // even before the analytics record is flushed).
+        let render_id = uuid::Uuid::now_v7().to_string();
+
+        // Step 3: Store the input data at `renders/{id}/data` (kept for both
+        // success and failure so a failed input is inspectable). data_hash is
+        // retained on the record as integrity metadata only.
         let data_bytes = serde_json::to_vec(data)?;
         let data_hash = ContentAddress::hash(&data_bytes);
-        let data_key = ContentAddress::data_key(&data_hash);
-
-        // Store data blob for future retrieval
         self.storage
-            .put(&data_key, data_bytes)
+            .put(&ContentAddress::render_data_key(&render_id), data_bytes)
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
-        // Step 3: Measure total operation time including resolution
+        // Step 4: Measure total operation time including resolution.
         let start_time = std::time::Instant::now();
 
-        // Step 4: Try to resolve and render - catch all failures so that even a
+        // Step 5: Try to resolve and render - catch all failures so that even a
         // failed resolution is recorded as a failure render below.
         let result: Result<(String, Vec<u8>), RegistryError> = async {
             let manifest_hash = self.resolve(reference).await?;
@@ -577,22 +582,21 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
         let duration_ms = start_time.elapsed().as_millis() as u32;
 
-        // Step 5: Handle overall success/failure
+        // Step 6: Build the render record, persist artifacts + meta.json, stage
+        // the analytics record.
         match result {
             Ok((manifest_hash, pdf_bytes)) => {
-                // Hash and store PDF as content-addressable blob
                 let pdf_hash = ContentAddress::hash(&pdf_bytes);
-                let pdf_key = ContentAddress::pdf_key(&pdf_hash);
 
+                // Store the PDF at `renders/{id}/pdf`.
                 self.storage
-                    .put(&pdf_key, pdf_bytes.clone())
+                    .put(
+                        &ContentAddress::render_pdf_key(&render_id),
+                        pdf_bytes.clone(),
+                    )
                     .await
                     .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
-                // Step 6: Generate UUIDv7 for time-sortable render ID
-                let render_id = uuid::Uuid::now_v7().to_string();
-
-                // Step 7: Create successful render record with explicit render_id
                 let record = RenderRecord {
                     render_id: render_id.clone(),
                     timestamp: time::OffsetDateTime::now_utc(),
@@ -608,12 +612,15 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     error: None,
                 };
 
-                // Step 8: Store render record (if render storage available)
+                // Persist the record as `renders/{id}/meta.json` so by-id lookups
+                // (get_render/get_render_pdf) resolve directly and immediately.
+                self.put_render_meta(&record).await?;
+
+                // Stage the analytics record (write-only buffer; not a read source).
                 if let Some(render_storage) = &self.render_storage {
                     render_storage.store_render(record).await?;
                 }
 
-                // Step 9: Return success result
                 Ok(RenderResult {
                     render_id,
                     pdf_bytes,
@@ -622,16 +629,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 })
             }
             Err(render_error) => {
-                // Create failure render record
-                let render_id = uuid::Uuid::now_v7().to_string();
-
                 let record = RenderRecord {
                     render_id,
                     timestamp: time::OffsetDateTime::now_utc(),
                     template_ref: reference.to_string(),
                     template_name,
                     template_tag,
-                    manifest_hash: "unknown".to_string(), // Use placeholder for failed resolution
+                    manifest_hash: "unknown".to_string(), // Placeholder for failed resolution
                     data_hash,
                     pdf_hash: String::new(),
                     success: false,
@@ -640,15 +644,30 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     error: Some(render_error.to_string()),
                 };
 
-                // Store failure record (if render storage available)
+                // Persist the failure meta.json (no PDF) so get_render_pdf can
+                // distinguish "render failed" (4xx) from "unknown id" (404).
+                self.put_render_meta(&record).await?;
+
                 if let Some(render_storage) = &self.render_storage {
                     render_storage.store_render(record).await?;
                 }
 
-                // Return original error
                 Err(render_error)
             }
         }
+    }
+
+    /// Persist a render record as its `renders/{id}/meta.json` blob.
+    async fn put_render_meta(&self, record: &RenderRecord) -> Result<(), RegistryError> {
+        let meta_bytes = serde_json::to_vec(record)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))?;
+        self.storage
+            .put(
+                &ContentAddress::render_meta_key(&record.render_id),
+                meta_bytes,
+            )
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))
     }
 
     /// Get recent render records
@@ -691,28 +710,30 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         &self,
         render_id: &str,
     ) -> Result<serde_json::Value, RegistryError> {
-        // 1. Get render record from render storage
-        let render_storage = self.render_storage.as_ref().ok_or_else(|| {
-            RegistryError::RenderStorage(RenderStorageError::Connection(
-                "No render storage configured".to_string(),
-            ))
-        })?;
-
-        let record = render_storage.get_render(render_id).await?.ok_or_else(|| {
-            RegistryError::RenderStorage(RenderStorageError::NotFound(render_id.to_string()))
-        })?;
-
-        // 2. Retrieve data blob using content addressing
-        let data_key = ContentAddress::data_key(&record.data_hash);
+        // Direct blob read by render_id — no record consulted, works immediately
+        // after a render (before any analytics flush).
         let data_bytes = self
             .storage
-            .get(&data_key)
+            .get(&ContentAddress::render_data_key(render_id))
             .await
-            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+            .map_err(|e| Self::map_blob_not_found(e, render_id))?;
 
-        // 3. Deserialize JSON data
         let data: serde_json::Value = serde_json::from_slice(&data_bytes)?;
         Ok(data)
+    }
+
+    /// Map a blob storage error to a `RenderNotFound` when the key is missing,
+    /// otherwise a generic storage error.
+    fn map_blob_not_found(
+        err: crate::storage::blob_storage::StorageError,
+        render_id: &str,
+    ) -> RegistryError {
+        match err {
+            crate::storage::blob_storage::StorageError::NotFound(_) => {
+                RegistryError::RenderStorage(RenderStorageError::NotFound(render_id.to_string()))
+            }
+            other => RegistryError::Storage(StorageError::backend(other.to_string())),
+        }
     }
 
     /// Get rendered PDF by render ID
@@ -729,32 +750,40 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     /// # Errors
     /// Returns error if render not found, render failed, or PDF not found
     pub async fn get_render_pdf(&self, render_id: &str) -> Result<Vec<u8>, RegistryError> {
-        // 1. Get render record from render storage
-        let render_storage = self.render_storage.as_ref().ok_or_else(|| {
-            RegistryError::RenderStorage(RenderStorageError::Connection(
-                "No render storage configured".to_string(),
-            ))
-        })?;
+        // 1. Read the render's meta.json (direct blob read by render_id).
+        //    Missing meta ⇒ unknown/pruned render ⇒ NotFound (404).
+        let record = self.get_render_meta(render_id).await?;
 
-        let record = render_storage.get_render(render_id).await?.ok_or_else(|| {
-            RegistryError::RenderStorage(RenderStorageError::NotFound(render_id.to_string()))
-        })?;
-
-        // 2. Check if render was successful
+        // 2. A failed render has no PDF ⇒ RenderFailed (4xx), carrying the error.
         if !record.success {
+            let msg = record.error.unwrap_or_else(|| "render failed".to_string());
             return Err(RegistryError::RenderStorage(
-                RenderStorageError::InvalidQuery("Render failed, no PDF available".to_string()),
+                RenderStorageError::RenderFailed(msg),
             ));
         }
 
-        // 3. Retrieve PDF blob using content addressing
-        let pdf_key = ContentAddress::pdf_key(&record.pdf_hash);
+        // 3. Serve the PDF blob. A missing PDF (e.g. pruned) ⇒ NotFound (404).
         let pdf_bytes = self
             .storage
-            .get(&pdf_key)
+            .get(&ContentAddress::render_pdf_key(render_id))
             .await
-            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+            .map_err(|e| Self::map_blob_not_found(e, render_id))?;
         Ok(pdf_bytes)
+    }
+
+    /// Read a render's `meta.json` record directly by render_id.
+    ///
+    /// This is the durable, immediately-consistent by-id lookup (independent of
+    /// the analytics flush). A missing meta blob maps to `RenderNotFound`.
+    pub async fn get_render_meta(&self, render_id: &str) -> Result<RenderRecord, RegistryError> {
+        let meta_bytes = self
+            .storage
+            .get(&ContentAddress::render_meta_key(render_id))
+            .await
+            .map_err(|e| Self::map_blob_not_found(e, render_id))?;
+        let record: RenderRecord = serde_json::from_slice(&meta_bytes)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))?;
+        Ok(record)
     }
 
     /// Get render analytics based on query type

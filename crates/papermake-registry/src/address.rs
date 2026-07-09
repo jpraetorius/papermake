@@ -33,18 +33,24 @@ impl ContentAddress {
         format!("refs/{}/{}", namespace, tag)
     }
 
-    /// Generate storage key for render input data
-    /// Example: "data/sha256/abc123def456..."
-    pub fn data_key(hash: &str) -> String {
-        let hash_value = Self::extract_hash_value(hash);
-        format!("data/sha256/{}", hash_value)
+    /// Generate storage key for a render's metadata record
+    /// Rendered outputs are keyed by `render_id` (not content hash) so by-id
+    /// lookups are a direct blob read.
+    /// Example: "renders/{render_id}/meta.json"
+    pub fn render_meta_key(render_id: &str) -> String {
+        format!("renders/{}/meta.json", render_id)
     }
 
-    /// Generate storage key for rendered PDF
-    /// Example: "pdfs/sha256/abc123def456..."
-    pub fn pdf_key(hash: &str) -> String {
-        let hash_value = Self::extract_hash_value(hash);
-        format!("pdfs/sha256/{}", hash_value)
+    /// Generate storage key for a render's rendered PDF
+    /// Example: "renders/{render_id}/pdf"
+    pub fn render_pdf_key(render_id: &str) -> String {
+        format!("renders/{}/pdf", render_id)
+    }
+
+    /// Generate storage key for a render's input data
+    /// Example: "renders/{render_id}/data"
+    pub fn render_data_key(render_id: &str) -> String {
+        format!("renders/{}/data", render_id)
     }
 
     /// Extract hash value from full hash string (removes "sha256:" prefix)
@@ -129,17 +135,21 @@ mod tests {
     }
 
     #[test]
-    fn test_data_key_generation() {
-        let hash = "sha256:abc123def456789";
-        let key = ContentAddress::data_key(hash);
-        assert_eq!(key, "data/sha256/abc123def456789");
+    fn test_render_meta_key_generation() {
+        let key = ContentAddress::render_meta_key("018f-abc");
+        assert_eq!(key, "renders/018f-abc/meta.json");
     }
 
     #[test]
-    fn test_pdf_key_generation() {
-        let hash = "sha256:abc123def456789";
-        let key = ContentAddress::pdf_key(hash);
-        assert_eq!(key, "pdfs/sha256/abc123def456789");
+    fn test_render_pdf_key_generation() {
+        let key = ContentAddress::render_pdf_key("018f-abc");
+        assert_eq!(key, "renders/018f-abc/pdf");
+    }
+
+    #[test]
+    fn test_render_data_key_generation() {
+        let key = ContentAddress::render_data_key("018f-abc");
+        assert_eq!(key, "renders/018f-abc/data");
     }
 
     #[test]
