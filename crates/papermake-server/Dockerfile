@@ -1,4 +1,4 @@
-ARG RUST_VERSION=1.86.0
+ARG RUST_VERSION=1.97.0
 ARG PACKAGE_NAME=papermake-server
 FROM rust:${RUST_VERSION}-slim AS build
 
