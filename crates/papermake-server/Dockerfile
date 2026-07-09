@@ -23,7 +23,7 @@ RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
 # Distroless runtime: ships glibc, libssl3, ca-certificates, and a nonroot
 # user (uid 65532) — no shell, no package manager, nothing else. The `cc`
 # variant adds libgcc/libstdc++ needed by the dynamically-linked Rust binary.
-FROM gcr.io/distroless/cc-debian12:nonroot AS final
+FROM gcr.io/distroless/cc-debian13:nonroot AS final
 
 # Copy the executable from the "build" stage.
 COPY --from=build /bin/server /app/server
