@@ -34,6 +34,7 @@ pub struct RenderRecord {
 
 impl RenderRecord {
     /// Create a new successful render record
+    #[allow(clippy::too_many_arguments)]
     pub fn success(
         template_ref: String,
         template_name: String,

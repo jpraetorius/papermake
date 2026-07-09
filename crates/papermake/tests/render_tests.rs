@@ -40,17 +40,16 @@ fn test_render_pdf() {
     let mut found_arial = false;
 
     // Check each page's resources for fonts
-    if let Ok(page) = file.get_page(0) {
-        if let Ok(resources) = page.resources() {
-            for (_, font_lazy) in resources.fonts.iter() {
-                if let Ok(font_ref) = font_lazy.load(&file) {
-                    if let Some(name) = &font_ref.name {
-                        if name.to_string().to_lowercase().contains("arial") {
-                            found_arial = true;
-                            break;
-                        }
-                    }
-                }
+    if let Ok(page) = file.get_page(0)
+        && let Ok(resources) = page.resources()
+    {
+        for (_, font_lazy) in resources.fonts.iter() {
+            if let Ok(font_ref) = font_lazy.load(&file)
+                && let Some(name) = &font_ref.name
+                && name.to_string().to_lowercase().contains("arial")
+            {
+                found_arial = true;
+                break;
             }
         }
     }

@@ -100,7 +100,7 @@ mod tests {
     #[test]
     fn test_blob_key_generation() {
         let hash = "sha256:abc123def456789";
-        let key = ContentAddress::blob_key(&hash);
+        let key = ContentAddress::blob_key(hash);
 
         assert_eq!(key, "blobs/sha256/abc123def456789");
     }
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn test_manifest_key_generation() {
         let hash = "sha256:abc123def456789";
-        let key = ContentAddress::manifest_key(&hash);
+        let key = ContentAddress::manifest_key(hash);
 
         assert_eq!(key, "manifests/sha256/abc123def456789");
     }
@@ -131,21 +131,21 @@ mod tests {
     #[test]
     fn test_data_key_generation() {
         let hash = "sha256:abc123def456789";
-        let key = ContentAddress::data_key(&hash);
+        let key = ContentAddress::data_key(hash);
         assert_eq!(key, "data/sha256/abc123def456789");
     }
 
     #[test]
     fn test_pdf_key_generation() {
         let hash = "sha256:abc123def456789";
-        let key = ContentAddress::pdf_key(&hash);
+        let key = ContentAddress::pdf_key(hash);
         assert_eq!(key, "pdfs/sha256/abc123def456789");
     }
 
     #[test]
     fn test_extract_hash_value() {
         let hash = "sha256:abc123def456";
-        let value = ContentAddress::extract_hash_value(&hash);
+        let value = ContentAddress::extract_hash_value(hash);
         assert_eq!(value, "abc123def456");
 
         // Should work with hash without prefix too

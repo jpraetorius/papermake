@@ -168,7 +168,9 @@ impl BlobStorage for S3Storage {
 
         self.client
             .put_object(&self.bucket, key, bytes)
-            .map_err(|e| StorageError::Backend(format!("Invalid put request for '{}': {}", key, e)))?
+            .map_err(|e| {
+                StorageError::Backend(format!("Invalid put request for '{}': {}", key, e))
+            })?
             .build()
             .send()
             .await
@@ -183,7 +185,9 @@ impl BlobStorage for S3Storage {
         let response = self
             .client
             .get_object(&self.bucket, key)
-            .map_err(|e| StorageError::Backend(format!("Invalid get request for '{}': {}", key, e)))?
+            .map_err(|e| {
+                StorageError::Backend(format!("Invalid get request for '{}': {}", key, e))
+            })?
             .build()
             .send()
             .await
@@ -216,7 +220,9 @@ impl BlobStorage for S3Storage {
         let stat_req = self
             .client
             .stat_object(&self.bucket, key)
-            .map_err(|e| StorageError::Backend(format!("Invalid stat request for '{}': {}", key, e)))?
+            .map_err(|e| {
+                StorageError::Backend(format!("Invalid stat request for '{}': {}", key, e))
+            })?
             .build();
         match stat_req.send().await {
             Ok(_) => Ok(true),

@@ -218,8 +218,12 @@ pub fn convert_typst_diagnostic(diagnostic: SourceDiagnostic) -> DiagnosticInfo 
     DiagnosticInfo {
         message: diagnostic.message.to_string(),
         severity: DiagnosticSeverity::Error, // Typst diagnostics are typically errors
-        location: None, // Will be filled in by the caller with file context
-        hints: diagnostic.hints.into_iter().map(|h| h.v.to_string()).collect(),
+        location: None,                      // Will be filled in by the caller with file context
+        hints: diagnostic
+            .hints
+            .into_iter()
+            .map(|h| h.v.to_string())
+            .collect(),
     }
 }
 
@@ -234,9 +238,9 @@ pub fn compilation_error_from_diagnostics(diagnostics: Vec<SourceDiagnostic>) ->
         .into_iter()
         .map(convert_typst_diagnostic)
         .collect();
-    
+
     let error_count = diagnostic_infos.len();
-    
+
     PapermakeError::Compilation(CompilationError::TypstError {
         error_count,
         diagnostics: diagnostic_infos,
@@ -252,11 +256,9 @@ impl From<std::io::Error> for PapermakeError {
     fn from(error: std::io::Error) -> Self {
         let reason = error.to_string();
         match error.kind() {
-            std::io::ErrorKind::NotFound => {
-                PapermakeError::FileSystem(FileSystemError::NotFound {
-                    path: "<unknown>".to_string(),
-                })
-            }
+            std::io::ErrorKind::NotFound => PapermakeError::FileSystem(FileSystemError::NotFound {
+                path: "<unknown>".to_string(),
+            }),
             std::io::ErrorKind::PermissionDenied => {
                 PapermakeError::FileSystem(FileSystemError::PermissionDenied {
                     path: "<unknown>".to_string(),
@@ -286,38 +288,30 @@ impl From<serde_json::Error> for PapermakeError {
 impl From<FileError> for PapermakeError {
     fn from(error: FileError) -> Self {
         match error {
-            FileError::NotFound(path) => {
-                PapermakeError::FileSystem(FileSystemError::NotFound {
-                    path: path.display().to_string(),
-                })
-            }
+            FileError::NotFound(path) => PapermakeError::FileSystem(FileSystemError::NotFound {
+                path: path.display().to_string(),
+            }),
             FileError::AccessDenied => {
                 PapermakeError::FileSystem(FileSystemError::PermissionDenied {
                     path: "<unknown>".to_string(),
                 })
             }
-            FileError::InvalidUtf8 => {
-                PapermakeError::FileSystem(FileSystemError::InvalidUtf8 {
-                    path: "<unknown>".to_string(),
-                })
-            }
-            FileError::Other(msg) => {
-                PapermakeError::FileSystem(FileSystemError::ReadError {
-                    path: "<unknown>".to_string(),
-                    reason: msg.map(|m| m.to_string()).unwrap_or_else(|| "Unknown error".to_string()),
-                })
-            }
-            FileError::IsDirectory => {
-                PapermakeError::FileSystem(FileSystemError::InvalidPath {
-                    path: "<directory>".to_string(),
-                })
-            }
-            FileError::NotSource => {
-                PapermakeError::FileSystem(FileSystemError::ReadError {
-                    path: "<unknown>".to_string(),
-                    reason: "File is not a Typst source file".to_string(),
-                })
-            }
+            FileError::InvalidUtf8 => PapermakeError::FileSystem(FileSystemError::InvalidUtf8 {
+                path: "<unknown>".to_string(),
+            }),
+            FileError::Other(msg) => PapermakeError::FileSystem(FileSystemError::ReadError {
+                path: "<unknown>".to_string(),
+                reason: msg
+                    .map(|m| m.to_string())
+                    .unwrap_or_else(|| "Unknown error".to_string()),
+            }),
+            FileError::IsDirectory => PapermakeError::FileSystem(FileSystemError::InvalidPath {
+                path: "<directory>".to_string(),
+            }),
+            FileError::NotSource => PapermakeError::FileSystem(FileSystemError::ReadError {
+                path: "<unknown>".to_string(),
+                reason: "File is not a Typst source file".to_string(),
+            }),
             FileError::Package(pkg_error) => {
                 PapermakeError::FileSystem(FileSystemError::ReadError {
                     path: "<package>".to_string(),
@@ -395,13 +389,13 @@ impl PapermakeError {
 
     /// Check if this error is recoverable
     pub fn is_recoverable(&self) -> bool {
-        match self {
-            PapermakeError::Template(TemplateError::NotFound { .. }) => false,
-            PapermakeError::FileSystem(FileSystemError::NotFound { .. }) => false,
-            PapermakeError::FileSystem(FileSystemError::PermissionDenied { .. }) => false,
-            PapermakeError::Config(_) => false,
-            _ => true,
-        }
+        !matches!(
+            self,
+            PapermakeError::Template(TemplateError::NotFound { .. })
+                | PapermakeError::FileSystem(FileSystemError::NotFound { .. })
+                | PapermakeError::FileSystem(FileSystemError::PermissionDenied { .. })
+                | PapermakeError::Config(_)
+        )
     }
 
     /// Get error suggestions for common problems

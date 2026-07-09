@@ -192,16 +192,16 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         })?;
 
         // Step 4: Verify hash if provided in reference
-        if let Some(expected_hash) = &parsed_ref.hash {
-            if &manifest_hash != expected_hash {
-                return Err(RegistryError::Reference(
-                    crate::error::ReferenceError::hash_mismatch(
-                        reference.to_string(),
-                        expected_hash.clone(),
-                        manifest_hash,
-                    ),
-                ));
-            }
+        if let Some(expected_hash) = &parsed_ref.hash
+            && &manifest_hash != expected_hash
+        {
+            return Err(RegistryError::Reference(
+                crate::error::ReferenceError::hash_mismatch(
+                    reference.to_string(),
+                    expected_hash.clone(),
+                    manifest_hash,
+                ),
+            ));
         }
 
         // Return the manifest hash
@@ -442,7 +442,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         }
 
         // Sort templates by full name for consistent output
-        template_infos.sort_by(|a, b| a.full_name().cmp(&b.full_name()));
+        template_infos.sort_by_key(|a| a.full_name());
 
         Ok(template_infos)
     }

@@ -64,8 +64,9 @@ impl TryFrom<ClickHouseRenderRecord> for RenderRecord {
     type Error = RenderStorageError;
 
     fn try_from(ch_record: ClickHouseRenderRecord) -> Result<Self, Self::Error> {
-        let timestamp = OffsetDateTime::from_unix_timestamp_nanos((ch_record.timestamp * 1_000_000) as i128)
-            .map_err(|e| RenderStorageError::Query(format!("Invalid timestamp: {}", e)))?;
+        let timestamp =
+            OffsetDateTime::from_unix_timestamp_nanos((ch_record.timestamp * 1_000_000) as i128)
+                .map_err(|e| RenderStorageError::Query(format!("Invalid timestamp: {}", e)))?;
 
         Ok(Self {
             render_id: ch_record.render_id,
@@ -91,17 +92,14 @@ impl TryFrom<ClickHouseRenderRecord> for RenderRecord {
 impl ClickHouseStorage {
     /// Create a new ClickHouse storage instance from environment variables
     pub fn from_env() -> Result<Self, RenderStorageError> {
-        let url = env::var("CLICKHOUSE_URL")
-            .unwrap_or_else(|_| "http://localhost:8123".to_string());
-        
-        let user = env::var("CLICKHOUSE_USER")
-            .unwrap_or_else(|_| "default".to_string());
-        
-        let password = env::var("CLICKHOUSE_PASSWORD")
-            .unwrap_or_else(|_| "".to_string());
-        
-        let database = env::var("CLICKHOUSE_DATABASE")
-            .unwrap_or_else(|_| "papermake".to_string());
+        let url =
+            env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string());
+
+        let user = env::var("CLICKHOUSE_USER").unwrap_or_else(|_| "default".to_string());
+
+        let password = env::var("CLICKHOUSE_PASSWORD").unwrap_or_else(|_| "".to_string());
+
+        let database = env::var("CLICKHOUSE_DATABASE").unwrap_or_else(|_| "papermake".to_string());
 
         let mut client = Client::default()
             .with_url(url)
@@ -166,18 +164,25 @@ impl ClickHouseStorage {
 impl RenderStorage for ClickHouseStorage {
     async fn store_render(&self, record: RenderRecord) -> Result<(), RenderStorageError> {
         let ch_record = ClickHouseRenderRecord::from(record);
-        
-        let mut insert = self.client.insert::<ClickHouseRenderRecord>("renders").await?;
+
+        let mut insert = self
+            .client
+            .insert::<ClickHouseRenderRecord>("renders")
+            .await?;
         insert.write(&ch_record).await?;
         insert.end().await?;
-        
+
         Ok(())
     }
 
-    async fn get_render(&self, render_id: &str) -> Result<Option<RenderRecord>, RenderStorageError> {
+    async fn get_render(
+        &self,
+        render_id: &str,
+    ) -> Result<Option<RenderRecord>, RenderStorageError> {
         let query = "SELECT * FROM renders WHERE render_id = ? LIMIT 1";
-        
-        let mut cursor = self.client
+
+        let mut cursor = self
+            .client
             .query(query)
             .bind(render_id)
             .fetch::<ClickHouseRenderRecord>()?;
@@ -189,10 +194,14 @@ impl RenderStorage for ClickHouseStorage {
         }
     }
 
-    async fn list_recent_renders(&self, limit: u32) -> Result<Vec<RenderRecord>, RenderStorageError> {
+    async fn list_recent_renders(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<RenderRecord>, RenderStorageError> {
         let query = "SELECT * FROM renders ORDER BY timestamp DESC LIMIT ?";
-        
-        let mut cursor = self.client
+
+        let mut cursor = self
+            .client
             .query(query)
             .bind(limit)
             .fetch::<ClickHouseRenderRecord>()?;
@@ -211,8 +220,9 @@ impl RenderStorage for ClickHouseStorage {
         limit: u32,
     ) -> Result<Vec<RenderRecord>, RenderStorageError> {
         let query = "SELECT * FROM renders WHERE template_name = ? ORDER BY timestamp DESC LIMIT ?";
-        
-        let mut cursor = self.client
+
+        let mut cursor = self
+            .client
             .query(query)
             .bind(template_name)
             .bind(limit)
@@ -226,9 +236,13 @@ impl RenderStorage for ClickHouseStorage {
         Ok(records)
     }
 
-    async fn render_volume_over_time(&self, days: u32) -> Result<Vec<VolumePoint>, RenderStorageError> {
+    async fn render_volume_over_time(
+        &self,
+        days: u32,
+    ) -> Result<Vec<VolumePoint>, RenderStorageError> {
         let cutoff_timestamp = (OffsetDateTime::now_utc() - Duration::days(days as i64))
-            .unix_timestamp_nanos() as u64 / 1_000_000;
+            .unix_timestamp_nanos() as u64
+            / 1_000_000;
 
         let query = r#"
             SELECT 
@@ -246,7 +260,8 @@ impl RenderStorage for ClickHouseStorage {
             renders: u64,
         }
 
-        let mut cursor = self.client
+        let mut cursor = self
+            .client
             .query(query)
             .bind(cutoff_timestamp)
             .fetch::<VolumeRow>()?;
@@ -256,8 +271,9 @@ impl RenderStorage for ClickHouseStorage {
             // Convert ClickHouse date (days since 1900-01-01) to time::Date
             let days_since_1900 = row.date as i32;
             let days_since_unix_epoch = days_since_1900 - 25567; // Days from 1900-01-01 to 1970-01-01
-            
-            if let Ok(date) = time::Date::from_julian_day(days_since_unix_epoch + 2440588) { // Julian day adjustment
+
+            if let Ok(date) = time::Date::from_julian_day(days_since_unix_epoch + 2440588) {
+                // Julian day adjustment
                 points.push(VolumePoint {
                     date,
                     renders: row.renders,
@@ -284,9 +300,7 @@ impl RenderStorage for ClickHouseStorage {
             total_renders: u64,
         }
 
-        let mut cursor = self.client
-            .query(query)
-            .fetch::<TemplateRow>()?;
+        let mut cursor = self.client.query(query).fetch::<TemplateRow>()?;
 
         let mut stats = Vec::new();
         while let Some(row) = cursor.next().await? {
@@ -304,7 +318,8 @@ impl RenderStorage for ClickHouseStorage {
         days: u32,
     ) -> Result<Vec<DurationPoint>, RenderStorageError> {
         let cutoff_timestamp = (OffsetDateTime::now_utc() - Duration::days(days as i64))
-            .unix_timestamp_nanos() as u64 / 1_000_000;
+            .unix_timestamp_nanos() as u64
+            / 1_000_000;
 
         let query = r#"
             SELECT 
@@ -322,7 +337,8 @@ impl RenderStorage for ClickHouseStorage {
             avg_duration_ms: f64,
         }
 
-        let mut cursor = self.client
+        let mut cursor = self
+            .client
             .query(query)
             .bind(cutoff_timestamp)
             .fetch::<DurationRow>()?;
@@ -332,8 +348,9 @@ impl RenderStorage for ClickHouseStorage {
             // Convert ClickHouse date (days since 1900-01-01) to time::Date
             let days_since_1900 = row.date as i32;
             let days_since_unix_epoch = days_since_1900 - 25567; // Days from 1900-01-01 to 1970-01-01
-            
-            if let Ok(date) = time::Date::from_julian_day(days_since_unix_epoch + 2440588) { // Julian day adjustment
+
+            if let Ok(date) = time::Date::from_julian_day(days_since_unix_epoch + 2440588) {
+                // Julian day adjustment
                 points.push(DurationPoint {
                     date,
                     avg_duration_ms: row.avg_duration_ms,

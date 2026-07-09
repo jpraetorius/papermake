@@ -176,7 +176,7 @@ pub async fn publish_template(
             }
             field_name if field_name.starts_with("files[") => {
                 // Extract filename from field name like "files[components/header.typ]"
-                if let Some(filename) = extract_filename_from_field(&field_name) {
+                if let Some(filename) = extract_filename_from_field(field_name) {
                     files.insert(filename, data.to_vec());
                 }
             }
@@ -324,10 +324,7 @@ pub async fn get_template_metadata(
     let templates = state.registry.list_templates().await?;
     let template = templates
         .iter()
-        .find(|t| {
-            let template_matches = t.name == parsed_ref.name && t.namespace == parsed_ref.namespace;
-            template_matches
-        })
+        .find(|t| t.name == parsed_ref.name && t.namespace == parsed_ref.namespace)
         .ok_or_else(|| ApiError::template_not_found(&reference))?;
 
     let tag = parsed_ref.tag_or_default();

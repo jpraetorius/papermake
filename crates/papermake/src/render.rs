@@ -140,13 +140,13 @@ pub fn render_template(
                 };
 
                 // Try to get source location information
-                if let Some(id) = span.id() {
-                    if let Ok(_source) = world.source(id) {
-                        render_error.file = Some(format!("{:?}", id));
-                        if let Some(range) = world.range(span) {
-                            render_error.start = range.start;
-                            render_error.end = range.end;
-                        }
+                if let Some(id) = span.id()
+                    && let Ok(_source) = world.source(id)
+                {
+                    render_error.file = Some(format!("{:?}", id));
+                    if let Some(range) = world.range(span) {
+                        render_error.start = range.start;
+                        render_error.end = range.end;
                     }
                 }
 
@@ -238,13 +238,13 @@ pub fn render_template_with_cache(
                     file: None,
                 };
 
-                if let Some(id) = span.id() {
-                    if let Ok(_source) = world.source(id) {
-                        render_error.file = Some(format!("{:?}", id));
-                        if let Some(range) = world.range(span) {
-                            render_error.start = range.start;
-                            render_error.end = range.end;
-                        }
+                if let Some(id) = span.id()
+                    && let Ok(_source) = world.source(id)
+                {
+                    render_error.file = Some(format!("{:?}", id));
+                    if let Some(range) = world.range(span) {
+                        render_error.start = range.start;
+                        render_error.end = range.end;
                     }
                 }
 

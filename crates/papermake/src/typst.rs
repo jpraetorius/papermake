@@ -269,6 +269,12 @@ pub struct InMemoryFileSystem {
     files: HashMap<String, Vec<u8>>,
 }
 
+impl Default for InMemoryFileSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryFileSystem {
     pub fn new() -> Self {
         Self {

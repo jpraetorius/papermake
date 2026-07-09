@@ -199,11 +199,26 @@ mod tests {
         let storage = MemoryStorage::new();
 
         // Add some test keys
-        storage.put("refs/john/invoice/latest", b"hash1".to_vec()).await.unwrap();
-        storage.put("refs/john/invoice/v1.0.0", b"hash2".to_vec()).await.unwrap();
-        storage.put("refs/alice/letter/latest", b"hash3".to_vec()).await.unwrap();
-        storage.put("blobs/sha256/abc123", b"data1".to_vec()).await.unwrap();
-        storage.put("manifests/sha256/def456", b"data2".to_vec()).await.unwrap();
+        storage
+            .put("refs/john/invoice/latest", b"hash1".to_vec())
+            .await
+            .unwrap();
+        storage
+            .put("refs/john/invoice/v1.0.0", b"hash2".to_vec())
+            .await
+            .unwrap();
+        storage
+            .put("refs/alice/letter/latest", b"hash3".to_vec())
+            .await
+            .unwrap();
+        storage
+            .put("blobs/sha256/abc123", b"data1".to_vec())
+            .await
+            .unwrap();
+        storage
+            .put("manifests/sha256/def456", b"data2".to_vec())
+            .await
+            .unwrap();
 
         // Test listing with "refs/" prefix
         let ref_keys = storage.list_keys("refs/").await.unwrap();
