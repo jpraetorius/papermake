@@ -78,6 +78,16 @@ cargo run -r -p papermake-server
 cargo run -r -p papermake-worker   # in a second shell, for analytics rollups
 ```
 
+## 📖 Documentation
+
+Full guides live in [`docs/`](docs/README.md):
+
+- [Getting started](docs/getting-started.md) — from zero to a rendered PDF.
+- [Writing templates](docs/templates.md) — data injection, schemas, assets, imports.
+- [HTTP API reference](docs/api.md) — every endpoint with request/response shapes.
+- [Analytics & retention](docs/analytics-and-retention.md) — how they work and how to configure them.
+- [Self-hosting](docs/self-hosting.md) — deployment, env vars, scaling, storage layout.
+
 ## 📝 Writing a template
 
 A template is a Typst file plus metadata (and optionally a JSON schema and extra asset files). Input data is injected as JSON on `sys.inputs.data`; the idiomatic first line decodes it into `data`:
