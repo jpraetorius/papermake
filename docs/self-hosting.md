@@ -5,7 +5,8 @@ Papermake needs two processes and an S3-compatible object store:
 - **`papermake-server`** — the HTTP API + web UI. Run one or more.
 - **`papermake-worker`** — aggregates analytics and prunes expired outputs. Run
   exactly **one**, regardless of how many servers you run.
-- **S3** — MinIO for local/dev, or any S3-compatible service in production.
+- **S3** — SeaweedFS (bundled for local/dev), or any S3-compatible service in
+  production.
 
 ## Docker Compose (recommended for local/dev)
 
@@ -13,28 +14,30 @@ Papermake needs two processes and an S3-compatible object store:
 docker compose up -d
 ```
 
-Brings up `papermake-server` (port 3000), `papermake-worker`, and `minio`
-(API `:9000`, console `:9001`, `minioadmin` / `minioadmin`). The server creates
-its bucket on startup. See [Getting started](getting-started.md).
+Brings up `papermake-server` (port 3000), `papermake-worker`, and `seaweedfs`
+(S3 API `:8333`, master console `:9333`). The server creates its bucket on
+startup. See [Getting started](getting-started.md).
 
 ```bash
 docker compose logs -f papermake-server papermake-worker
-docker compose down        # add -v to also delete MinIO data
+docker compose down        # add -v to also delete stored data
 ```
 
 The images: server and worker are built from their `Dockerfile`s
 (`crates/papermake-server/Dockerfile`, `crates/papermake-worker/Dockerfile`,
-multi-stage Rust builds); MinIO is pinned to a specific release rather than
-`:latest`.
+multi-stage Rust builds on Rust 1.97, distroless runtime); SeaweedFS is pinned
+to a specific release rather than `:latest`. SeaweedFS S3 credentials are
+defined in [`seaweedfs/s3.json`](../seaweedfs/s3.json) (mounted into the
+container) and must match `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`.
 
 ## Run from source
 
 ```bash
 # 1. Start just the object store
-docker compose up -d minio        # or: podman-compose up -d minio
+docker compose up -d seaweedfs    # or: podman-compose up -d seaweedfs
 
 # 2. Configure
-cp .env.example .env              # defaults target local MinIO
+cp .env.example .env              # defaults target local SeaweedFS
 
 # 3. Run the processes
 cargo run -r -p papermake-server
@@ -53,7 +56,7 @@ All configuration is via environment variables (see
 
 | Variable | Description |
 |---|---|
-| `S3_ENDPOINT_URL` | Endpoint, e.g. `http://minio:9000` |
+| `S3_ENDPOINT_URL` | Endpoint, e.g. `http://seaweedfs:8333` |
 | `S3_REGION` | Region, e.g. `us-east-1` |
 | `S3_BUCKET` | Bucket name (created on startup if missing) |
 | `S3_ACCESS_KEY_ID` | Access key |

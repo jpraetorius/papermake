@@ -53,7 +53,7 @@ This starts three services on the `papermake` network:
 |---|---|---|
 | **papermake-server** | HTTP API + server-rendered UI | http://localhost:3000 |
 | **papermake-worker** | Aggregates analytics → `summary.json`, prunes expired outputs | (no exposed port) |
-| **minio** | S3-compatible object storage | API `:9000`, console http://localhost:9001 (`minioadmin` / `minioadmin`) |
+| **seaweedfs** | S3-compatible object storage (Apache-2.0) | S3 API `:8333`, master console http://localhost:9333 |
 
 The server creates its bucket on startup. Check health with `curl http://localhost:3000/health`, then open **http://localhost:3000/** for the dashboard.
 
@@ -61,17 +61,17 @@ To follow logs or tear down:
 
 ```bash
 docker compose logs -f papermake-server papermake-worker
-docker compose down          # add -v to also wipe MinIO data
+docker compose down          # add -v to also wipe stored data
 ```
 
 ### Run from source
 
 ```bash
-# 1. Start just MinIO (Docker or Podman)
-docker compose up -d minio         # or: podman-compose up -d minio
+# 1. Start just the object store (Docker or Podman)
+docker compose up -d seaweedfs     # or: podman-compose up -d seaweedfs
 
 # 2. Configure the environment
-cp .env.example .env               # defaults already point at local MinIO
+cp .env.example .env               # defaults already point at local SeaweedFS
 
 # 3. Run the server and (optionally) the worker
 cargo run -r -p papermake-server
@@ -212,7 +212,7 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
                                         │ put artifacts + flush NDJSON
                                         ▼
                         ┌──────────────────────────────┐
-                        │  S3 / MinIO                   │
+                        │  S3 / SeaweedFS               │
                         │   renders/{id}/{meta,pdf,data}│
                         │   analytics/raw · agg · expiry│
                         │   blobs · manifests · refs    │
@@ -266,8 +266,8 @@ cargo test --workspace
 cargo fmt --all
 cargo clippy --workspace --all-targets
 
-# Integration tests that need live S3 run against MinIO:
-#   docker compose up -d minio      # or: podman-compose up -d minio
+# Integration tests that need live S3 run against SeaweedFS:
+#   docker compose up -d seaweedfs      # or: podman-compose up -d seaweedfs
 cargo test --workspace -- --ignored
 ```
 

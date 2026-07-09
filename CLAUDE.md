@@ -271,7 +271,7 @@ let pdf_bytes = registry.render(
 - **Auth**: None initially, optional API keys later
 - **Namespaces**: Simplified `name:tag` format (no user/org prefixes)
 - **Config**: Environment variables only
-- **Deployment**: Docker containers (server + worker + MinIO)
+- **Deployment**: Docker containers (server + worker + SeaweedFS)
 
 ### Analytics/output storage design (see `docs/analytics-storage-and-ssr.md`)
 - **Artifacts** are keyed by `render_id`: `get_render_pdf` reads `renders/{id}/meta.json` (missing → 404, `success=false` → 422/`RenderFailed`, else serves `renders/{id}/pdf`); `get_render_data` is a direct blob read. Immediate, flush-independent.
@@ -312,7 +312,7 @@ let pdf_bytes = registry.render(
 
 ## Phase 5: Docker & Deployment
 - [x] Multi-stage Dockerfiles (server + worker)
-- [x] docker-compose.yml with MinIO + papermake-worker for local dev (no ClickHouse)
+- [x] docker-compose.yml with SeaweedFS + papermake-worker for local dev (no ClickHouse)
 - [x] Document required environment variables (see above)
 - [ ] Add startup scripts and health checks
 
@@ -323,14 +323,14 @@ let pdf_bytes = registry.render(
 - [ ] Version tag immutability enforcement (409 Conflict for duplicate versions)
 
 ## Phase 7: Testing & Documentation
-- [x] Integration tests with test S3/MinIO (partially in papermake-registry)
+- [x] Integration tests with test S3/SeaweedFS (partially in papermake-registry)
 - [ ] API documentation (OpenAPI/Swagger)
 - [ ] Example templates and curl commands
 - [ ] Performance testing under load
 
 **Dependencies:**
 - `papermake-registry` crate (completed phases 1-4)
-- S3-compatible storage (MinIO for dev)
+- S3-compatible storage (SeaweedFS for dev)
 - `papermake-worker` (aggregator + pruner)
 
 ## HTTP API Endpoints
