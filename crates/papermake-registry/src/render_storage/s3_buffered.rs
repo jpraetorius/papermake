@@ -59,9 +59,16 @@ impl<B: BlobStorage> S3BufferedRenderStorage<B> {
         &self.instance_id
     }
 
-    /// Drain the buffer and write staged records to S3 as one NDJSON object.
+    /// Drain the buffer and write staged records to S3.
     ///
-    /// A no-op (no object written) when the buffer is empty. Called by the
+    /// Writes two partitionings of the drained records:
+    /// - one **analytics-raw** NDJSON object (partitioned by render date, for
+    ///   aggregation);
+    /// - one **expiry-index** NDJSON object per distinct expiry date
+    ///   (partitioned by expiry date, for pruning) — records with no
+    ///   `expiry_date` ("keep forever") contribute no index entry.
+    ///
+    /// A no-op (nothing written) when the buffer is empty. Called by the
     /// background flush task on interval/threshold and on graceful shutdown.
     pub async fn flush(&self) -> Result<(), RenderStorageError> {
         let drained: Vec<RenderRecord> = {
@@ -73,21 +80,42 @@ impl<B: BlobStorage> S3BufferedRenderStorage<B> {
         };
 
         let now = OffsetDateTime::now_utc();
+        let unix_millis = (now.unix_timestamp_nanos() / 1_000_000) as u128;
+
+        // Analytics raw (full records, partitioned by render date).
         let mut body = String::new();
         for record in &drained {
-            let line = serde_json::to_string(record)?;
-            body.push_str(&line);
+            body.push_str(&serde_json::to_string(record)?);
             body.push('\n');
         }
-
-        let unix_millis = (now.unix_timestamp_nanos() / 1_000_000) as u128;
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let key = layout::raw_key(now.date(), &self.instance_id, unix_millis, seq);
-
+        let raw_seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let raw_key = layout::raw_key(now.date(), &self.instance_id, unix_millis, raw_seq);
         self.blob
-            .put(&key, body.into_bytes())
+            .put(&raw_key, body.into_bytes())
             .await
             .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+
+        // Expiry index (render_ids grouped by expiry date).
+        let mut by_expiry: std::collections::BTreeMap<time::Date, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for record in &drained {
+            if let Some(dt) = record.expiry_date {
+                by_expiry.entry(dt).or_default().push(&record.render_id);
+            }
+        }
+        for (expiry, ids) in by_expiry {
+            let mut idx_body = String::new();
+            for id in ids {
+                idx_body.push_str(id);
+                idx_body.push('\n');
+            }
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            let key = layout::expiry_key(expiry, &self.instance_id, unix_millis, seq);
+            self.blob
+                .put(&key, idx_body.into_bytes())
+                .await
+                .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -242,6 +270,53 @@ mod tests {
             .collect();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].template_name, "invoice");
+    }
+
+    #[tokio::test]
+    async fn test_flush_writes_expiry_index_grouped_by_expiry_date() {
+        let blob = Arc::new(MemoryStorage::new());
+        let store = S3BufferedRenderStorage::new(blob.clone(), Some("inst-1".to_string()), 1000);
+
+        // Two records expiring on the same day, one on another, one "forever".
+        let d1 = time::macros::date!(2026 - 08 - 01);
+        let d2 = time::macros::date!(2026 - 08 - 02);
+        let mut r1 = record("invoice");
+        r1.render_id = "r1".to_string();
+        r1.expiry_date = Some(d1);
+        let mut r2 = record("invoice");
+        r2.render_id = "r2".to_string();
+        r2.expiry_date = Some(d1);
+        let mut r3 = record("letter");
+        r3.render_id = "r3".to_string();
+        r3.expiry_date = Some(d2);
+        let mut r4 = record("forever");
+        r4.render_id = "r4".to_string();
+        r4.expiry_date = None; // keep forever -> no index entry
+
+        for r in [r1, r2, r3, r4] {
+            store.store_render(r).await.unwrap();
+        }
+        store.flush().await.unwrap();
+
+        // One expiry file per distinct expiry date (d1, d2) — none for "forever".
+        let d1_keys = blob
+            .list_keys(&layout::expiry_date_prefix(d1))
+            .await
+            .unwrap();
+        let d2_keys = blob
+            .list_keys(&layout::expiry_date_prefix(d2))
+            .await
+            .unwrap();
+        assert_eq!(d1_keys.len(), 1);
+        assert_eq!(d2_keys.len(), 1);
+        let all_expiry = blob.list_keys(layout::EXPIRY_PREFIX).await.unwrap();
+        assert_eq!(all_expiry.len(), 2);
+
+        // d1 file carries both render_ids.
+        let body = String::from_utf8(blob.get(&d1_keys[0]).await.unwrap()).unwrap();
+        let ids: Vec<&str> = body.lines().collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"r1") && ids.contains(&"r2"));
     }
 
     #[tokio::test]

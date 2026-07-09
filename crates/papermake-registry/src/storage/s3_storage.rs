@@ -18,6 +18,7 @@ use std::str::FromStr;
 use crate::{BlobStorage, storage::blob_storage::StorageError};
 
 /// S3-compatible storage implementation using MinIO client
+#[derive(Clone)]
 pub struct S3Storage {
     client: MinioClient,
     bucket: String,

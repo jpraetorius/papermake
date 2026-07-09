@@ -30,6 +30,10 @@ pub struct RenderRecord {
     pub pdf_size_bytes: u32,
     /// Error message if render failed
     pub error: Option<String>,
+    /// Date this render's outputs expire (for audit/visibility). `None` means
+    /// "keep forever" — no expiry-index entry is written for it.
+    #[serde(default)]
+    pub expiry_date: Option<Date>,
 }
 
 impl RenderRecord {
@@ -58,6 +62,7 @@ impl RenderRecord {
             duration_ms,
             pdf_size_bytes,
             error: None,
+            expiry_date: None,
         }
     }
 
@@ -84,6 +89,7 @@ impl RenderRecord {
             duration_ms,
             pdf_size_bytes: 0,
             error: Some(error),
+            expiry_date: None,
         }
     }
 }

@@ -4,11 +4,9 @@ pub mod types;
 
 pub mod aggregator;
 pub mod layout;
+pub mod retention;
 pub mod s3_buffered;
 pub mod summary;
-
-#[cfg(feature = "clickhouse")]
-pub mod clickhouse;
 
 #[cfg(test)]
 mod tests {

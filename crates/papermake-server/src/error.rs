@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use papermake_registry::RegistryError;
+use papermake_registry::render_storage::types::RenderStorageError;
 use serde_json::json;
 use thiserror::Error;
 
@@ -67,6 +68,12 @@ impl IntoResponse for ApiError {
             ),
             ApiError::Registry(ref e) => match e {
                 RegistryError::Template(_) => (StatusCode::NOT_FOUND, self.to_string()),
+                RegistryError::RenderStorage(RenderStorageError::NotFound(_)) => {
+                    (StatusCode::NOT_FOUND, self.to_string())
+                }
+                RegistryError::RenderStorage(RenderStorageError::RenderFailed(_)) => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
+                }
                 _ => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Registry error".to_string(),

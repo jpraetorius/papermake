@@ -65,5 +65,4 @@ pub use storage::{BlobStorage, TypstFileSystem};
 #[cfg(feature = "s3")]
 pub use storage::s3_storage::S3Storage;
 
-#[cfg(feature = "clickhouse")]
-pub use render_storage::clickhouse::ClickHouseStorage;
+pub use render_storage::s3_buffered::S3BufferedRenderStorage;

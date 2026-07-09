@@ -23,6 +23,18 @@ pub struct ServerConfig {
 
     /// Whether to enable debug logging
     pub debug: bool,
+
+    /// Stable identifier for this render instance (used in flushed S3 keys).
+    pub instance_id: Option<String>,
+
+    /// Interval between background analytics flushes, in seconds.
+    pub flush_interval_seconds: u64,
+
+    /// Flush eagerly once the buffer reaches this many records.
+    pub flush_max_records: usize,
+
+    /// Global default output retention in days (`0` = keep forever).
+    pub render_retention_days: u32,
 }
 
 impl ServerConfig {
@@ -54,6 +66,21 @@ impl ServerConfig {
             debug: std::env::var("DEBUG")
                 .map(|s| s.to_lowercase() == "true")
                 .unwrap_or(false),
+            instance_id: std::env::var("PAPERMAKE_INSTANCE_ID").ok(),
+            flush_interval_seconds: std::env::var("FLUSH_INTERVAL_SECONDS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .map_err(|_| {
+                    ApiError::Config("Invalid FLUSH_INTERVAL_SECONDS value".to_string())
+                })?,
+            flush_max_records: std::env::var("FLUSH_MAX_RECORDS")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()
+                .map_err(|_| ApiError::Config("Invalid FLUSH_MAX_RECORDS value".to_string()))?,
+            render_retention_days: std::env::var("RENDER_RETENTION_DAYS")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .map_err(|_| ApiError::Config("Invalid RENDER_RETENTION_DAYS value".to_string()))?,
         })
     }
 }
@@ -67,6 +94,10 @@ impl Default for ServerConfig {
             render_timeout_seconds: 300,
             cors_origins: vec!["*".to_string()],
             debug: false,
+            instance_id: None,
+            flush_interval_seconds: 30,
+            flush_max_records: 1000,
+            render_retention_days: 30,
         }
     }
 }

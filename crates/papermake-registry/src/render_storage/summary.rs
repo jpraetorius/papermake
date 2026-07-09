@@ -182,6 +182,7 @@ mod tests {
             } else {
                 Some("boom".to_string())
             },
+            expiry_date: None,
         }
     }
 

@@ -39,6 +39,21 @@ pub trait BlobStorage: Send + Sync {
 
     /// List all keys with the given prefix
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
+
+    /// Delete many keys, ignoring keys that are already absent (matches S3/MinIO
+    /// `delete_objects`, which does not error on missing keys — keeps pruning
+    /// idempotent, e.g. a failed render has no PDF blob to delete). The default
+    /// deletes one at a time; batch-capable backends (up to 1000/call) should
+    /// override for throughput.
+    async fn delete_many(&self, keys: &[String]) -> Result<(), StorageError> {
+        for key in keys {
+            match self.delete(key).await {
+                Ok(()) | Err(StorageError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// In-memory storage implementation for testing

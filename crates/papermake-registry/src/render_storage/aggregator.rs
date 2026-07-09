@@ -90,6 +90,7 @@ mod tests {
             duration_ms,
             pdf_size_bytes: 100,
             error: None,
+            expiry_date: None,
         }
     }
 

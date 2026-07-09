@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-papermake = { path = "../papermake" }
+papermake-registry = { path = "../papermake-registry" }
 tokio = { version = "1", features = ["full"] }
-redis = { version = "1.3", features = ["tokio-comp"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = { version = "0.3", features = ["macros"] }
+dotenv = "0.15"

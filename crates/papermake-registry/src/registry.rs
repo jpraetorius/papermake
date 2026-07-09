@@ -15,10 +15,17 @@ use crate::{
     storage::{BlobStorage, filesystem::RegistryFileSystem},
 };
 
+/// Default global output retention when neither the render nor the template
+/// specifies one. Overridable per-registry via [`Registry::with_retention_days`]
+/// (the server sets it from `RENDER_RETENTION_DAYS`).
+pub const DEFAULT_RENDER_RETENTION_DAYS: u32 = 30;
+
 /// Core registry for template publishing and resolution
 pub struct Registry<S: BlobStorage, R: RenderStorage> {
     storage: Arc<S>,
     render_storage: Option<Arc<R>>,
+    /// Global default output retention (days); `0` = keep forever.
+    default_retention_days: u32,
 }
 
 /// Result of a render operation with tracking
@@ -41,6 +48,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage> Registry<S, R> {
         Self {
             storage: Arc::new(storage),
             render_storage: Some(Arc::new(render_storage)),
+            default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
         }
     }
 }
@@ -52,6 +60,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         Self {
             storage: Arc::new(storage),
             render_storage: Some(Arc::new(render_storage)),
+            default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
         }
     }
 
@@ -60,7 +69,21 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         Registry {
             storage: Arc::new(storage),
             render_storage: None,
+            default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
         }
+    }
+
+    /// Set the global default output retention (days); `0` = keep forever.
+    pub fn with_retention_days(mut self, days: u32) -> Self {
+        self.default_retention_days = days;
+        self
+    }
+
+    /// Shared handle to the render storage, if configured. Lets the server run
+    /// the background flush loop (and flush-on-shutdown) against the same buffer
+    /// that `render_and_store` stages into.
+    pub fn render_storage(&self) -> Option<Arc<R>> {
+        self.render_storage.clone()
     }
 }
 
@@ -71,6 +94,7 @@ impl<S: BlobStorage + 'static> Registry<S, crate::render_storage::MemoryRenderSt
         Self {
             storage: Arc::new(storage),
             render_storage: None,
+            default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
         }
     }
 }
@@ -547,6 +571,20 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         reference: &str,
         data: &serde_json::Value,
     ) -> Result<RenderResult, RegistryError> {
+        self.render_and_store_with_retention(reference, data, None)
+            .await
+    }
+
+    /// Like [`Registry::render_and_store`] but with a per-render retention
+    /// override. Effective retention resolves as: per-render override →
+    /// per-template default (manifest metadata) → global default. `0` means
+    /// "keep forever" (no expiry-index entry).
+    pub async fn render_and_store_with_retention(
+        &self,
+        reference: &str,
+        data: &serde_json::Value,
+        retain_override: Option<u32>,
+    ) -> Result<RenderResult, RegistryError> {
         // Step 1: Parse template reference to extract name/tag
         let parsed_ref = Reference::parse(reference)?;
         let template_name = parsed_ref.name.clone();
@@ -597,9 +635,20 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     .await
                     .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
+                // Resolve effective retention: per-render → per-template → global.
+                let timestamp = time::OffsetDateTime::now_utc();
+                let per_template = self.template_retain_days(&manifest_hash).await;
+                let retain_days = crate::render_storage::retention::effective_retain_days(
+                    retain_override,
+                    per_template,
+                    self.default_retention_days,
+                );
+                let expiry_date =
+                    crate::render_storage::retention::expiry_date(timestamp.date(), retain_days);
+
                 let record = RenderRecord {
                     render_id: render_id.clone(),
-                    timestamp: time::OffsetDateTime::now_utc(),
+                    timestamp,
                     template_ref: reference.to_string(),
                     template_name,
                     template_tag,
@@ -610,6 +659,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     duration_ms,
                     pdf_size_bytes: pdf_bytes.len() as u32,
                     error: None,
+                    expiry_date,
                 };
 
                 // Persist the record as `renders/{id}/meta.json` so by-id lookups
@@ -629,9 +679,19 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 })
             }
             Err(render_error) => {
+                // No manifest on failure → no per-template default available.
+                let timestamp = time::OffsetDateTime::now_utc();
+                let retain_days = crate::render_storage::retention::effective_retain_days(
+                    retain_override,
+                    None,
+                    self.default_retention_days,
+                );
+                let expiry_date =
+                    crate::render_storage::retention::expiry_date(timestamp.date(), retain_days);
+
                 let record = RenderRecord {
                     render_id,
-                    timestamp: time::OffsetDateTime::now_utc(),
+                    timestamp,
                     template_ref: reference.to_string(),
                     template_name,
                     template_tag,
@@ -642,6 +702,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     duration_ms,
                     pdf_size_bytes: 0,
                     error: Some(render_error.to_string()),
+                    expiry_date,
                 };
 
                 // Persist the failure meta.json (no PDF) so get_render_pdf can
@@ -655,6 +716,16 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 Err(render_error)
             }
         }
+    }
+
+    /// Best-effort lookup of a template's per-template default retention from
+    /// its manifest metadata. Returns `None` on any load/parse issue (the caller
+    /// then falls back to the global default).
+    async fn template_retain_days(&self, manifest_hash: &str) -> Option<u32> {
+        let manifest_key = ContentAddress::manifest_key(manifest_hash);
+        let bytes = self.storage.get(&manifest_key).await.ok()?;
+        let manifest = Manifest::from_bytes(&bytes).ok()?;
+        manifest.metadata.retain_days
     }
 
     /// Persist a render record as its `renders/{id}/meta.json` blob.
@@ -1823,5 +1894,55 @@ Content: #data.content"#
         let data2 = registry.get_render_data(&result2.render_id).await.unwrap();
         assert_eq!(data1, data2);
         assert_eq!(data1, test_data);
+    }
+
+    #[tokio::test]
+    async fn test_render_and_store_retention_precedence() {
+        let storage = MemoryStorage::new();
+        let render_storage = crate::render_storage::MemoryRenderStorage::new();
+        let registry = Registry::new(storage, render_storage).with_retention_days(30);
+
+        // Publish a template with a per-template default of 7 days.
+        let metadata =
+            TemplateMetadata::new("Test Template", "test@example.com").with_retain_days(7);
+        let main_content = br#"#let data = json(bytes(sys.inputs.data))
+= Test
+Hello #data.name"#
+            .to_vec();
+        let bundle = TemplateBundle::new(main_content, metadata);
+        registry.publish(bundle, "t", "latest").await.unwrap();
+
+        let data = serde_json::json!({ "name": "x" });
+        let today = time::OffsetDateTime::now_utc().date();
+
+        // Per-template default (7) applies with no override.
+        let r_default = registry.render_and_store("t:latest", &data).await.unwrap();
+        let meta = registry
+            .get_render_meta(&r_default.render_id)
+            .await
+            .unwrap();
+        assert_eq!(meta.expiry_date, today.checked_add(time::Duration::days(7)));
+
+        // Per-render override (3) beats the template default.
+        let r_override = registry
+            .render_and_store_with_retention("t:latest", &data, Some(3))
+            .await
+            .unwrap();
+        let meta = registry
+            .get_render_meta(&r_override.render_id)
+            .await
+            .unwrap();
+        assert_eq!(meta.expiry_date, today.checked_add(time::Duration::days(3)));
+
+        // Override of 0 means keep forever → no expiry date.
+        let r_forever = registry
+            .render_and_store_with_retention("t:latest", &data, Some(0))
+            .await
+            .unwrap();
+        let meta = registry
+            .get_render_meta(&r_forever.render_id)
+            .await
+            .unwrap();
+        assert_eq!(meta.expiry_date, None);
     }
 }

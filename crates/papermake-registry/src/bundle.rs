@@ -8,6 +8,11 @@ pub struct TemplateMetadata {
     pub name: String,
     /// Author email or identifier
     pub author: String,
+    /// Per-template default output retention, in days. `None` means "fall back
+    /// to the global default"; `Some(0)` means "keep forever". Skipped when
+    /// absent so manifest hashes stay stable for templates that don't set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain_days: Option<u32>,
 }
 
 impl TemplateMetadata {
@@ -16,7 +21,14 @@ impl TemplateMetadata {
         Self {
             name: name.into(),
             author: author.into(),
+            retain_days: None,
         }
+    }
+
+    /// Set the per-template default output retention (days). `0` = keep forever.
+    pub fn with_retain_days(mut self, retain_days: u32) -> Self {
+        self.retain_days = Some(retain_days);
+        self
     }
 
     /// Validate metadata fields
