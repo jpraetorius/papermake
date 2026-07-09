@@ -2,6 +2,12 @@
 //!
 //! Rendering is split into pure `*_page`/`*_fragment` functions (unit-testable
 //! without any infra) and thin handlers that fetch data then call them.
+//!
+//! Styling leans on KelpUI's semantic conventions: bare elements (`button`,
+//! `table`, `input`, `textarea`, `nav`) are auto-styled; layout uses `.grid`
+//! (+ `.grid-s|m|l`), `.cluster`, `.stack`, `.split`; panels use `.callout`;
+//! status uses `.badge` combined with a state class (`.success`/`.warning`);
+//! `.h1`–`.h6` are size utilities applied to any element.
 
 use axum::{
     Router,
@@ -21,10 +27,17 @@ use papermake_registry::render_storage::types::RenderRecord;
 
 use crate::AppState;
 
+/// Starter template pre-filled in the "New template" editor.
+const STARTER_TYP: &str = "#let data = json(bytes(sys.inputs.data))\n\n\
+= Hello #data.name\n\n\
+Welcome to Papermake.\n";
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(dashboard))
+        .route("/templates/new", get(new_template))
         .route("/templates/{reference}", get(template_detail))
+        .route("/ui/templates", post(ui_create))
         .route("/ui/templates/{name}/render", post(ui_render))
         .route("/ui/templates/{name}/publish", post(ui_publish))
         // Vendored assets embedded in the binary (no filesystem dependency —
@@ -33,36 +46,11 @@ pub fn router() -> Router<AppState> {
         .route("/assets/htmx.min.js", get(htmx_js))
 }
 
-/// Vendored KelpUI stylesheet (kelpui@1.17.2), embedded at compile time.
-const KELP_CSS: &[u8] = include_bytes!("../../assets/kelp.css");
-/// Vendored htmx (htmx@4.0.0-beta5), embedded at compile time.
-const HTMX_JS: &[u8] = include_bytes!("../../assets/htmx.min.js");
-
-async fn kelp_css() -> impl IntoResponse {
-    (
-        [
-            (CONTENT_TYPE, "text/css; charset=utf-8"),
-            (CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        KELP_CSS,
-    )
-}
-
-async fn htmx_js() -> impl IntoResponse {
-    (
-        [
-            (CONTENT_TYPE, "text/javascript; charset=utf-8"),
-            (CACHE_CONTROL, "public, max-age=3600"),
-        ],
-        HTMX_JS,
-    )
-}
-
 // ---------------------------------------------------------------------------
 // Layout + small helpers (pure)
 // ---------------------------------------------------------------------------
 
-/// Shared page shell: Kelp stylesheet, htmx, and a nav header.
+/// Shared page shell: Kelp stylesheet, htmx, and a navbar.
 fn layout(title: &str, body: Markup) -> Markup {
     html! {
         (DOCTYPE)
@@ -75,12 +63,46 @@ fn layout(title: &str, body: Markup) -> Markup {
                 script src="/assets/htmx.min.js" {}
             }
             body {
-                header class="cluster" style="justify-content: space-between; padding: 1rem 0;" {
-                    strong { a href="/" { "📄 Papermake" } }
-                    nav { a href="/" { "Dashboard" } }
+                nav.navbar {
+                    a.h4 href="/" style="text-decoration: none;" { "📄 Papermake" }
+                    ul.menu.list-inline {
+                        li { a href="/" { "Dashboard" } }
+                        li { a.btn href="/templates/new" { "＋ New template" } }
+                    }
                 }
-                main { (body) }
+                main.stack { (body) }
             }
+        }
+    }
+}
+
+/// Eyebrow label + section wrapper for a dashboard block.
+fn section(title: &str, inner: Markup) -> Markup {
+    html! {
+        section.stack {
+            h2.h5.text-muted.text-uppercase { (title) }
+            (inner)
+        }
+    }
+}
+
+/// A single KPI stat card.
+fn stat_card(label: &str, value: Markup) -> Markup {
+    html! {
+        div.callout.stack style="--gap: var(--size-2xs);" {
+            span.text-muted.text-uppercase style="font-size: var(--size-xs);" { (label) }
+            span.h1 { (value) }
+        }
+    }
+}
+
+/// Status badge for a render record.
+fn status_badge(success: bool) -> Markup {
+    html! {
+        @if success {
+            span.badge.success { "✓ ok" }
+        } @else {
+            span.badge.warning { "✗ failed" }
         }
     }
 }
@@ -102,77 +124,91 @@ fn relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
     }
 }
 
-/// Inline SVG sparkline over a series of values.
+/// Inline SVG area sparkline over a series of values.
 fn sparkline(values: &[u64]) -> Markup {
     if values.is_empty() {
-        return html! { span class="text-muted" { "no data" } };
+        return html! { p.text-muted { "No data yet." } };
     }
-    let (w, h) = (240.0_f64, 40.0_f64);
-    let max = *values.iter().max().unwrap_or(&1) as f64;
-    let max = if max <= 0.0 { 1.0 } else { max };
+    let (w, h) = (600.0_f64, 80.0_f64);
+    let max = (*values.iter().max().unwrap_or(&1)).max(1) as f64;
     let n = values.len();
     let step = if n > 1 { w / (n as f64 - 1.0) } else { 0.0 };
-    let points: String = values
+    let pt = |i: usize, v: u64| {
+        let x = if n > 1 { i as f64 * step } else { w / 2.0 };
+        let y = h - (v as f64 / max) * (h - 6.0) - 3.0;
+        (x, y)
+    };
+    let line: String = values
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let x = i as f64 * step;
-            let y = h - (*v as f64 / max) * h;
+            let (x, y) = pt(i, *v);
             format!("{:.1},{:.1}", x, y)
         })
         .collect::<Vec<_>>()
         .join(" ");
+    let (x0, _) = pt(0, values[0]);
+    let (xn, _) = pt(n - 1, values[n - 1]);
+    let area = format!("{:.1},{:.1} {} {:.1},{:.1}", x0, h, line, xn, h);
     html! {
-        svg viewBox=(format!("0 0 {} {}", w, h)) width=(w) height=(h) role="img" {
-            polyline points=(points) fill="none" stroke="currentColor" stroke-width="2";
+        svg viewBox=(format!("0 0 {} {}", w, h)) width="100%" height=(h)
+            preserveAspectRatio="none" role="img" style="color: var(--color-primary-fill-vivid, currentColor);" {
+            polygon points=(area) fill="currentColor" opacity="0.12";
+            polyline points=(line) fill="none" stroke="currentColor" stroke-width="2";
         }
     }
 }
 
-/// Simple horizontal bar chart from labelled counts.
+/// Horizontal bar chart from labelled counts.
 fn bars(items: &[(String, u64)]) -> Markup {
+    if items.is_empty() {
+        return html! { p.text-muted { "No data yet." } };
+    }
     let max = items.iter().map(|(_, c)| *c).max().unwrap_or(1).max(1) as f64;
     html! {
-        div class="stack" style="gap: 0.35rem;" {
+        div.stack style="--gap: var(--size-xs);" {
             @for (label, count) in items {
-                div class="cluster" style="gap: 0.5rem; align-items: center;" {
-                    span style="min-width: 10rem;" { (label) }
-                    div style=(format!(
-                        "height: 0.8rem; width: {:.1}%; background: currentColor; border-radius: 3px;",
-                        (*count as f64 / max) * 100.0
-                    )) {}
-                    span class="text-muted" { (count) }
+                div.stack style="--gap: var(--size-4xs);" {
+                    div.split {
+                        span { (label) }
+                        span.text-muted { (count) }
+                    }
+                    div style="height: 0.5rem; background: var(--color-fill-muted, #e5e7eb); border-radius: var(--border-radius-s);" {
+                        div style=(format!(
+                            "height: 100%; width: {:.1}%; background: var(--color-primary-fill-vivid, currentColor); border-radius: var(--border-radius-s);",
+                            (*count as f64 / max) * 100.0
+                        )) {}
+                    }
                 }
             }
         }
     }
 }
 
-/// A table of render records.
+/// A table of render records inside a callout.
 fn renders_table(records: &[RenderRecord], now: OffsetDateTime) -> Markup {
     html! {
         @if records.is_empty() {
-            p class="text-muted" { "No renders yet." }
+            p.text-muted { "No renders yet." }
         } @else {
-            table {
-                thead {
-                    tr { th { "Render" } th { "Template" } th { "Status" } th { "Duration" } th { "When" } th { "PDF" } }
-                }
-                tbody {
-                    @for r in records {
-                        tr {
-                            td { code { (short_id(&r.render_id)) } }
-                            td { (r.template_ref) }
-                            td {
-                                @if r.success { span { "✓ ok" } }
-                                @else { span { "✗ failed" } }
-                            }
-                            td { (r.duration_ms) "ms" }
-                            td { (relative_time(r.timestamp, now)) }
-                            td {
-                                @if r.success {
-                                    a href=(format!("/api/renders/{}/pdf", r.render_id)) { "download" }
-                                } @else { "—" }
+            div.callout style="--padding: 0; overflow-x: auto;" {
+                table.table-striped {
+                    thead {
+                        tr { th { "Render" } th { "Template" } th { "Status" } th { "Duration" } th { "When" } th { "PDF" } }
+                    }
+                    tbody {
+                        @for r in records {
+                            tr {
+                                td { code { (short_id(&r.render_id)) } }
+                                td { (r.template_ref) }
+                                td { (status_badge(r.success)) }
+                                td.no-wrap { (r.duration_ms) " ms" }
+                                td.no-wrap { (relative_time(r.timestamp, now)) }
+                                td {
+                                    @if r.success {
+                                        a href=(format!("/api/renders/{}/pdf", r.render_id)) { "download" }
+                                    } @else { "—" }
+                                }
                             }
                         }
                     }
@@ -190,7 +226,7 @@ fn short_id(id: &str) -> String {
 // Pages (pure)
 // ---------------------------------------------------------------------------
 
-/// Dashboard: totals, volume sparkline, per-template bars, recent renders,
+/// Dashboard: KPI cards, volume sparkline, per-template bars, recent renders,
 /// template list.
 pub fn dashboard_page(
     summary: &Summary,
@@ -205,56 +241,64 @@ pub fn dashboard_page(
         .collect();
 
     let body = html! {
-        h1 { "Dashboard" }
+        div.split {
+            h1 { "Dashboard" }
+            a.btn href="/templates/new" { "＋ New template" }
+        }
 
-        section class="grid" style="--kelp-grid-min: 12rem;" {
-            div class="card" { h3 { "Renders (24h)" } p class="text-xl" { (summary.totals.renders_24h) } }
-            div class="card" {
-                h3 { "Success rate (24h)" }
-                p class="text-xl" { (format!("{:.0}%", summary.totals.success_rate_24h * 100.0)) }
+        // KPI cards.
+        div.grid.grid-s {
+            (stat_card("Renders · 24h", html! { (summary.totals.renders_24h) }))
+            (stat_card("Success rate · 24h", html! {
+                (format!("{:.0}%", summary.totals.success_rate_24h * 100.0))
+            }))
+            (stat_card("p90 latency · 24h", html! {
+                (summary.totals.p90_latency_ms_24h) span.h4.text-muted { " ms" }
+            }))
+            (stat_card("Templates", html! { (templates.len()) }))
+        }
+
+        // Charts row.
+        div.grid.grid-l {
+            div.callout.stack {
+                h2.h5.text-muted.text-uppercase { "Render volume" }
+                (sparkline(&volume))
             }
-            div class="card" {
-                h3 { "p90 latency (24h)" }
-                p class="text-xl" { (summary.totals.p90_latency_ms_24h) "ms" }
+            div.callout.stack {
+                h2.h5.text-muted.text-uppercase { "Renders per template" }
+                (bars(&tpl_bars))
             }
         }
 
-        section {
-            h2 { "Render volume" }
-            (sparkline(&volume))
-        }
+        (section("Recent renders", renders_table(&summary.recent, now)))
 
-        section {
-            h2 { "Renders per template" }
-            @if tpl_bars.is_empty() { p class="text-muted" { "No data yet." } }
-            @else { (bars(&tpl_bars)) }
-        }
-
-        section {
-            h2 { "Recent renders" }
-            (renders_table(&summary.recent, now))
-        }
-
-        section {
-            h2 { "Templates" }
-            @if templates.is_empty() { p class="text-muted" { "No templates published." } }
-            @else {
-                ul {
+        (section("Templates", html! {
+            @if templates.is_empty() {
+                div.callout.stack.text-center {
+                    p { strong { "No templates yet." } }
+                    p.text-muted { "Create one to publish, edit, and test-render it here." }
+                    p { a.btn.vivid href="/templates/new" { "Create your first template" } }
+                }
+            } @else {
+                div.grid.grid-m {
                     @for t in templates {
-                        li {
-                            a href=(format!("/templates/{}", t.name)) { (t.full_name()) }
-                            " — " (t.metadata.name)
-                            span class="text-muted" { " [" (t.tags.join(", ")) "]" }
+                        a.callout.stack href=(format!("/templates/{}", t.name))
+                            style="--gap: var(--size-3xs); text-decoration: none;" {
+                            strong.h5 { (t.full_name()) }
+                            span.text-muted { (t.metadata.name) }
+                            div.cluster {
+                                @for tag in &t.tags { span.badge { (tag) } }
+                            }
                         }
                     }
                 }
             }
-        }
+        }))
     };
     layout("Dashboard", body)
 }
 
-/// Template detail: metadata/tags, recent renders, editor + test-render, publish.
+/// Template detail: metadata/tags, test-render, editor/publish, recent renders.
 pub fn template_detail_page(
     name: &str,
     metadata: &TemplateMetadata,
@@ -264,54 +308,106 @@ pub fn template_detail_page(
     now: OffsetDateTime,
 ) -> Markup {
     let body = html! {
-        h1 { (name) }
-        p class="text-muted" { "by " (metadata.author) " · tags: " (tags.join(", ")) }
-
-        section {
-            h2 { "Test render" }
-            form hx-post=(format!("/ui/templates/{}/render", name))
-                 hx-target="#render-result" hx-swap="innerHTML" {
-                label for="data" { "Input data (JSON)" }
-                textarea id="data" name="data" rows="6" { "{}" }
-                button type="submit" { "Test Render" }
+        div.split {
+            div.stack style="--gap: var(--size-3xs);" {
+                h1 { (name) }
+                span.text-muted { "by " (metadata.author) }
             }
-            div id="render-result" style="margin-top: 1rem;" {}
-        }
-
-        section {
-            h2 { "Source" }
-            form method="post" action=(format!("/ui/templates/{}/publish", name)) {
-                label for="main_typ" { "main.typ" }
-                textarea id="main_typ" name="main_typ" rows="16" { (source) }
-                label for="author" { "Author" }
-                input id="author" name="author" value=(metadata.author);
-                label for="tag" { "Tag" }
-                input id="tag" name="tag" value="latest";
-                button type="submit" { "Publish" }
+            div.cluster {
+                @for tag in tags { span.badge { (tag) } }
             }
         }
 
-        section {
-            h2 { "Recent renders" }
-            (renders_table(recent, now))
+        div.grid.grid-l {
+            // Test render (htmx: swaps the PDF iframe in without a reload).
+            div.callout.stack {
+                h2.h5.text-muted.text-uppercase { "Test render" }
+                form.stack hx-post=(format!("/ui/templates/{}/render", name))
+                     hx-target="#render-result" hx-swap="innerHTML" {
+                    label for="data" { "Input data (JSON)" }
+                    textarea id="data" name="data" rows="6" { "{}" }
+                    div { button.vivid type="submit" { "Test Render" } }
+                }
+                div id="render-result" {}
+            }
+
+            // Source + publish.
+            div.callout.stack {
+                h2.h5.text-muted.text-uppercase { "Source" }
+                form.stack method="post" action=(format!("/ui/templates/{}/publish", name)) {
+                    label for="main_typ" { "main.typ" }
+                    textarea id="main_typ" name="main_typ" rows="14"
+                        style="font-family: var(--font-mono, monospace);" { (source) }
+                    div.cluster {
+                        div.stack style="--gap: var(--size-4xs);" {
+                            label for="author" { "Author" }
+                            input id="author" name="author" value=(metadata.author);
+                        }
+                        div.stack style="--gap: var(--size-4xs);" {
+                            label for="tag" { "Tag" }
+                            input id="tag" name="tag" value="latest";
+                        }
+                    }
+                    div { button type="submit" { "Publish" } }
+                }
+            }
         }
+
+        (section("Recent renders", renders_table(recent, now)))
     };
     layout(name, body)
+}
+
+/// "New template" creation form.
+pub fn new_template_page() -> Markup {
+    let body = html! {
+        h1 { "New template" }
+        p.text-muted { "Publish a template, then edit and test-render it — all from here." }
+        div.callout {
+            form.stack method="post" action="/ui/templates" {
+                div.cluster {
+                    div.stack style="--gap: var(--size-4xs);" {
+                        label for="name" { "Name" }
+                        input id="name" name="name" placeholder="invoice" required;
+                    }
+                    div.stack style="--gap: var(--size-4xs);" {
+                        label for="author" { "Author" }
+                        input id="author" name="author" placeholder="you@example.com" required;
+                    }
+                    div.stack style="--gap: var(--size-4xs);" {
+                        label for="tag" { "Tag" }
+                        input id="tag" name="tag" value="latest";
+                    }
+                }
+                label for="main_typ" { "main.typ" }
+                textarea id="main_typ" name="main_typ" rows="14"
+                    style="font-family: var(--font-mono, monospace);" { (STARTER_TYP) }
+                div.cluster {
+                    button.vivid type="submit" { "Create template" }
+                    a.btn.btn-link href="/" { "Cancel" }
+                }
+            }
+        }
+    };
+    layout("New template", body)
 }
 
 /// htmx fragment shown after a successful test render.
 pub fn render_result_fragment(render_id: &str) -> Markup {
     html! {
-        p { "Rendered " code { (short_id(render_id)) } }
-        iframe src=(format!("/api/renders/{}/pdf", render_id))
-               style="width: 100%; height: 600px; border: 1px solid #ccc;" {}
+        div.stack style="--gap: var(--size-2xs);" {
+            p.text-muted { "Rendered " code { (short_id(render_id)) } }
+            iframe src=(format!("/api/renders/{}/pdf", render_id))
+                   title="Rendered PDF"
+                   style="width: 100%; height: 600px; border: 1px solid var(--color-border, #ccc); border-radius: var(--border-radius-s);" {}
+        }
     }
 }
 
 /// htmx fragment shown after a failed test render.
 pub fn render_error_fragment(message: &str) -> Markup {
     html! {
-        div class="notice" role="alert" {
+        div.callout.warning role="alert" {
             strong { "Render failed" }
             p { (message) }
         }
@@ -333,10 +429,13 @@ async fn dashboard(State(state): State<AppState>) -> Markup {
     dashboard_page(&summary, &templates, now)
 }
 
+async fn new_template() -> Markup {
+    new_template_page()
+}
+
 async fn template_detail(State(state): State<AppState>, Path(reference): Path<String>) -> Response {
     let now = OffsetDateTime::now_utc();
 
-    // Resolve the display name/tag and look up metadata.
     let name = reference
         .split(':')
         .next()
@@ -410,9 +509,41 @@ async fn ui_publish(
     Path(name): Path<String>,
     Form(form): Form<PublishForm>,
 ) -> Response {
-    let metadata = TemplateMetadata::new(name.clone(), form.author);
-    let bundle = TemplateBundle::new(form.main_typ.into_bytes(), metadata);
-    match state.registry.publish(bundle, &name, &form.tag).await {
+    publish(&state, &name, form.author, form.main_typ, form.tag).await
+}
+
+#[derive(Debug, Deserialize)]
+struct NewTemplateForm {
+    name: String,
+    main_typ: String,
+    author: String,
+    #[serde(default = "default_tag")]
+    tag: String,
+}
+
+async fn ui_create(State(state): State<AppState>, Form(form): Form<NewTemplateForm>) -> Response {
+    let name = form.name.trim();
+    if name.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "Template name is required".to_string(),
+        )
+            .into_response();
+    }
+    publish(&state, name, form.author, form.main_typ, form.tag).await
+}
+
+/// Shared publish → redirect-to-detail path for the create/publish forms.
+async fn publish(
+    state: &AppState,
+    name: &str,
+    author: String,
+    main_typ: String,
+    tag: String,
+) -> Response {
+    let metadata = TemplateMetadata::new(name.to_string(), author);
+    let bundle = TemplateBundle::new(main_typ.into_bytes(), metadata);
+    match state.registry.publish(bundle, name, &tag).await {
         Ok(_) => Redirect::to(&format!("/templates/{}", name)).into_response(),
         Err(e) => (
             axum::http::StatusCode::BAD_REQUEST,
@@ -420,6 +551,35 @@ async fn ui_publish(
         )
             .into_response(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Embedded assets
+// ---------------------------------------------------------------------------
+
+/// Vendored KelpUI stylesheet (kelpui@1.17.2), embedded at compile time.
+const KELP_CSS: &[u8] = include_bytes!("../../assets/kelp.css");
+/// Vendored htmx (htmx@4.0.0-beta5), embedded at compile time.
+const HTMX_JS: &[u8] = include_bytes!("../../assets/htmx.min.js");
+
+async fn kelp_css() -> impl IntoResponse {
+    (
+        [
+            (CONTENT_TYPE, "text/css; charset=utf-8"),
+            (CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        KELP_CSS,
+    )
+}
+
+async fn htmx_js() -> impl IntoResponse {
+    (
+        [
+            (CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        HTMX_JS,
+    )
 }
 
 #[cfg(test)]
@@ -457,27 +617,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_dashboard_page_contains_metrics_and_templates() {
-        let now = datetime!(2026-07-09 12:00 UTC);
-        let summary = sample_summary(now);
-        let templates = vec![TemplateInfo::new(
+    fn sample_template() -> TemplateInfo {
+        TemplateInfo::new(
             "invoice".to_string(),
             None,
             vec!["latest".to_string()],
             "sha256:m".to_string(),
             TemplateMetadata::new("Invoice Template", "a@b.com"),
-        )];
+        )
+    }
+
+    #[test]
+    fn test_dashboard_page_contains_metrics_and_templates() {
+        let now = datetime!(2026-07-09 12:00 UTC);
+        let summary = sample_summary(now);
+        let templates = vec![sample_template()];
         let html = dashboard_page(&summary, &templates, now).into_string();
         assert!(html.contains("Dashboard"));
-        assert!(html.contains("Renders (24h)"));
-        assert!(html.contains("Success rate (24h)"));
-        assert!(html.contains("p90 latency (24h)"));
+        assert!(html.contains("Renders · 24h"));
+        assert!(html.contains("Success rate · 24h"));
+        assert!(html.contains("p90 latency · 24h"));
         assert!(html.contains("Invoice Template"));
         assert!(html.contains("/templates/invoice"));
-        // Assets are wired.
+        // Kelp classes + assets are wired.
+        assert!(html.contains("class=\"callout"));
         assert!(html.contains("/assets/kelp.css"));
         assert!(html.contains("/assets/htmx.min.js"));
+    }
+
+    #[test]
+    fn test_dashboard_empty_state_prompts_creation() {
+        let now = datetime!(2026-07-09 12:00 UTC);
+        let summary = Summary::empty(now);
+        let html = dashboard_page(&summary, &[], now).into_string();
+        assert!(html.contains("No templates yet."));
+        assert!(html.contains("/templates/new"));
+    }
+
+    #[test]
+    fn test_new_template_page_has_form() {
+        let html = new_template_page().into_string();
+        assert!(html.contains("New template"));
+        assert!(html.contains("action=\"/ui/templates\""));
+        assert!(html.contains("name=\"name\""));
+        assert!(html.contains("name=\"main_typ\""));
+        // Starter source is prefilled.
+        assert!(html.contains("sys.inputs.data"));
     }
 
     #[test]
@@ -500,17 +685,17 @@ mod tests {
     }
 
     #[test]
-    fn test_vendored_assets_are_embedded() {
-        // Non-empty and recognizably the right files (compile-time embedded).
-        assert!(KELP_CSS.starts_with(b"/*! kelpui"));
-        assert!(HTMX_JS.starts_with(b"var htmx"));
-    }
-
-    #[test]
     fn test_render_result_fragment_embeds_iframe() {
         let html = render_result_fragment("0192abcd-ef").into_string();
         assert!(html.contains("<iframe"));
         assert!(html.contains("/api/renders/0192abcd-ef/pdf"));
+    }
+
+    #[test]
+    fn test_vendored_assets_are_embedded() {
+        // Non-empty and recognizably the right files (compile-time embedded).
+        assert!(KELP_CSS.starts_with(b"/*! kelpui"));
+        assert!(HTMX_JS.starts_with(b"var htmx"));
     }
 
     #[test]
