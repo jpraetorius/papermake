@@ -53,7 +53,7 @@ This starts three services on the `papermake` network:
 |---|---|---|
 | **papermake-server** | HTTP API + server-rendered UI | http://localhost:3000 |
 | **papermake-worker** | Aggregates analytics → `summary.json`, prunes expired outputs | (no exposed port) |
-| **seaweedfs** | S3-compatible object storage (Apache-2.0) | S3 API `:8333`, master console http://localhost:9333 |
+| **rustfs** | S3-compatible object storage (Apache-2.0, Rust) | S3 API `:9000`, console http://localhost:9001 (`minioadmin` / `minioadmin`) |
 
 The server creates its bucket on startup. Check health with `curl http://localhost:3000/health`, then open **http://localhost:3000/** for the dashboard.
 
@@ -68,10 +68,10 @@ docker compose down          # add -v to also wipe stored data
 
 ```bash
 # 1. Start just the object store (Docker or Podman)
-docker compose up -d seaweedfs     # or: podman-compose up -d seaweedfs
+docker compose up -d rustfs        # or: podman-compose up -d rustfs
 
 # 2. Configure the environment
-cp .env.example .env               # defaults already point at local SeaweedFS
+cp .env.example .env               # defaults already point at local RustFS
 
 # 3. Run the server and (optionally) the worker
 cargo run -r -p papermake-server
@@ -212,7 +212,7 @@ All configuration is via environment variables (see [`.env.example`](.env.exampl
                                         │ put artifacts + flush NDJSON
                                         ▼
                         ┌──────────────────────────────┐
-                        │  S3 / SeaweedFS               │
+                        │  S3 / RustFS                  │
                         │   renders/{id}/{meta,pdf,data}│
                         │   analytics/raw · agg · expiry│
                         │   blobs · manifests · refs    │
@@ -266,8 +266,8 @@ cargo test --workspace
 cargo fmt --all
 cargo clippy --workspace --all-targets
 
-# Integration tests that need live S3 run against SeaweedFS:
-#   docker compose up -d seaweedfs      # or: podman-compose up -d seaweedfs
+# Integration tests that need live S3 run against RustFS:
+#   docker compose up -d rustfs      # or: podman-compose up -d rustfs
 cargo test --workspace -- --ignored
 ```
 

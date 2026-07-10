@@ -16,7 +16,7 @@ Three services start:
 |---|---|---|
 | `papermake-server` | HTTP API + web UI | http://localhost:3000 |
 | `papermake-worker` | Rolls up analytics, prunes expired outputs | — |
-| `seaweedfs` | S3-compatible object storage | S3 API `:8333`, master console http://localhost:9333 |
+| `rustfs` | S3-compatible object storage | S3 API `:9000`, console http://localhost:9001 |
 
 The server creates its S3 bucket on startup. Confirm it's up:
 
