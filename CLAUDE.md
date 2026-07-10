@@ -267,7 +267,7 @@ let pdf_bytes = registry.render(
 - **Framework**: Axum/Tokio for async HTTP server
 - **Storage**: S3 for **everything** — blobs (templates/assets/manifests, content-addressed) and render outputs (`renders/{render_id}/{meta.json,pdf,data}`, keyed by render_id). No always-on database.
 - **Analytics**: **buffered-S3** — each server instance stages `RenderRecord`s in memory and flushes them to S3 as NDJSON (`analytics/raw/dt=…`); the **papermake-worker** binary aggregates all raw into `analytics/agg/summary.json` and prunes expired outputs. Queries are always answered from `summary.json` (globally eventually consistent). ClickHouse has been removed.
-- **UI**: server-side-rendered (maud + vendored KelpUI + a tiny htmx sprinkle). No SPA/build step. (The old Next.js `./webui` was deleted.)
+- **UI**: server-side-rendered (maud + a small hand-rolled stylesheet in `assets/app.css` + a tiny htmx sprinkle). Semantic-first CSS (modern: cascade layers, nesting, oklch, light-dark()). No SPA/build step. (The old Next.js `./webui` was deleted.)
 - **Auth**: None initially, optional API keys later
 - **Namespaces**: Simplified `name:tag` format (no user/org prefixes)
 - **Config**: Environment variables only
@@ -348,7 +348,7 @@ let pdf_bytes = registry.render(
 /templates/{reference} (GET) - SSR template detail (editor + test render + publish)
 /ui/templates/{name}/render (POST) - htmx test-render fragment
 /ui/templates/{name}/publish (POST) - publish form -> redirect
-/assets/kelp.css, /assets/htmx.min.js - vendored assets embedded in the binary
+/assets/app.css, /assets/htmx.min.js - stylesheet + htmx, embedded in the binary
 /api/
 ├── templates/
 │   ├── / (GET) - List all templates

@@ -1,0 +1,176 @@
+/* Papermake UI — a small, semantic-first stylesheet.
+ * Philosophy: bare semantic elements are styled by default; a handful of
+ * layout helpers (.stack/.cluster/.grid/.split), components (.card/.badge/.btn),
+ * modifiers (.primary/.ok/.bad) and helpers (.muted/.eyebrow/.mono) do the rest.
+ * Modern CSS only: cascade layers, nesting, custom properties, oklch,
+ * color-mix, light-dark(). */
+
+@layer reset, tokens, base, layout, components, utilities;
+
+@layer tokens {
+  :root {
+    color-scheme: light dark;
+    --hue: 265;
+
+    --bg:      light-dark(oklch(98% 0.004 var(--hue)), oklch(21% 0.012 var(--hue)));
+    --surface: light-dark(oklch(100% 0 0),             oklch(25% 0.014 var(--hue)));
+    --text:    light-dark(oklch(28% 0.02 var(--hue)),  oklch(93% 0.01 var(--hue)));
+    --muted:   light-dark(oklch(52% 0.02 var(--hue)),  oklch(72% 0.02 var(--hue)));
+    --border:  light-dark(oklch(90% 0.008 var(--hue)), oklch(36% 0.014 var(--hue)));
+    --track:   light-dark(oklch(93% 0.006 var(--hue)), oklch(33% 0.014 var(--hue)));
+
+    --primary:     oklch(58% 0.17 var(--hue));
+    --primary-ink: oklch(99% 0 0);
+    --success: light-dark(oklch(56% 0.13 150), oklch(74% 0.14 150));
+    --warn:    light-dark(oklch(58% 0.16 45),  oklch(78% 0.15 65));
+
+    --radius: 0.6rem;
+    --gap: 1rem;
+    --shadow: 0 1px 2px oklch(0% 0 0 / 0.04), 0 4px 16px oklch(0% 0 0 / 0.05);
+  }
+}
+
+@layer reset {
+  *, *::before, *::after { box-sizing: border-box; }
+  * { margin: 0; }
+  html { -webkit-text-size-adjust: 100%; }
+  img, svg, iframe { display: block; max-width: 100%; }
+}
+
+@layer base {
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.55;
+    color: var(--text);
+    background: var(--bg);
+    text-underline-offset: 0.15em;
+  }
+
+  h1, h2, h3, h4, h5, h6 { line-height: 1.15; text-wrap: balance; font-weight: 650; }
+  h1 { font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.1rem); }
+  h2 { font-size: 1.35rem; }
+  h3 { font-size: 1.15rem; }
+  p { text-wrap: pretty; }
+
+  a { color: var(--primary); text-decoration-thickness: 1px; }
+  a:hover { text-decoration-thickness: 2px; }
+
+  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
+  code { background: var(--track); padding: 0.1em 0.35em; border-radius: 0.3rem; }
+
+  /* Forms */
+  label { font-weight: 550; font-size: 0.9rem; }
+  input, textarea, select {
+    font: inherit;
+    width: 100%;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.55rem 0.7rem;
+  }
+  textarea { resize: vertical; }
+  input:focus-visible, textarea:focus-visible, select:focus-visible,
+  button:focus-visible, a:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+
+  /* Buttons — bare <button> is a real button; links opt in with .btn */
+  button, .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font: inherit;
+    font-weight: 550;
+    line-height: 1.2;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.5rem 0.9rem;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.12s ease, border-color 0.12s ease;
+
+    &:hover { background: color-mix(in oklab, var(--surface), var(--text) 7%); }
+
+    &.primary {
+      color: var(--primary-ink);
+      background: var(--primary);
+      border-color: transparent;
+      &:hover { background: color-mix(in oklab, var(--primary), black 12%); }
+    }
+    &.ghost { background: transparent; border-color: transparent; color: var(--primary); }
+  }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+  th, td { text-align: left; padding: 0.6rem 0.8rem; }
+  thead th {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--muted); border-bottom: 1px solid var(--border);
+  }
+  tbody tr + tr td { border-top: 1px solid var(--border); }
+  tbody tr:nth-child(even) { background: color-mix(in oklab, var(--surface), var(--text) 3%); }
+}
+
+@layer layout {
+  .container { max-width: 72rem; margin-inline: auto; padding: 1.5rem 1rem 3rem; }
+
+  /* Vertical rhythm; override density with --gap. */
+  .stack { display: flex; flex-direction: column; gap: var(--gap, 1rem); }
+  /* Inline group that wraps. */
+  .cluster { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap, 0.5rem); }
+  /* Push two groups apart. */
+  .split { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; }
+  /* Responsive auto-fit grid; tune column width with --min. */
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(var(--min, 16rem), 1fr)); }
+}
+
+@layer components {
+  .navbar {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; padding: 0.75rem 1.25rem;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+  }
+  .navbar .brand { font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text); }
+  .navbar nav { display: flex; align-items: center; gap: 1rem; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+    box-shadow: var(--shadow);
+  }
+
+  .kpi .num { font-size: clamp(1.8rem, 1.2rem + 2.4vw, 2.4rem); font-weight: 700; line-height: 1; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 0.3em;
+    font-size: 0.78rem; font-weight: 550; line-height: 1;
+    padding: 0.28em 0.6em; border-radius: 999px;
+    background: var(--track); color: var(--text);
+    border: 1px solid color-mix(in oklab, var(--border), transparent 20%);
+
+    &.ok  { background: color-mix(in oklab, var(--success), transparent 82%); color: color-mix(in oklab, var(--success), var(--text) 35%); border-color: transparent; }
+    &.bad { background: color-mix(in oklab, var(--warn), transparent 80%);    color: color-mix(in oklab, var(--warn), var(--text) 35%);    border-color: transparent; }
+  }
+
+  .callout { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }
+  .callout.warn { background: color-mix(in oklab, var(--warn), transparent 88%); border-color: color-mix(in oklab, var(--warn), transparent 55%); }
+
+  .bar-track { height: 0.5rem; background: var(--track); border-radius: 999px; overflow: hidden; }
+  .bar-fill  { height: 100%; background: var(--primary); border-radius: 999px; }
+  .spark { color: var(--primary); width: 100%; height: 80px; }
+}
+
+@layer utilities {
+  .muted { color: var(--muted); }
+  .eyebrow { text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.72rem; font-weight: 600; color: var(--muted); }
+  .center { text-align: center; }
+  .nowrap { white-space: nowrap; }
+  .flush { padding: 0; }
+  .scroll-x { overflow-x: auto; }
+}

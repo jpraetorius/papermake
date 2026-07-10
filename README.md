@@ -34,7 +34,7 @@ Or just open the web UI at **http://localhost:3000/** and publish / test-render 
 - **🗄️ S3 is the only dependency** — templates, rendered PDFs, input data, and analytics all live in S3. No always-on database.
 - **📊 Built-in analytics** — every render is logged; a background worker rolls it up into per-template volume, success rate, and p90 latency.
 - **🧹 Retention built in** — outputs expire on a schedule (per-render, per-template, or global) and are pruned automatically.
-- **🖥️ Server-rendered UI** — a dependency-light dashboard + template editor (KelpUI + a touch of htmx), no SPA build step.
+- **🖥️ Server-rendered UI** — a dependency-light dashboard + template editor (a small hand-rolled stylesheet + a touch of htmx), no SPA build step.
 - **🐳 Self-hostable** — `docker compose up` and you're running.
 
 ## 🏃 Quick Start

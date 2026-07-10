@@ -167,4 +167,4 @@ Not JSON — HTML pages and htmx fragments:
 | `GET /templates/{name}` | Template detail (editor, test render, publish) |
 | `POST /ui/templates/{name}/render` | htmx test-render fragment (returns HTML) |
 | `POST /ui/templates/{name}/publish` | Publish form → redirect |
-| `GET /assets/*` | Vendored `kelp.css` / `htmx.min.js` |
+| `GET /assets/app.css`, `GET /assets/htmx.min.js` | Stylesheet + htmx, embedded in the binary |
