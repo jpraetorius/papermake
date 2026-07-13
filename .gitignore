@@ -21,9 +21,8 @@ target/
 .vscode/
 data/
 
-# Local sample templates (kept on disk, not tracked)
-/templates/alh-corporate/
-/templates/monaspace-demo/
+# Local sample templates
+/templates
 
 # Local-only font helper (verification convenience, not part of the repo)
-/scripts/fetch-fonts.sh
+/scripts
