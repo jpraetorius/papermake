@@ -102,6 +102,20 @@ fn section(title: &str, inner: Markup) -> Markup {
     }
 }
 
+fn template_renders_section(
+    records: &[RenderRecord],
+    now: OffsetDateTime,
+    t: &I18n,
+    oob: bool,
+) -> Markup {
+    html! {
+        section #template-renders .stack hx-swap-oob=[oob.then_some("true")] {
+            h2.eyebrow { (t.t("section-recent-renders")) }
+            (renders_table(records, now, t))
+        }
+    }
+}
+
 /// A single KPI stat card.
 fn stat_card(label: &str, value: Markup) -> Markup {
     html! {
@@ -653,7 +667,7 @@ pub fn template_detail_page(
 
         div id="render-result" {}
 
-        (section(&t.t("section-recent-renders"), renders_table(recent, now, t)))
+        (template_renders_section(recent, now, t, false))
     };
     let body = html! {
         template-detail-page {
@@ -699,11 +713,17 @@ pub fn new_template_page(t: &I18n) -> Markup {
 
 /// htmx fragment shown after a successful test render.
 pub fn render_result_fragment(render_id: &str, t: &I18n) -> Markup {
+    let pdf_url = format!("/api/renders/{}/pdf", render_id);
     html! {
         div.card.stack.render-preview style="--gap: 0.5rem;" {
-            p.muted { (t.t("rendered")) " " code { (short_id(render_id)) } }
+            div.split {
+                p.muted { (t.t("rendered")) " " code { (short_id(render_id)) } }
+                a.btn.ghost href=(pdf_url) target="_blank" rel="noopener" {
+                    (t.t("link-open-pdf"))
+                }
+            }
             div.pdf-preview {
-                iframe src=(format!("/api/renders/{}/pdf", render_id))
+                iframe src=(format!("/api/renders/{}/pdf#view=FitH", render_id))
                        title="Rendered PDF" {}
             }
         }
@@ -809,7 +829,18 @@ async fn ui_render(
     };
     let reference = format!("{}:{}", name, form.tag);
     match state.registry.render_and_store(&reference, &data).await {
-        Ok(result) => render_result_fragment(&result.render_id, &t),
+        Ok(result) => {
+            let now = OffsetDateTime::now_utc();
+            let recent = state
+                .registry
+                .list_template_renders(&name, 20)
+                .await
+                .unwrap_or_default();
+            html! {
+                (render_result_fragment(&result.render_id, &t))
+                (template_renders_section(&recent, now, &t, true))
+            }
+        }
         Err(e) => render_error_fragment(&e.to_string(), &t),
     }
 }
@@ -1093,6 +1124,7 @@ mod tests {
         assert!(html.contains("data-data-field=\"document_number\""));
         assert!(html.contains("class=\"data-fields"));
         assert!(html.contains("class=\"field-check\""));
+        assert!(html.contains("id=\"template-renders\""));
         // Delete this version, guarded by a native <dialog> via Invoker Commands.
         assert!(html.contains("/ui/templates/invoice/delete"));
         assert!(html.contains("Delete this version"));
@@ -1148,9 +1180,19 @@ mod tests {
     fn test_render_result_fragment_embeds_iframe() {
         let html = render_result_fragment("0192abcd-ef", &en()).into_string();
         assert!(html.contains("<iframe"));
-        assert!(html.contains("/api/renders/0192abcd-ef/pdf"));
+        assert!(html.contains("/api/renders/0192abcd-ef/pdf#view=FitH"));
+        assert!(html.contains("open PDF"));
         assert!(html.contains("class=\"card stack render-preview\""));
         assert!(html.contains("class=\"pdf-preview\""));
+    }
+
+    #[test]
+    fn test_template_renders_section_supports_oob_swap() {
+        let now = datetime!(2026-07-09 12:00 UTC);
+        let html = template_renders_section(&[], now, &en(), true).into_string();
+        assert!(html.contains("id=\"template-renders\""));
+        assert!(html.contains("hx-swap-oob=\"true\""));
+        assert!(html.contains("Recent renders"));
     }
 
     #[test]
@@ -1160,7 +1202,8 @@ mod tests {
         assert!(LOGO_SVG.starts_with(b"<svg"));
         let css = std::str::from_utf8(APP_CSS).unwrap();
         assert!(css.contains(".pdf-preview"));
-        assert!(css.contains("aspect-ratio: 16 / 10"));
+        assert!(css.contains("aspect-ratio: 4 / 3"));
+        assert!(css.contains("min-height: 32rem"));
         assert!(css.contains(".data-field[data-used] .field-check"));
         let logo = std::str::from_utf8(LOGO_SVG).unwrap();
         assert!(logo.contains("viewBox")); // scales in the favicon + navbar

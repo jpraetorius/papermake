@@ -33,6 +33,7 @@ btn-cancel = Cancel
 btn-delete-version = Delete this version
 btn-delete = Delete
 link-download = download
+link-open-pdf = open PDF
 
 # Table headers
 th-render = Render

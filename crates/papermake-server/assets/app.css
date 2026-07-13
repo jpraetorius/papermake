@@ -420,7 +420,9 @@ dialog::backdrop {
 
     .pdf-preview {
       width: 100%;
-      aspect-ratio: 16 / 10;
+      min-height: 32rem;
+      max-height: 78vh;
+      aspect-ratio: 4 / 3;
       overflow: hidden;
       border: 1px solid var(--border);
       border-radius: var(--radius);
