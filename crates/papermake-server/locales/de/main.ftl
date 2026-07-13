@@ -21,7 +21,6 @@ no-data = Noch keine Daten.
 
 # Sections
 section-recent-renders = Neueste Renderings
-section-danger = Gefahrenzone
 section-versions = Versionen
 
 # Buttons / actions
@@ -64,7 +63,7 @@ new-template-intro = Veröffentlichen Sie eine Vorlage und bearbeiten bzw. testr
 by-author = von { $author }
 test-render-for = Testrendern · { $tag }
 source-for = Quelle · { $tag }
-danger-explain = Version { $name }:{ $tag } löschen. Nicht mit anderen Versionen geteilte Assets werden ebenfalls entfernt; geteilte Assets bleiben erhalten.
+danger-explain = Nicht mit anderen Versionen geteilte Assets werden ebenfalls entfernt; geteilte Assets bleiben erhalten.
 delete-confirm-title = { $name }:{ $tag } löschen?
 delete-confirm-body = Dies löscht die Version endgültig und kann nicht rückgängig gemacht werden.
 

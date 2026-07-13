@@ -21,7 +21,6 @@ no-data = No data yet.
 
 # Sections
 section-recent-renders = Recent renders
-section-danger = Danger zone
 section-versions = Versions
 
 # Buttons / actions
@@ -64,7 +63,7 @@ new-template-intro = Publish a template, then edit and test-render it — all fr
 by-author = by { $author }
 test-render-for = Test render · { $tag }
 source-for = Source · { $tag }
-danger-explain = Delete version { $name }:{ $tag }. Assets not shared with other versions are removed too; shared assets are kept.
+danger-explain = Assets not shared with other versions are removed too; shared assets are kept.
 delete-confirm-title = Delete { $name }:{ $tag }?
 delete-confirm-body = This permanently deletes the version and cannot be undone.
 

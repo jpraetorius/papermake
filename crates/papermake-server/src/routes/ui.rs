@@ -365,13 +365,29 @@ pub fn template_detail_page(
                 }
                 span.muted { (t.ta("by-author", &[("author", metadata.author.clone())])) }
             }
-            // Every tagged version — click to view/edit that specific one.
+            // Every tagged version — click to view/edit that specific one. The
+            // delete action for the current version sits to the left of the list.
             div.stack style="--gap: 0.3rem;" {
                 span.eyebrow { (t.t("section-versions")) }
                 div.cluster {
+                    // Confirmation via the native Invoker Commands API — no JS.
+                    button.danger type="button" command="show-modal" commandfor="confirm-delete"
+                        style="padding: 0.2rem 0.6rem; font-size: 0.8rem;" { (t.t("btn-delete-version")) }
                     @for v in tags {
                         a.badge href=(format!("/templates/{}:{}", name, v))
                             aria-current=[(v == tag).then_some("true")] { (v) }
+                    }
+                }
+                dialog #confirm-delete {
+                    form.stack method="post" action=(format!("/ui/templates/{}/delete", name)) {
+                        h3 { (t.ta("delete-confirm-title", &[("name", name.to_string()), ("tag", tag.to_string())])) }
+                        p.muted { (t.t("danger-explain")) }
+                        p.muted { (t.t("delete-confirm-body")) }
+                        input type="hidden" name="tag" value=(tag);
+                        div.cluster {
+                            button type="button" command="close" commandfor="confirm-delete" { (t.t("btn-cancel")) }
+                            button.danger type="submit" { (t.t("btn-delete")) }
+                        }
                     }
                 }
             }
@@ -413,31 +429,6 @@ pub fn template_detail_page(
         }
 
         (section(&t.t("section-recent-renders"), renders_table(recent, now, t)))
-
-        (section(&t.t("section-danger"), html! {
-            div.card.stack {
-                p.muted {
-                    (t.ta("danger-explain", &[("name", name.to_string()), ("tag", tag.to_string())]))
-                }
-                // Confirmation via the native Invoker Commands API — no JS. The
-                // trigger only opens the dialog; the delete request is fired
-                // solely by the submit button inside it.
-                button.danger type="button" command="show-modal" commandfor="confirm-delete" {
-                    (t.t("btn-delete-version"))
-                }
-                dialog #confirm-delete {
-                    form.stack method="post" action=(format!("/ui/templates/{}/delete", name)) {
-                        h3 { (t.ta("delete-confirm-title", &[("name", name.to_string()), ("tag", tag.to_string())])) }
-                        p.muted { (t.t("delete-confirm-body")) }
-                        input type="hidden" name="tag" value=(tag);
-                        div.cluster {
-                            button type="button" command="close" commandfor="confirm-delete" { (t.t("btn-cancel")) }
-                            button.danger type="submit" { (t.t("btn-delete")) }
-                        }
-                    }
-                }
-            }
-        }))
     };
     layout(name, Nav::Templates, t, body)
 }

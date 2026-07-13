@@ -12,18 +12,18 @@
     color-scheme: light dark;
     --hue: 265;
 
-    --bg:      light-dark(oklch(98% 0.004 var(--hue)), oklch(21% 0.012 var(--hue)));
-    --surface: light-dark(oklch(100% 0 0),             oklch(25% 0.014 var(--hue)));
-    --text:    light-dark(oklch(28% 0.02 var(--hue)),  oklch(93% 0.01 var(--hue)));
-    --muted:   light-dark(oklch(52% 0.02 var(--hue)),  oklch(72% 0.02 var(--hue)));
-    --border:  light-dark(oklch(90% 0.008 var(--hue)), oklch(36% 0.014 var(--hue)));
-    --track:   light-dark(oklch(93% 0.006 var(--hue)), oklch(33% 0.014 var(--hue)));
+    --bg: light-dark(oklch(98% 0.004 var(--hue)), oklch(21% 0.012 var(--hue)));
+      --surface: light-dark(oklch(100% 0 0), oklch(25% 0.014 var(--hue)));
+      --text: light-dark(oklch(28% 0.02 var(--hue)), oklch(93% 0.01 var(--hue)));
+      --muted: light-dark(oklch(52% 0.02 var(--hue)), oklch(72% 0.02 var(--hue)));
+      --border: light-dark(oklch(90% 0.008 var(--hue)), oklch(36% 0.014 var(--hue)));
+      --track: light-dark(oklch(93% 0.006 var(--hue)), oklch(33% 0.014 var(--hue)));
 
-    --primary:     oklch(58% 0.17 var(--hue));
+    --primary: oklch(58% 0.17 var(--hue));
     --primary-ink: oklch(99% 0 0);
     --success: light-dark(oklch(56% 0.13 150), oklch(74% 0.14 150));
-    --warn:    light-dark(oklch(58% 0.16 45),  oklch(78% 0.15 65));
-    --danger:  light-dark(oklch(55% 0.20 25),  oklch(70% 0.19 25));
+    --warn: light-dark(oklch(58% 0.16 45), oklch(78% 0.15 65));
+      --danger: light-dark(oklch(55% 0.20 25), oklch(70% 0.19 25));
 
     --radius: 0.6rem;
     --gap: 1rem;
@@ -32,10 +32,26 @@
 }
 
 @layer reset {
-  *, *::before, *::after { box-sizing: border-box; }
-  * { margin: 0; }
-  html { -webkit-text-size-adjust: 100%; }
-  img, svg, iframe { display: block; max-width: 100%; }
+*,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  * {
+    margin: 0;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  img,
+  svg,
+  iframe {
+    display: block;
+    max-width: 100%;
+  }
 }
 
 @layer base {
@@ -47,21 +63,63 @@
     text-underline-offset: 0.15em;
   }
 
-  h1, h2, h3, h4, h5, h6 { line-height: 1.15; text-wrap: balance; font-weight: 650; }
-  h1 { font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.1rem); }
-  h2 { font-size: 1.35rem; }
-  h3 { font-size: 1.15rem; }
-  p { text-wrap: pretty; }
+    h1,
+    h2,
+    h3,
+    h4,
+    h5,
+    h6 {
+      line-height: 1.15;
+      text-wrap: balance;
+      font-weight: 650;
+    }
 
-  a { color: var(--primary); text-decoration-thickness: 1px; }
-  a:hover { text-decoration-thickness: 2px; }
+    h1 {
+      font-size: clamp(1.6rem, 1.2rem + 1.6vw, 2.1rem);
+    }
 
-  code, .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; }
-  code { background: var(--track); padding: 0.1em 0.35em; border-radius: 0.3rem; }
+    h2 {
+      font-size: 1.35rem;
+    }
+  
+    h3 {
+      font-size: 1.15rem;
+    }
+  
+    p {
+      text-wrap: pretty;
+    }
+  
+    a {
+      color: var(--primary);
+      text-decoration-thickness: 1px;
+    }
+  
+    a:hover {
+      text-decoration-thickness: 2px;
+    }
+  
+    code,
+    .mono {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.9em;
+    }
+  
+    code {
+      background: var(--track);
+      padding: 0.1em 0.35em;
+      border-radius: 0.3rem;
+    }
 
   /* Forms */
-  label { font-weight: 550; font-size: 0.9rem; }
-  input, textarea, select {
+    label {
+      font-weight: 550;
+      font-size: 0.9rem;
+    }
+  
+    input,
+    textarea,
+    select {
     font: inherit;
     width: 100%;
     color: var(--text);
@@ -70,15 +128,22 @@
     border-radius: var(--radius);
     padding: 0.55rem 0.7rem;
   }
-  textarea { resize: vertical; }
-  input:focus-visible, textarea:focus-visible, select:focus-visible,
-  button:focus-visible, a:focus-visible {
+textarea {
+  resize: vertical;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
     outline: 2px solid var(--primary);
     outline-offset: 2px;
   }
 
   /* Buttons — bare <button> is a real button; links opt in with .btn */
-  button, .btn {
+    button,
+    .btn {
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
@@ -94,79 +159,168 @@
     text-decoration: none;
     transition: background 0.12s ease, border-color 0.12s ease;
 
-    &:hover { background: color-mix(in oklab, var(--surface), var(--text) 7%); }
+    &:hover {
+        background: color-mix(in oklab, var(--surface), var(--text) 7%);
+      }
 
     &.primary {
       color: var(--primary-ink);
       background: var(--primary);
       border-color: transparent;
-      &:hover { background: color-mix(in oklab, var(--primary), black 12%); }
-    }
-    &.ghost { background: transparent; border-color: transparent; color: var(--primary); }
+&:hover {
+    background: color-mix(in oklab, var(--primary), black 12%);
+  }
+        }
+    
+        &.ghost {
+          background: transparent;
+          border-color: transparent;
+          color: var(--primary);
+        }
     &.danger {
       color: var(--primary-ink);
       background: var(--danger);
       border-color: transparent;
-      &:hover { background: color-mix(in oklab, var(--danger), black 12%); }
+&:hover {
+    background: color-mix(in oklab, var(--danger), black 12%);
+  }
     }
   }
 
   /* Tables */
-  table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
-  th, td { text-align: left; padding: 0.6rem 0.8rem; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.95rem;
+    }
+  
+    th,
+    td {
+      text-align: left;
+      padding: 0.6rem 0.8rem;
+    }
   thead th {
-    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em;
-    color: var(--muted); border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
   }
-  tbody tr + tr td { border-top: 1px solid var(--border); }
-  tbody tr:nth-child(even) { background: color-mix(in oklab, var(--surface), var(--text) 3%); }
+tbody tr+tr td {
+  border-top: 1px solid var(--border);
+}
+
+tbody tr:nth-child(even) {
+  background: color-mix(in oklab, var(--surface), var(--text) 3%);
+}
 }
 
 @layer layout {
-  .container { max-width: 72rem; margin-inline: auto; padding: 1.5rem 1rem 3rem; }
+  .container {
+      max-width: 72rem;
+      margin-inline: auto;
+      padding: 1.5rem 1rem 3rem;
+    }
 
   /* Vertical rhythm; override density with --gap. */
-  .stack { display: flex; flex-direction: column; gap: var(--gap, 1rem); }
+    .stack {
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap, 1rem);
+    }
   /* Inline group that wraps. */
-  .cluster { display: flex; flex-wrap: wrap; align-items: center; gap: var(--gap, 0.5rem); }
+    .cluster {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--gap, 0.5rem);
+    }
   /* Push two groups apart. */
-  .split { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1rem; }
+    .split {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
   /* Responsive auto-fit grid; tune column width with --min. */
-  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(var(--min, 16rem), 1fr)); }
+    .grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(var(--min, 16rem), 1fr));
+    }
 }
 
 @layer components {
   .navbar {
-    --navbar-pad-y: 0.75rem; /* inherits to the active-link caret below */
-    display: flex; align-items: stretch; justify-content: space-between;
-    gap: 1rem; padding: var(--navbar-pad-y) 1.25rem;
-    background: var(--surface); border-bottom: 1px solid var(--border);
+    --navbar-pad-y: 0.75rem;
+      /* inherits to the active-link caret below */
+      display: flex;
+      align-items: stretch;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: var(--navbar-pad-y) 1.25rem;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
   }
+
   .navbar .brand {
-    display: inline-flex; align-items: center; gap: 0.6rem;
-    font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text);
+    display: inline-flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-weight: 700;
+      font-size: 1.1rem;
+      text-decoration: none;
+      color: var(--text);
   }
+
   /* Logo artwork has a light background; frame it as a bordered tile. */
-  .navbar .brand img { border-radius: 12px; border: 2px solid oklch(32% 0.03 265); }
+    .navbar .brand img {
+      border-radius: 12px;
+      border: 2px solid oklch(32% 0.03 265);
+    }
   /* Full-height links so the active caret can sit on the navbar's bottom edge. */
-  .navbar nav { display: flex; align-items: stretch; gap: 1.25rem; }
+    .navbar nav {
+      display: flex;
+      align-items: stretch;
+      gap: 1.25rem;
+    }
 
   /* Current location: bold, accent-colored, with a caret in the content-area
      gray whose tip rises from the content up into the navbar. */
-  .navbar nav a { display: inline-flex; align-items: center; position: relative; }
+    .navbar nav a {
+      display: inline-flex;
+      align-items: center;
+      position: relative;
+    }
   .navbar nav a[aria-current="page"] {
     color: var(--primary);
     font-weight: 700;
     text-decoration: none;
   }
+.navbar nav a[aria-current="page"]::before,
   .navbar nav a[aria-current="page"]::after {
     content: "";
     position: absolute;
     left: 50%;
-    bottom: calc(-1 * var(--navbar-pad-y) - 1px); /* reach the navbar's bottom edge */
+    top: 100%;
     transform: translateX(-50%);
-    border: 0.5rem solid transparent;
-    border-bottom-color: var(--bg); /* upward tip, in the content background */
+    border-style: solid;
+      border-color: transparent;
+    }
+    
+    /* Dark outer triangle */
+    .navbar nav a[aria-current="page"]::before {
+      margin-top: -0.75rem;
+      border-width: 1.45rem;
+      border-bottom-color: var(--border);
+    }
+    
+    /* Main triangle */
+    .navbar nav a[aria-current="page"]::after {
+      margin-top: -0.7rem;
+      border-width: 1.4rem;
+      border-bottom-color: var(--bg);
   }
 
   .card {
@@ -177,23 +331,52 @@
     box-shadow: var(--shadow);
   }
 
-  .kpi .num { font-size: clamp(1.8rem, 1.2rem + 2.4vw, 2.4rem); font-weight: 700; line-height: 1; }
+    .kpi .num {
+      font-size: clamp(1.8rem, 1.2rem + 2.4vw, 2.4rem);
+      font-weight: 700;
+      line-height: 1;
+    }
 
   .badge {
-    display: inline-flex; align-items: center; gap: 0.3em;
-    font-size: 0.78rem; font-weight: 550; line-height: 1;
-    padding: 0.28em 0.6em; border-radius: 999px;
-    background: var(--track); color: var(--text); text-decoration: none;
+    display: inline-flex;
+      align-items: center;
+      gap: 0.3em;
+      font-size: 0.78rem;
+      font-weight: 550;
+      line-height: 1;
+      padding: 0.28em 0.6em;
+      border-radius: 999px;
+      background: var(--track);
+      color: var(--text);
+      text-decoration: none;
     border: 1px solid color-mix(in oklab, var(--border), transparent 20%);
 
-    &.ok  { background: color-mix(in oklab, var(--success), transparent 82%); color: color-mix(in oklab, var(--success), var(--text) 35%); border-color: transparent; }
-    &.bad { background: color-mix(in oklab, var(--warn), transparent 80%);    color: color-mix(in oklab, var(--warn), var(--text) 35%);    border-color: transparent; }
-  }
+    &.ok {
+        background: color-mix(in oklab, var(--success), transparent 82%);
+        color: color-mix(in oklab, var(--success), var(--text) 35%);
+        border-color: transparent;
+      }
+&.bad {
+  background: color-mix(in oklab, var(--warn), transparent 80%);
+  color: color-mix(in oklab, var(--warn), var(--text) 35%);
+  border-color: transparent;
+}
+}
   /* Clickable version badges (tags) */
-  a.badge:hover { background: color-mix(in oklab, var(--track), var(--text) 10%); }
-  a.badge[aria-current="true"] { background: var(--primary); color: var(--primary-ink); border-color: transparent; }
+    a.badge:hover {
+      background: color-mix(in oklab, var(--track), var(--text) 10%);
+    }
+  
+    a.badge[aria-current="true"] {
+      background: var(--primary);
+      color: var(--primary-ink);
+      border-color: transparent;
+    }
 
   dialog {
+    /* Restore the UA centering that our `* { margin: 0 }` reset clobbered —
+       a modal <dialog> centers via `margin: auto` against its inset-0 box. */
+    margin: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--surface);
@@ -202,21 +385,67 @@
     max-width: min(90vw, 30rem);
     box-shadow: var(--shadow);
   }
-  dialog::backdrop { background: oklch(0% 0 0 / 0.45); }
+dialog::backdrop {
+  background: oklch(0% 0 0 / 0.45);
+}
 
-  .callout { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }
-  .callout.warn { background: color-mix(in oklab, var(--warn), transparent 88%); border-color: color-mix(in oklab, var(--warn), transparent 55%); }
+.callout {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+}
 
-  .bar-track { height: 0.5rem; background: var(--track); border-radius: 999px; overflow: hidden; }
-  .bar-fill  { height: 100%; background: var(--primary); border-radius: 999px; }
-  .spark { color: var(--primary); width: 100%; height: 80px; }
+.callout.warn {
+  background: color-mix(in oklab, var(--warn), transparent 88%);
+  border-color: color-mix(in oklab, var(--warn), transparent 55%);
+}
+
+.bar-track {
+  height: 0.5rem;
+  background: var(--track);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+    .bar-fill {
+      height: 100%;
+      background: var(--primary);
+      border-radius: 999px;
+    }
+
+    .spark {
+      color: var(--primary);
+      width: 100%;
+      height: 80px;
+    }
 }
 
 @layer utilities {
-  .muted { color: var(--muted); }
-  .eyebrow { text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.72rem; font-weight: 600; color: var(--muted); }
-  .center { text-align: center; }
-  .nowrap { white-space: nowrap; }
-  .flush { padding: 0; }
-  .scroll-x { overflow-x: auto; }
-}
+  .muted {
+      color: var(--muted);
+    }
+  
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--muted);
+    }
+  
+    .center {
+      text-align: center;
+    }
+  
+    .nowrap {
+      white-space: nowrap;
+    }
+  
+    .flush {
+      padding: 0;
+    }
+
+    .scroll-x {
+      overflow-x: auto;
+    }
+    }
