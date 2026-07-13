@@ -41,6 +41,7 @@ pub fn router() -> Router<AppState> {
         .route("/ui/templates", post(ui_create))
         .route("/ui/templates/{name}/render", post(ui_render))
         .route("/ui/templates/{name}/publish", post(ui_publish))
+        .route("/ui/templates/{name}/delete", post(ui_delete))
         // Vendored assets embedded in the binary (no filesystem dependency —
         // works under distroless and regardless of the working directory).
         .route("/assets/app.css", get(app_css))
@@ -399,6 +400,20 @@ pub fn template_detail_page(
         }
 
         (section("Recent renders", renders_table(recent, now)))
+
+        (section("Danger zone", html! {
+            div.card.stack {
+                p.muted {
+                    "Delete version " strong { (name) ":" (tag) } ". Assets not shared with "
+                    "other versions are removed too; shared assets are kept."
+                }
+                form method="post" action=(format!("/ui/templates/{}/delete", name))
+                     onsubmit=(format!("return confirm('Delete {}:{}? This cannot be undone.')", name, tag)) {
+                    input type="hidden" name="tag" value=(tag);
+                    button.danger type="submit" { "Delete this version" }
+                }
+            }
+        }))
     };
     layout(name, Nav::Templates, body)
 }
@@ -563,6 +578,27 @@ async fn ui_publish(
     Form(form): Form<PublishForm>,
 ) -> Response {
     publish(&state, &name, form.author, form.main_typ, form.tag).await
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteForm {
+    #[serde(default = "default_tag")]
+    tag: String,
+}
+
+async fn ui_delete(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Form(form): Form<DeleteForm>,
+) -> Response {
+    match state.registry.delete_version(&name, &form.tag).await {
+        Ok(_) => Redirect::to("/templates").into_response(),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("Delete failed: {}", e),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -770,6 +806,9 @@ mod tests {
         assert!(html.contains("aria-current=\"true\""));
         // Test render + publish target the viewed tag.
         assert!(html.contains("name=\"tag\" value=\"v2\""));
+        // Delete this version.
+        assert!(html.contains("/ui/templates/invoice/delete"));
+        assert!(html.contains("Delete this version"));
     }
 
     #[test]

@@ -41,6 +41,18 @@ pub struct RenderResult {
     pub duration_ms: u32,
 }
 
+/// Outcome of deleting a tagged version, including asset garbage collection.
+#[derive(Debug, Default, Serialize, PartialEq, Eq)]
+pub struct DeleteSummary {
+    /// The manifest was still referenced by another tag, so it (and its assets)
+    /// were kept.
+    pub manifest_kept: bool,
+    /// The now-orphaned manifest was deleted.
+    pub manifest_deleted: bool,
+    /// Number of asset blobs deleted (those no longer referenced anywhere).
+    pub blobs_deleted: usize,
+}
+
 // Implementation for Registry with blob storage only
 impl<S: BlobStorage + 'static, R: RenderStorage> Registry<S, R> {
     /// Create a new registry with the given storage backend
@@ -174,6 +186,124 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
         // Return the manifest hash for content-addressable access
         Ok(manifest_hash)
+    }
+
+    /// Delete a single tagged version: `refs/{name}/{tag}`.
+    ///
+    /// Content-addressed assets are garbage-collected, but only what nothing
+    /// else references:
+    /// - the version's **manifest** is removed unless another tag still points
+    ///   to it (identical publishes dedup to the same manifest);
+    /// - each **asset blob** is removed only if no *surviving* manifest still
+    ///   references it (e.g. a shared `logo.png` is kept).
+    ///
+    /// Returns a [`DeleteSummary`]. Errors with a not-found template error if
+    /// the version doesn't exist.
+    ///
+    /// Note: this is a mark-sweep over the ref/manifest set; it is not locked
+    /// against a concurrent `publish`. Fine at this scale — surface a lock if
+    /// heavy concurrent writes are ever expected.
+    pub async fn delete_version(
+        &self,
+        name: &str,
+        tag: &str,
+    ) -> Result<DeleteSummary, RegistryError> {
+        let ref_key = ContentAddress::ref_key(name, tag);
+
+        // Resolve the ref → manifest hash (not-found if the version is missing).
+        let manifest_hash_bytes = self.storage.get(&ref_key).await.map_err(|e| match e {
+            crate::storage::blob_storage::StorageError::NotFound(_) => RegistryError::Template(
+                crate::error::TemplateError::not_found(format!("{}:{}", name, tag)),
+            ),
+            other => RegistryError::Storage(StorageError::backend(other.to_string())),
+        })?;
+        let manifest_hash = String::from_utf8(manifest_hash_bytes).map_err(|e| {
+            RegistryError::Storage(StorageError::backend(format!(
+                "Invalid UTF-8 in stored manifest hash: {}",
+                e
+            )))
+        })?;
+
+        // Drop the tag pointer, then GC anything it orphaned.
+        self.storage
+            .delete(&ref_key)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+
+        self.gc_orphaned(&manifest_hash).await
+    }
+
+    /// Garbage-collect a manifest (and its asset blobs) that a just-deleted ref
+    /// may have orphaned — keeping anything still referenced by a surviving tag.
+    async fn gc_orphaned(
+        &self,
+        deleted_manifest_hash: &str,
+    ) -> Result<DeleteSummary, RegistryError> {
+        use std::collections::HashSet;
+        let mut summary = DeleteSummary::default();
+
+        // Manifest hashes still referenced by remaining tags.
+        let ref_keys = self
+            .storage
+            .list_keys("refs/")
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        let mut live_manifests: HashSet<String> = HashSet::new();
+        for rk in &ref_keys {
+            if let Ok(bytes) = self.storage.get(rk).await
+                && let Ok(h) = String::from_utf8(bytes)
+            {
+                live_manifests.insert(h);
+            }
+        }
+
+        // Still referenced by another tag → keep manifest and all its assets.
+        if live_manifests.contains(deleted_manifest_hash) {
+            summary.manifest_kept = true;
+            return Ok(summary);
+        }
+
+        // Enumerate the orphaned manifest's asset blobs (empty if already gone).
+        let orphan_key = ContentAddress::manifest_key(deleted_manifest_hash);
+        let orphan_blobs: Vec<String> = match self.storage.get(&orphan_key).await {
+            Ok(bytes) => Manifest::from_bytes(&bytes)
+                .map(|m| m.files.values().cloned().collect())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+
+        // Blobs still referenced by any surviving manifest.
+        let mut live_blobs: HashSet<String> = HashSet::new();
+        for mh in &live_manifests {
+            if let Ok(bytes) = self.storage.get(&ContentAddress::manifest_key(mh)).await
+                && let Ok(m) = Manifest::from_bytes(&bytes)
+            {
+                live_blobs.extend(m.files.values().cloned());
+            }
+        }
+
+        // Delete now-unreferenced asset blobs.
+        let mut blob_keys: Vec<String> = orphan_blobs
+            .into_iter()
+            .filter(|h| !live_blobs.contains(h))
+            .map(|h| ContentAddress::blob_key(&h))
+            .collect();
+        blob_keys.sort();
+        blob_keys.dedup();
+        summary.blobs_deleted = blob_keys.len();
+        self.storage
+            .delete_many(&blob_keys)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+
+        // Delete the orphaned manifest itself.
+        self.storage
+            .delete(&orphan_key)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        summary.manifest_deleted = true;
+
+        Ok(summary)
     }
 
     /// Resolve a template reference to its manifest hash
@@ -2006,5 +2136,53 @@ Hello #data.name"#
             .await
             .unwrap();
         assert_eq!(meta.expiry_date, None);
+    }
+
+    #[tokio::test]
+    async fn test_delete_version_gc_shared_and_unique_assets() {
+        let storage = MemoryStorage::new();
+        let registry = Registry::new_storage_only(storage);
+
+        let logo = b"SHARED-LOGO-BYTES".to_vec();
+        let main_a = b"#let data = json(bytes(sys.inputs.data))\n= A #data.name".to_vec();
+        let main_b = b"#let data = json(bytes(sys.inputs.data))\n= B #data.name".to_vec();
+
+        // a:latest and a:v2 are byte-identical → same manifest hash (dedup).
+        // b:latest shares the same logo blob but has a different main.typ.
+        let bundle_a = || {
+            TemplateBundle::new(main_a.clone(), TemplateMetadata::new("A", "a@x.com"))
+                .add_file("assets/logo.png", logo.clone())
+        };
+        let bundle_b = TemplateBundle::new(main_b.clone(), TemplateMetadata::new("B", "b@x.com"))
+            .add_file("assets/logo.png", logo.clone());
+
+        registry.publish(bundle_a(), "a", "latest").await.unwrap();
+        registry.publish(bundle_a(), "a", "v2").await.unwrap();
+        registry.publish(bundle_b, "b", "latest").await.unwrap();
+
+        let logo_key = ContentAddress::blob_key(&ContentAddress::hash(&logo));
+        let main_a_key = ContentAddress::blob_key(&ContentAddress::hash(&main_a));
+
+        // Delete a:v2 — its manifest is still referenced by a:latest, so nothing
+        // is garbage-collected.
+        let s1 = registry.delete_version("a", "v2").await.unwrap();
+        assert!(s1.manifest_kept);
+        assert!(!s1.manifest_deleted);
+        assert_eq!(s1.blobs_deleted, 0);
+        assert!(registry.resolve("a:v2").await.is_err());
+        assert!(registry.resolve("a:latest").await.is_ok());
+
+        // Delete a:latest — manifest now orphaned. main.typ(A) is unique → gone;
+        // the logo is shared with b:latest → kept.
+        let s2 = registry.delete_version("a", "latest").await.unwrap();
+        assert!(s2.manifest_deleted);
+        assert_eq!(s2.blobs_deleted, 1);
+        assert!(!registry.storage.exists(&main_a_key).await.unwrap());
+        assert!(registry.storage.exists(&logo_key).await.unwrap());
+        assert!(registry.resolve("a:latest").await.is_err());
+        assert!(registry.resolve("b:latest").await.is_ok());
+
+        // Deleting a missing version errors.
+        assert!(registry.delete_version("a", "latest").await.is_err());
     }
 }
