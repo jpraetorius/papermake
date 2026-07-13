@@ -13,6 +13,7 @@ use tracing::{error, info};
 
 mod config;
 mod error;
+mod i18n;
 mod models;
 mod routes;
 

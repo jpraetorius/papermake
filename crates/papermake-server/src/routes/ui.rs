@@ -4,10 +4,9 @@
 //! Rendering is split into pure `*_page`/`*_fragment` functions (unit-testable
 //! without any infra) and thin handlers that fetch data then call them.
 //!
-//! Styling (see `assets/app.css`) is semantic-first: bare elements are styled
-//! by default; a few layout helpers (`.stack`/`.cluster`/`.grid`/`.split`),
-//! components (`.card`/`.badge`/`.btn`) and modifiers (`.primary`/`.ok`/`.bad`)
-//! do the rest.
+//! All user-facing text comes from the [`crate::i18n`] catalogs; the request
+//! language (`I18n`) is resolved from `Accept-Language` and threaded into the
+//! pure functions.
 
 use axum::{
     Router,
@@ -26,6 +25,7 @@ use papermake_registry::render_storage::summary::Summary;
 use papermake_registry::render_storage::types::RenderRecord;
 
 use crate::AppState;
+use crate::i18n::I18n;
 
 /// Starter template pre-filled in the "New template" editor.
 const STARTER_TYP: &str = "#let data = json(bytes(sys.inputs.data))\n\n\
@@ -62,11 +62,11 @@ enum Nav {
 
 /// Shared page shell: stylesheet, htmx, and a navbar with the current path
 /// highlighted (bold, accent-colored, with a caret pointing at the content).
-fn layout(title: &str, active: Nav, body: Markup) -> Markup {
+fn layout(title: &str, active: Nav, t: &I18n, body: Markup) -> Markup {
     let current = |n: Nav| (active == n).then_some("page");
     html! {
         (DOCTYPE)
-        html lang="en" {
+        html lang=(t.code()) {
             head {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
@@ -82,8 +82,8 @@ fn layout(title: &str, active: Nav, body: Markup) -> Markup {
                         span { "Papermake" }
                     }
                     nav {
-                        a href="/" aria-current=[current(Nav::Dashboard)] { "Dashboard" }
-                        a href="/templates" aria-current=[current(Nav::Templates)] { "Templates" }
+                        a href="/" aria-current=[current(Nav::Dashboard)] { (t.t("nav-dashboard")) }
+                        a href="/templates" aria-current=[current(Nav::Templates)] { (t.t("nav-templates")) }
                     }
                 }
                 main.container.stack { (body) }
@@ -113,37 +113,38 @@ fn stat_card(label: &str, value: Markup) -> Markup {
 }
 
 /// Status badge for a render record.
-fn status_badge(success: bool) -> Markup {
+fn status_badge(success: bool, t: &I18n) -> Markup {
     html! {
         @if success {
-            span.badge.ok { "✓ ok" }
+            span.badge.ok { (t.t("status-ok")) }
         } @else {
-            span.badge.bad { "✗ failed" }
+            span.badge.bad { (t.t("status-failed")) }
         }
     }
 }
 
-/// Human-friendly relative time (e.g. "3m ago").
-fn relative_time(ts: OffsetDateTime, now: OffsetDateTime) -> String {
+/// Human-friendly relative time (e.g. "3m ago"), localized.
+fn relative_time(ts: OffsetDateTime, now: OffsetDateTime, t: &I18n) -> String {
     let secs = (now - ts).whole_seconds();
     if secs < 0 {
-        return "just now".to_string();
+        return t.t("time-just-now");
     }
-    if secs < 60 {
-        format!("{}s ago", secs)
+    let (id, n) = if secs < 60 {
+        ("time-seconds", secs)
     } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
+        ("time-minutes", secs / 60)
     } else if secs < 86_400 {
-        format!("{}h ago", secs / 3600)
+        ("time-hours", secs / 3600)
     } else {
-        format!("{}d ago", secs / 86_400)
-    }
+        ("time-days", secs / 86_400)
+    };
+    t.ta(id, &[("n", n.to_string())])
 }
 
 /// Inline SVG area sparkline over a series of values.
-fn sparkline(values: &[u64]) -> Markup {
+fn sparkline(values: &[u64], t: &I18n) -> Markup {
     if values.is_empty() {
-        return html! { p.muted { "No data yet." } };
+        return html! { p.muted { (t.t("no-data")) } };
     }
     let (w, h) = (600.0_f64, 80.0_f64);
     let max = (*values.iter().max().unwrap_or(&1)).max(1) as f64;
@@ -175,9 +176,9 @@ fn sparkline(values: &[u64]) -> Markup {
 }
 
 /// Horizontal bar chart from labelled counts.
-fn bars(items: &[(String, u64)]) -> Markup {
+fn bars(items: &[(String, u64)], t: &I18n) -> Markup {
     if items.is_empty() {
-        return html! { p.muted { "No data yet." } };
+        return html! { p.muted { (t.t("no-data")) } };
     }
     let max = items.iter().map(|(_, c)| *c).max().unwrap_or(1).max(1) as f64;
     html! {
@@ -198,27 +199,34 @@ fn bars(items: &[(String, u64)]) -> Markup {
 }
 
 /// A table of render records inside a scrollable card.
-fn renders_table(records: &[RenderRecord], now: OffsetDateTime) -> Markup {
+fn renders_table(records: &[RenderRecord], now: OffsetDateTime, t: &I18n) -> Markup {
     html! {
         @if records.is_empty() {
-            p.muted { "No renders yet." }
+            p.muted { (t.t("no-renders")) }
         } @else {
             div.card.flush.scroll-x {
                 table {
                     thead {
-                        tr { th { "Render" } th { "Template" } th { "Status" } th { "Duration" } th { "When" } th { "PDF" } }
+                        tr {
+                            th { (t.t("th-render")) }
+                            th { (t.t("th-template")) }
+                            th { (t.t("th-status")) }
+                            th { (t.t("th-duration")) }
+                            th { (t.t("th-when")) }
+                            th { (t.t("th-pdf")) }
+                        }
                     }
                     tbody {
                         @for r in records {
                             tr {
                                 td { code { (short_id(&r.render_id)) } }
                                 td { (r.template_ref) }
-                                td { (status_badge(r.success)) }
-                                td.nowrap { (r.duration_ms) " ms" }
-                                td.nowrap { (relative_time(r.timestamp, now)) }
+                                td { (status_badge(r.success, t)) }
+                                td.nowrap { (t.ta("duration-ms", &[("n", r.duration_ms.to_string())])) }
+                                td.nowrap { (relative_time(r.timestamp, now, t)) }
                                 td {
                                     @if r.success {
-                                        a href=(format!("/api/renders/{}/pdf", r.render_id)) download { "download" }
+                                        a href=(format!("/api/renders/{}/pdf", r.render_id)) download { (t.t("link-download")) }
                                     } @else { "—" }
                                 }
                             }
@@ -238,85 +246,90 @@ fn short_id(id: &str) -> String {
 // Pages (pure)
 // ---------------------------------------------------------------------------
 
-/// Dashboard: KPI cards, volume sparkline, per-template bars, recent renders,
-/// template list.
+/// Dashboard: KPI cards, volume sparkline, per-template bars, recent renders.
 pub fn dashboard_page(
     summary: &Summary,
     templates: &[TemplateInfo],
     now: OffsetDateTime,
+    t: &I18n,
 ) -> Markup {
     let volume: Vec<u64> = summary.volume_by_day.iter().map(|v| v.renders).collect();
     let tpl_bars: Vec<(String, u64)> = summary
         .templates
         .iter()
-        .map(|t| (t.template_name.clone(), t.total_renders))
+        .map(|s| (s.template_name.clone(), s.total_renders))
         .collect();
 
     let body = html! {
         div.split {
-            h1 { "Dashboard" }
-            a.btn.primary href="/templates/new" { "＋ New template" }
+            h1 { (t.t("dashboard-title")) }
+            a.btn.primary href="/templates/new" { (t.t("btn-new-template")) }
         }
 
         // KPI cards.
         div.grid style="--min: 12rem;" {
-            (stat_card("Renders · 24h", html! { (summary.totals.renders_24h) }))
-            (stat_card("Success rate · 24h", html! {
+            (stat_card(&t.t("kpi-renders-24h"), html! { (summary.totals.renders_24h) }))
+            (stat_card(&t.t("kpi-success-24h"), html! {
                 (format!("{:.0}%", summary.totals.success_rate_24h * 100.0))
             }))
-            (stat_card("p90 latency · 24h", html! {
-                (summary.totals.p90_latency_ms_24h) " " span.muted style="font-size: 1rem;" { "ms" }
+            (stat_card(&t.t("kpi-p90-24h"), html! {
+                (summary.totals.p90_latency_ms_24h) " " span.muted style="font-size: 1rem;" { (t.t("unit-ms")) }
             }))
-            (stat_card("Templates", html! { (templates.len()) }))
+            (stat_card(&t.t("kpi-templates"), html! { (templates.len()) }))
         }
 
         // Charts row.
         div.grid style="--min: 22rem;" {
             div.card.stack {
-                h2.eyebrow { "Render volume" }
-                (sparkline(&volume))
+                h2.eyebrow { (t.t("chart-volume")) }
+                (sparkline(&volume, t))
             }
             div.card.stack {
-                h2.eyebrow { "Renders per template" }
-                (bars(&tpl_bars))
+                h2.eyebrow { (t.t("chart-per-template")) }
+                (bars(&tpl_bars, t))
             }
         }
 
-        (section("Recent renders", renders_table(&summary.recent, now)))
+        (section(&t.t("section-recent-renders"), renders_table(&summary.recent, now, t)))
     };
-    layout("Dashboard", Nav::Dashboard, body)
+    layout(&t.t("dashboard-title"), Nav::Dashboard, t, body)
 }
 
 /// Templates index: all templates in an alphabetical table.
-pub fn templates_page(templates: &[TemplateInfo]) -> Markup {
+pub fn templates_page(templates: &[TemplateInfo], t: &I18n) -> Markup {
     let body = html! {
         div.split {
-            h1 { "Templates" }
-            a.btn.primary href="/templates/new" { "＋ New template" }
+            h1 { (t.t("templates-title")) }
+            a.btn.primary href="/templates/new" { (t.t("btn-new-template")) }
         }
 
         @if templates.is_empty() {
             div.card.stack.center {
-                p { strong { "No templates yet." } }
-                p.muted { "Create one to publish, edit, and test-render it here." }
-                p { a.btn.primary href="/templates/new" { "Create your first template" } }
+                p { strong { (t.t("no-templates")) } }
+                p.muted { (t.t("templates-empty-hint")) }
+                p { a.btn.primary href="/templates/new" { (t.t("btn-create-first")) } }
             }
         } @else {
             div.card.flush.scroll-x {
                 table {
                     thead {
-                        tr { th { "Template" } th { "Name" } th { "Author" } th { "Tags" } }
+                        tr {
+                            th { (t.t("th-template")) }
+                            th { (t.t("th-name")) }
+                            th { (t.t("th-author")) }
+                            th { (t.t("th-tags")) }
+                        }
                     }
                     tbody {
-                        @for t in templates {
+                        @for tpl in templates {
                             tr {
-                                td { a href=(format!("/templates/{}", t.name)) { (t.full_name()) } }
-                                td { (t.metadata.name) }
-                                td.muted { (t.metadata.author) }
+                                td { a href=(format!("/templates/{}", tpl.name)) { (tpl.full_name()) } }
+                                td { (tpl.metadata.name) }
+                                td.muted { (tpl.metadata.author) }
                                 td {
                                     div.cluster style="--gap: 0.3rem;" {
-                                        @for tag in &t.tags {
-                                            a.badge href=(format!("/templates/{}:{}", t.name, tag)) { (tag) }
+                                        @for tag in &tpl.tags {
+                                            a.badge href=(format!("/templates/{}:{}", tpl.name, tag)) { (tag) }
                                         }
                                     }
                                 }
@@ -327,11 +340,12 @@ pub fn templates_page(templates: &[TemplateInfo]) -> Markup {
             }
         }
     };
-    layout("Templates", Nav::Templates, body)
+    layout(&t.t("templates-title"), Nav::Templates, t, body)
 }
 
 /// Template detail: metadata/tags, test-render, editor/publish, recent renders.
 /// `tag` is the version currently being viewed (its source is shown / rendered).
+#[allow(clippy::too_many_arguments)]
 pub fn template_detail_page(
     name: &str,
     tag: &str,
@@ -340,6 +354,7 @@ pub fn template_detail_page(
     source: &str,
     recent: &[RenderRecord],
     now: OffsetDateTime,
+    t: &I18n,
 ) -> Markup {
     let body = html! {
         div.split {
@@ -348,15 +363,15 @@ pub fn template_detail_page(
                     h1 { (name) }
                     span.badge { (tag) }
                 }
-                span.muted { "by " (metadata.author) }
+                span.muted { (t.ta("by-author", &[("author", metadata.author.clone())])) }
             }
             // Every tagged version — click to view/edit that specific one.
             div.stack style="--gap: 0.3rem;" {
-                span.eyebrow { "Versions" }
+                span.eyebrow { (t.t("section-versions")) }
                 div.cluster {
-                    @for t in tags {
-                        a.badge href=(format!("/templates/{}:{}", name, t))
-                            aria-current=[(t == tag).then_some("true")] { (t) }
+                    @for v in tags {
+                        a.badge href=(format!("/templates/{}:{}", name, v))
+                            aria-current=[(v == tag).then_some("true")] { (v) }
                     }
                 }
             }
@@ -365,107 +380,106 @@ pub fn template_detail_page(
         div.grid style="--min: 24rem;" {
             // Test render (htmx: swaps the PDF iframe in without a reload).
             div.card.stack {
-                h2.eyebrow { "Test render · " (tag) }
+                h2.eyebrow { (t.ta("test-render-for", &[("tag", tag.to_string())])) }
                 form.stack hx-post=(format!("/ui/templates/{}/render", name))
                      hx-target="#render-result" hx-swap="innerHTML" {
                     input type="hidden" name="tag" value=(tag);
-                    label for="data" { "Input data (JSON)" }
+                    label for="data" { (t.t("label-input-data")) }
                     textarea id="data" name="data" rows="6" { "{}" }
-                    div { button.primary type="submit" { "Test Render" } }
+                    div { button.primary type="submit" { (t.t("btn-test-render")) } }
                 }
                 div id="render-result" {}
             }
 
             // Source + publish.
             div.card.stack {
-                h2.eyebrow { "Source · " (tag) }
+                h2.eyebrow { (t.ta("source-for", &[("tag", tag.to_string())])) }
                 form.stack method="post" action=(format!("/ui/templates/{}/publish", name)) {
                     label for="main_typ" { "main.typ" }
                     textarea id="main_typ" name="main_typ" rows="14" class="mono" { (source) }
                     div.cluster style="--gap: 1rem;" {
                         div.stack style="--gap: 0.25rem;" {
-                            label for="author" { "Author" }
+                            label for="author" { (t.t("label-author")) }
                             input id="author" name="author" value=(metadata.author);
                         }
                         div.stack style="--gap: 0.25rem;" {
-                            label for="tag" { "Tag" }
+                            label for="tag" { (t.t("label-tag")) }
                             input id="tag" name="tag" value=(tag);
                         }
                     }
-                    div { button type="submit" { "Publish" } }
+                    div { button type="submit" { (t.t("btn-publish")) } }
                 }
             }
         }
 
-        (section("Recent renders", renders_table(recent, now)))
+        (section(&t.t("section-recent-renders"), renders_table(recent, now, t)))
 
-        (section("Danger zone", html! {
+        (section(&t.t("section-danger"), html! {
             div.card.stack {
                 p.muted {
-                    "Delete version " strong { (name) ":" (tag) } ". Assets not shared with "
-                    "other versions are removed too; shared assets are kept."
+                    (t.ta("danger-explain", &[("name", name.to_string()), ("tag", tag.to_string())]))
                 }
                 // Confirmation via the native Invoker Commands API — no JS. The
                 // trigger only opens the dialog; the delete request is fired
                 // solely by the submit button inside it.
                 button.danger type="button" command="show-modal" commandfor="confirm-delete" {
-                    "Delete this version"
+                    (t.t("btn-delete-version"))
                 }
                 dialog #confirm-delete {
                     form.stack method="post" action=(format!("/ui/templates/{}/delete", name)) {
-                        h3 { "Delete " (name) ":" (tag) "?" }
-                        p.muted { "This permanently deletes the version and cannot be undone." }
+                        h3 { (t.ta("delete-confirm-title", &[("name", name.to_string()), ("tag", tag.to_string())])) }
+                        p.muted { (t.t("delete-confirm-body")) }
                         input type="hidden" name="tag" value=(tag);
                         div.cluster {
-                            button type="button" command="close" commandfor="confirm-delete" { "Cancel" }
-                            button.danger type="submit" { "Delete" }
+                            button type="button" command="close" commandfor="confirm-delete" { (t.t("btn-cancel")) }
+                            button.danger type="submit" { (t.t("btn-delete")) }
                         }
                     }
                 }
             }
         }))
     };
-    layout(name, Nav::Templates, body)
+    layout(name, Nav::Templates, t, body)
 }
 
 /// "New template" creation form.
-pub fn new_template_page() -> Markup {
+pub fn new_template_page(t: &I18n) -> Markup {
     let body = html! {
-        h1 { "New template" }
-        p.muted { "Publish a template, then edit and test-render it — all from here." }
+        h1 { (t.t("new-template-title")) }
+        p.muted { (t.t("new-template-intro")) }
         div.card {
             form.stack method="post" action="/ui/templates" {
                 div.cluster style="--gap: 1rem;" {
                     div.stack style="--gap: 0.25rem;" {
-                        label for="name" { "Name" }
+                        label for="name" { (t.t("label-name")) }
                         input id="name" name="name" placeholder="invoice" required;
                     }
                     div.stack style="--gap: 0.25rem;" {
-                        label for="author" { "Author" }
+                        label for="author" { (t.t("label-author")) }
                         input id="author" name="author" placeholder="you@example.com" required;
                     }
                     div.stack style="--gap: 0.25rem;" {
-                        label for="tag" { "Tag" }
+                        label for="tag" { (t.t("label-tag")) }
                         input id="tag" name="tag" value="latest";
                     }
                 }
                 label for="main_typ" { "main.typ" }
                 textarea id="main_typ" name="main_typ" rows="14" class="mono" { (STARTER_TYP) }
                 div.cluster {
-                    button.primary type="submit" { "Create template" }
-                    a.btn.ghost href="/" { "Cancel" }
+                    button.primary type="submit" { (t.t("btn-create")) }
+                    a.btn.ghost href="/" { (t.t("btn-cancel")) }
                 }
             }
         }
     };
-    layout("New template", Nav::Templates, body)
+    layout(&t.t("new-template-title"), Nav::Templates, t, body)
 }
 
 /// htmx fragment shown after a successful test render.
-pub fn render_result_fragment(render_id: &str) -> Markup {
+pub fn render_result_fragment(render_id: &str, t: &I18n) -> Markup {
     html! {
         div.stack style="--gap: 0.5rem;" {
-            p.muted { "Rendered " code { (short_id(render_id)) } }
+            p.muted { (t.t("rendered")) " " code { (short_id(render_id)) } }
             iframe src=(format!("/api/renders/{}/pdf", render_id))
                    title="Rendered PDF"
                    style="width: 100%; height: 600px; border: 1px solid var(--border); border-radius: var(--radius);" {}
@@ -474,10 +488,10 @@ pub fn render_result_fragment(render_id: &str) -> Markup {
 }
 
 /// htmx fragment shown after a failed test render.
-pub fn render_error_fragment(message: &str) -> Markup {
+pub fn render_error_fragment(message: &str, t: &I18n) -> Markup {
     html! {
         div.callout.warn role="alert" {
-            strong { "Render failed" }
+            strong { (t.t("render-failed")) }
             p { (message) }
         }
     }
@@ -487,7 +501,7 @@ pub fn render_error_fragment(message: &str) -> Markup {
 // Handlers (thin)
 // ---------------------------------------------------------------------------
 
-async fn dashboard(State(state): State<AppState>) -> Markup {
+async fn dashboard(State(state): State<AppState>, t: I18n) -> Markup {
     let now = OffsetDateTime::now_utc();
     let summary = state
         .registry
@@ -495,34 +509,38 @@ async fn dashboard(State(state): State<AppState>) -> Markup {
         .await
         .unwrap_or_else(|_| Summary::empty(now));
     let templates = state.registry.list_templates().await.unwrap_or_default();
-    dashboard_page(&summary, &templates, now)
+    dashboard_page(&summary, &templates, now, &t)
 }
 
-async fn new_template() -> Markup {
-    new_template_page()
+async fn new_template(t: I18n) -> Markup {
+    new_template_page(&t)
 }
 
-async fn templates_list(State(state): State<AppState>) -> Markup {
+async fn templates_list(State(state): State<AppState>, t: I18n) -> Markup {
     let mut templates = state.registry.list_templates().await.unwrap_or_default();
-    templates.sort_by_key(|t| t.full_name());
-    templates_page(&templates)
+    templates.sort_by_key(|tpl| tpl.full_name());
+    templates_page(&templates, &t)
 }
 
-async fn template_detail(State(state): State<AppState>, Path(reference): Path<String>) -> Response {
+async fn template_detail(
+    State(state): State<AppState>,
+    Path(reference): Path<String>,
+    t: I18n,
+) -> Response {
     let now = OffsetDateTime::now_utc();
 
     // Reference is `name` or `name:tag`; default to the "latest" tag.
     let (name, tag) = match reference.split_once(':') {
-        Some((n, t)) => (n.to_string(), t.to_string()),
+        Some((n, tg)) => (n.to_string(), tg.to_string()),
         None => (reference.clone(), "latest".to_string()),
     };
     let templates = state.registry.list_templates().await.unwrap_or_default();
     let info = templates
         .iter()
-        .find(|t| t.name == name || t.full_name() == name);
+        .find(|tpl| tpl.name == name || tpl.full_name() == name);
 
     let (metadata, tags) = match info {
-        Some(t) => (t.metadata.clone(), t.tags.clone()),
+        Some(tpl) => (tpl.metadata.clone(), tpl.tags.clone()),
         None => {
             return (
                 axum::http::StatusCode::NOT_FOUND,
@@ -543,7 +561,7 @@ async fn template_detail(State(state): State<AppState>, Path(reference): Path<St
         .await
         .unwrap_or_default();
 
-    template_detail_page(&name, &tag, &metadata, &tags, &source, &recent, now).into_response()
+    template_detail_page(&name, &tag, &metadata, &tags, &source, &recent, now, &t).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -557,16 +575,19 @@ struct RenderForm {
 async fn ui_render(
     State(state): State<AppState>,
     Path(name): Path<String>,
+    t: I18n,
     Form(form): Form<RenderForm>,
 ) -> Markup {
     let data: serde_json::Value = match serde_json::from_str(form.data.trim()) {
         Ok(v) => v,
-        Err(e) => return render_error_fragment(&format!("Invalid JSON: {}", e)),
+        Err(e) => {
+            return render_error_fragment(&t.ta("invalid-json", &[("error", e.to_string())]), &t);
+        }
     };
     let reference = format!("{}:{}", name, form.tag);
     match state.registry.render_and_store(&reference, &data).await {
-        Ok(result) => render_result_fragment(&result.render_id),
-        Err(e) => render_error_fragment(&e.to_string()),
+        Ok(result) => render_result_fragment(&result.render_id, &t),
+        Err(e) => render_error_fragment(&e.to_string(), &t),
     }
 }
 
@@ -699,6 +720,14 @@ mod tests {
     use papermake_registry::render_storage::summary::{Summary, TemplateSummary, Totals};
     use time::macros::datetime;
 
+    fn en() -> I18n {
+        I18n::from_accept_language(None)
+    }
+
+    fn de() -> I18n {
+        I18n::from_accept_language(Some("de"))
+    }
+
     fn sample_summary(now: OffsetDateTime) -> Summary {
         let rec = RenderRecord::success(
             "invoice:latest".to_string(),
@@ -743,7 +772,7 @@ mod tests {
         let now = datetime!(2026-07-09 12:00 UTC);
         let summary = sample_summary(now);
         let templates = vec![sample_template()];
-        let html = dashboard_page(&summary, &templates, now).into_string();
+        let html = dashboard_page(&summary, &templates, now, &en()).into_string();
         assert!(html.contains("Dashboard"));
         assert!(html.contains("Renders · 24h"));
         assert!(html.contains("Success rate · 24h"));
@@ -764,9 +793,19 @@ mod tests {
     }
 
     #[test]
+    fn test_dashboard_page_german() {
+        let now = datetime!(2026-07-09 12:00 UTC);
+        let html = dashboard_page(&sample_summary(now), &[], now, &de()).into_string();
+        assert!(html.contains("<html lang=\"de\""));
+        assert!(html.contains("Übersicht")); // dashboard title + nav
+        assert!(html.contains("Vorlagen")); // templates nav
+        assert!(html.contains("Erfolgsrate · 24 Std."));
+    }
+
+    #[test]
     fn test_templates_page_lists_templates() {
         let templates = vec![sample_template()];
-        let html = templates_page(&templates).into_string();
+        let html = templates_page(&templates, &en()).into_string();
         assert!(html.contains("Templates"));
         assert!(html.contains("<table"));
         assert!(html.contains("Invoice Template"));
@@ -776,14 +815,14 @@ mod tests {
 
     #[test]
     fn test_templates_page_empty_state_prompts_creation() {
-        let html = templates_page(&[]).into_string();
+        let html = templates_page(&[], &en()).into_string();
         assert!(html.contains("No templates yet."));
         assert!(html.contains("/templates/new"));
     }
 
     #[test]
     fn test_new_template_page_has_form() {
-        let html = new_template_page().into_string();
+        let html = new_template_page(&en()).into_string();
         assert!(html.contains("New template"));
         assert!(html.contains("action=\"/ui/templates\""));
         assert!(html.contains("name=\"name\""));
@@ -804,6 +843,7 @@ mod tests {
             "= Hello",
             &[],
             now,
+            &en(),
         )
         .into_string();
         assert!(html.contains("Test Render"));
@@ -826,22 +866,17 @@ mod tests {
 
     #[test]
     fn test_active_nav_marks_current_and_templates_tags_link() {
-        // Active nav highlight.
-        let dash = dashboard_page(
-            &sample_summary(datetime!(2026-07-09 12:00 UTC)),
-            &[],
-            datetime!(2026-07-09 12:00 UTC),
-        )
-        .into_string();
+        let now = datetime!(2026-07-09 12:00 UTC);
+        let dash = dashboard_page(&sample_summary(now), &[], now, &en()).into_string();
         assert!(dash.contains("href=\"/\" aria-current=\"page\""));
         // Templates table renders each tag as a link to its tagged detail.
-        let tpls = templates_page(&[sample_template()]).into_string();
+        let tpls = templates_page(&[sample_template()], &en()).into_string();
         assert!(tpls.contains("href=\"/templates/invoice:latest\""));
     }
 
     #[test]
     fn test_render_result_fragment_embeds_iframe() {
-        let html = render_result_fragment("0192abcd-ef").into_string();
+        let html = render_result_fragment("0192abcd-ef", &en()).into_string();
         assert!(html.contains("<iframe"));
         assert!(html.contains("/api/renders/0192abcd-ef/pdf"));
     }
@@ -857,16 +892,19 @@ mod tests {
     }
 
     #[test]
-    fn test_relative_time() {
+    fn test_relative_time_localized() {
         let now = datetime!(2026-07-09 12:00 UTC);
         assert_eq!(
-            relative_time(now - time::Duration::seconds(30), now),
+            relative_time(now - time::Duration::seconds(30), now, &en()),
             "30s ago"
         );
         assert_eq!(
-            relative_time(now - time::Duration::minutes(5), now),
+            relative_time(now - time::Duration::minutes(5), now, &en()),
             "5m ago"
         );
-        assert_eq!(relative_time(now - time::Duration::hours(2), now), "2h ago");
+        assert_eq!(
+            relative_time(now - time::Duration::hours(2), now, &de()),
+            "vor 2 Std."
+        );
     }
 }

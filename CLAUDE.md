@@ -268,6 +268,7 @@ let pdf_bytes = registry.render(
 - **Storage**: S3 for **everything** — blobs (templates/assets/manifests, content-addressed) and render outputs (`renders/{render_id}/{meta.json,pdf,data}`, keyed by render_id). No always-on database.
 - **Analytics**: **buffered-S3** — each server instance stages `RenderRecord`s in memory and flushes them to S3 as NDJSON (`analytics/raw/dt=…`); the **papermake-worker** binary aggregates all raw into `analytics/agg/summary.json` and prunes expired outputs. Queries are always answered from `summary.json` (globally eventually consistent). ClickHouse has been removed.
 - **UI**: server-side-rendered (maud + a small hand-rolled stylesheet in `assets/app.css` + a tiny htmx sprinkle). Semantic-first CSS (modern: cascade layers, nesting, oklch, light-dark()). No SPA/build step. (The old Next.js `./webui` was deleted.)
+- **i18n**: UI text lives in Fluent catalogs (`crates/papermake-server/locales/{en,de}/main.ftl`, embedded at compile time via `fluent-templates`). Request language is negotiated from `Accept-Language` (fallback English) by the `I18n` extractor (`src/i18n.rs`) and threaded into the pure page fns — no global locale. Add a language by adding `locales/<lang>/main.ftl` and a `negotiate()` arm.
 - **Auth**: None initially, optional API keys later
 - **Namespaces**: Simplified `name:tag` format (no user/org prefixes)
 - **Config**: Environment variables only
