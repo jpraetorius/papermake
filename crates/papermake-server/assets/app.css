@@ -249,6 +249,20 @@ tbody tr:nth-child(even) {
       gap: 1rem;
       grid-template-columns: repeat(auto-fit, minmax(var(--min, 16rem), 1fr));
     }
+
+  /* The template-detail custom element is display:inline by default, so its
+     block sections (header, editor grid, PDF preview, recent renders) collapse
+     together. Make it a vertical stack like the other pages' containers. */
+    template-detail-page {
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap, 1rem);
+    }
+  /* The htmx PDF-preview slot is empty until a test render runs; drop it from
+     the flow so it doesn't leave a double gap between the editor and renders. */
+    #render-result:empty {
+      display: none;
+    }
 }
 
 @layer components {
@@ -399,23 +413,119 @@ dialog::backdrop {
   border-color: color-mix(in oklab, var(--warn), transparent 55%);
 }
 
-.bar-track {
-  height: 0.5rem;
-  background: var(--track);
-  border-radius: 999px;
+/* Single horizontal stacked bar (latency distribution): each child span is a
+   segment with an inline width%. */
+.stacked-bar {
+  display: flex;
+  height: 1.6rem;
+  border-radius: var(--radius);
   overflow: hidden;
+  background: var(--track);
 }
-
-    .bar-fill {
+    .stacked-bar > span {
       height: 100%;
-      background: var(--primary);
-      border-radius: 999px;
+      min-width: 2px;
     }
 
     .spark {
       color: var(--primary);
       width: 100%;
       height: 80px;
+    }
+
+    /* Donut: SVG (circumference-100 arc trick) beside a wrapping legend. */
+    .donut-chart {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 1.25rem;
+    }
+    .donut-svg {
+      width: 9rem;
+      height: 9rem;
+      flex: none;
+    }
+    .donut-total {
+      font-size: 6px; /* user units in the 0 0 42 42 viewBox */
+      font-weight: 700;
+      fill: var(--text);
+    }
+    .donut-label {
+      font-size: 3px;
+      fill: var(--muted);
+    }
+    .donut-legend {
+      flex: 1 1 12rem;
+      min-width: 0;
+      font-size: 0.9rem;
+    }
+    .legend-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+    }
+    .swatch {
+      width: 0.75rem;
+      height: 0.75rem;
+      border-radius: 0.2rem;
+      margin-top: 0.2rem;
+      flex: none;
+    }
+
+    /* Vertical bar charts (renders/day, outcome). Fixed height so the bars'
+       percentage heights resolve against a definite track. */
+    .bar-chart {
+      display: flex;
+      align-items: stretch;
+      justify-content: flex-start;
+      gap: 0.4rem;
+      height: 150px;
+    }
+    /* Fixed basis (may shrink when there are many days) so a few days' bars sit
+       adjacent and left-packed rather than spread across the whole card. */
+    .bar-col {
+      flex: 0 1 2.6rem;
+      min-width: 0;
+      display: grid;
+      grid-template-rows: 1rem 1fr 1rem;
+      gap: 0.2rem;
+    }
+    .bar-val {
+      align-self: end;
+      font-size: 0.68rem;
+      color: var(--muted);
+      text-align: center;
+    }
+    .bar-area {
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+    }
+    .bar {
+      width: 72%;
+      max-width: 2.2rem;
+      min-height: 2px;
+      display: flex;
+      flex-direction: column;
+      border-radius: 3px 3px 0 0;
+      overflow: hidden;
+      background: var(--track);
+    }
+    .bar .seg {
+      width: 100%;
+    }
+    .bar-date {
+      font-size: 0.62rem;
+      color: var(--muted);
+      text-align: center;
+      white-space: nowrap;
+    }
+    /* Round legend marker (chart series, outcome legend). */
+    .dot {
+      width: 0.7rem;
+      height: 0.7rem;
+      border-radius: 999px;
+      flex: none;
     }
 
     .pdf-preview {
@@ -492,6 +602,12 @@ dialog::backdrop {
   
     .nowrap {
       white-space: nowrap;
+    }
+
+    /* Opt out of a .stack's default stretch so an element is only as wide as
+       its content (e.g. a button in a column of full-width text). */
+    .self-start {
+      align-self: start;
     }
   
     .flush {

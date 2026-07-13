@@ -13,10 +13,20 @@ kpi-success-24h = Success rate · 24h
 kpi-p90-24h = p90 latency · 24h
 kpi-templates = Templates
 unit-ms = ms
+unit-s = s
+unit-renders = renders
 
 # Charts
-chart-volume = Render volume
+chart-volume = Renders per day
+chart-errors = Failures per day
+chart-latency = Render latency
+chart-latency-dist = Latency distribution
 chart-per-template = Renders per template
+chart-other = Other ({ $n })
+legend-avg = avg
+legend-p90 = p90
+legend-p95 = p95
+legend-p99 = p99
 no-data = No data yet.
 
 # Sections

@@ -98,7 +98,11 @@ impl RenderRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumePoint {
     pub date: Date,
+    /// Total renders on this day (success + failure).
     pub renders: u64,
+    /// Subset of `renders` that failed.
+    #[serde(default)]
+    pub failures: u64,
 }
 
 /// Analytics data for template render statistics
@@ -108,11 +112,20 @@ pub struct TemplateStats {
     pub total_renders: u64,
 }
 
-/// Analytics data point for average render duration over time
+/// Analytics data point for render duration over time (successful renders).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DurationPoint {
     pub date: Date,
     pub avg_duration_ms: f64,
+    /// 90th-percentile duration on this day.
+    #[serde(default)]
+    pub p90_duration_ms: u32,
+    /// 95th-percentile duration on this day.
+    #[serde(default)]
+    pub p95_duration_ms: u32,
+    /// 99th-percentile duration on this day.
+    #[serde(default)]
+    pub p99_duration_ms: u32,
 }
 
 /// Query types for analytics

@@ -21,8 +21,8 @@ use time::OffsetDateTime;
 
 use papermake_registry::TemplateInfo;
 use papermake_registry::bundle::{TemplateBundle, TemplateMetadata};
-use papermake_registry::render_storage::summary::Summary;
-use papermake_registry::render_storage::types::RenderRecord;
+use papermake_registry::render_storage::summary::{DurationBucket, Summary, TemplateSummary};
+use papermake_registry::render_storage::types::{DurationPoint, RenderRecord, VolumePoint};
 
 use crate::AppState;
 use crate::i18n::I18n;
@@ -102,14 +102,9 @@ fn section(title: &str, inner: Markup) -> Markup {
     }
 }
 
-fn template_renders_section(
-    records: &[RenderRecord],
-    now: OffsetDateTime,
-    t: &I18n,
-    oob: bool,
-) -> Markup {
+fn template_renders_section(records: &[RenderRecord], now: OffsetDateTime, t: &I18n) -> Markup {
     html! {
-        section #template-renders .stack hx-swap-oob=[oob.then_some("true")] {
+        section #template-renders .stack {
             h2.eyebrow { (t.t("section-recent-renders")) }
             (renders_table(records, now, t))
         }
@@ -155,56 +150,291 @@ fn relative_time(ts: OffsetDateTime, now: OffsetDateTime, t: &I18n) -> String {
     t.ta(id, &[("n", n.to_string())])
 }
 
-/// Inline SVG area sparkline over a series of values.
-fn sparkline(values: &[u64], t: &I18n) -> Markup {
-    if values.is_empty() {
+/// Show a date label on roughly every ceil(n/10)-th column to avoid crowding.
+fn label_every(n: usize) -> usize {
+    ((n as f64) / 10.0).ceil().max(1.0) as usize
+}
+
+/// Compact day label, e.g. "07-09" (month-day).
+fn fmt_day(date: time::Date) -> String {
+    format!("{:02}-{:02}", u8::from(date.month()), date.day())
+}
+
+/// Renders-per-day: one primary bar per day, labelled with the count.
+fn volume_bars(points: &[VolumePoint], t: &I18n) -> Markup {
+    let max = points.iter().map(|p| p.renders).max().unwrap_or(0);
+    if max == 0 {
         return html! { p.muted { (t.t("no-data")) } };
     }
-    let (w, h) = (600.0_f64, 80.0_f64);
-    let max = (*values.iter().max().unwrap_or(&1)).max(1) as f64;
-    let n = values.len();
-    let step = if n > 1 { w / (n as f64 - 1.0) } else { 0.0 };
-    let pt = |i: usize, v: u64| {
-        let x = if n > 1 { i as f64 * step } else { w / 2.0 };
-        let y = h - (v as f64 / max) * (h - 6.0) - 3.0;
-        (x, y)
-    };
-    let line: String = values
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            let (x, y) = pt(i, *v);
-            format!("{:.1},{:.1}", x, y)
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let (x0, _) = pt(0, values[0]);
-    let (xn, _) = pt(n - 1, values[n - 1]);
-    let area = format!("{:.1},{:.1} {} {:.1},{:.1}", x0, h, line, xn, h);
+    let every = label_every(points.len());
     html! {
-        svg.spark viewBox=(format!("0 0 {} {}", w, h)) preserveAspectRatio="none" role="img" {
-            polygon points=(area) fill="currentColor" opacity="0.12";
-            polyline points=(line) fill="none" stroke="currentColor" stroke-width="2";
+        div.bar-chart {
+            @for (i, p) in points.iter().enumerate() {
+                div.bar-col {
+                    span.bar-val { (p.renders) }
+                    div.bar-area {
+                        div.bar style=(format!("height: {:.1}%;", p.renders as f64 / max as f64 * 100.0)) {
+                            div.seg style="height: 100%; background: var(--primary);" {}
+                        }
+                    }
+                    span.bar-date { @if i % every == 0 { (fmt_day(p.date)) } }
+                }
+            }
         }
     }
 }
 
-/// Horizontal bar chart from labelled counts.
-fn bars(items: &[(String, u64)], t: &I18n) -> Markup {
-    if items.is_empty() {
+/// Failures-in-context: stacked ok/failed bar per day, labelled with the total.
+fn outcome_bars(points: &[VolumePoint], t: &I18n) -> Markup {
+    let max = points.iter().map(|p| p.renders).max().unwrap_or(0);
+    if max == 0 {
         return html! { p.muted { (t.t("no-data")) } };
     }
-    let max = items.iter().map(|(_, c)| *c).max().unwrap_or(1).max(1) as f64;
+    let every = label_every(points.len());
     html! {
-        div.stack style="--gap: 0.6rem;" {
-            @for (label, count) in items {
-                div.stack style="--gap: 0.25rem;" {
-                    div.split {
-                        span { (label) }
-                        span.muted { (count) }
+        div.stack style="--gap: 0.5rem;" {
+            div.bar-chart {
+                @for (i, p) in points.iter().enumerate() {
+                    @let ok = p.renders - p.failures;
+                    div.bar-col title=(format!("{}: {} · {}: {}", t.t("status-ok"), ok, t.t("status-failed"), p.failures)) {
+                        span.bar-val { (p.renders) }
+                        div.bar-area {
+                            div.bar style=(format!("height: {:.1}%;", p.renders as f64 / max as f64 * 100.0)) {
+                                @if p.failures > 0 {
+                                    div.seg style=(format!("height: {:.1}%; background: var(--danger);", p.failures as f64 / p.renders as f64 * 100.0)) {}
+                                }
+                                @if ok > 0 {
+                                    div.seg style=(format!("height: {:.1}%; background: var(--primary);", ok as f64 / p.renders as f64 * 100.0)) {}
+                                }
+                            }
+                        }
+                        span.bar-date { @if i % every == 0 { (fmt_day(p.date)) } }
                     }
-                    div.bar-track {
-                        div.bar-fill style=(format!("width: {:.1}%;", (*count as f64 / max) * 100.0)) {}
+                }
+            }
+            div.cluster style="--gap: 0.9rem; font-size: 0.8rem;" {
+                span.cluster style="--gap: 0.35rem;" { span.dot style="background: var(--primary);" {} span.muted { (t.t("status-ok")) } }
+                span.cluster style="--gap: 0.35rem;" { span.dot style="background: var(--danger);" {} span.muted { (t.t("status-failed")) } }
+            }
+        }
+    }
+}
+
+/// One legend key for the latency chart: colored dot + label + latest value.
+fn trend_key(color: &str, label: &str, value: u32, t: &I18n) -> Markup {
+    html! {
+        span.cluster style="--gap: 0.35rem;" {
+            span.dot style=(format!("background: {color};")) {}
+            span.muted { (label) " " (value) " " (t.t("unit-ms")) }
+        }
+    }
+}
+
+/// Latency over days as stacked bars: each day's bar rises to that day's p99,
+/// split into percentile bands `0–p90` / `p90–p95` / `p95–p99` (cool→hot) so the
+/// tail spread is visible. Legend shows each series' latest value.
+fn latency_trend(points: &[DurationPoint], t: &I18n) -> Markup {
+    if points.is_empty() {
+        return html! { p.muted { (t.t("no-data")) } };
+    }
+    let max = points.iter().map(|p| p.p99_duration_ms).max().unwrap_or(0).max(1);
+    let every = label_every(points.len());
+    let last = points.last().unwrap();
+    html! {
+        div.stack style="--gap: 0.5rem;" {
+            div.bar-chart {
+                @for (i, p) in points.iter().enumerate() {
+                    // Percentiles are monotonic by construction; clamp defensively.
+                    @let p90 = p.p90_duration_ms;
+                    @let p95 = p.p95_duration_ms.max(p90);
+                    @let p99 = p.p99_duration_ms.max(p95);
+                    div.bar-col title=(format!(
+                        "p90 {p90} · p95 {p95} · p99 {p99} {}", t.t("unit-ms")
+                    )) {
+                        span.bar-val { (p99) }
+                        div.bar-area {
+                            div.bar style=(format!("height: {:.1}%;", p99 as f64 / max as f64 * 100.0)) {
+                                // top → bottom: hottest band first.
+                                @if p99 > p95 {
+                                    div.seg style=(format!("height: {:.1}%; background: var(--danger);", (p99 - p95) as f64 / p99 as f64 * 100.0)) {}
+                                }
+                                @if p95 > p90 {
+                                    div.seg style=(format!("height: {:.1}%; background: var(--warn);", (p95 - p90) as f64 / p99 as f64 * 100.0)) {}
+                                }
+                                @if p90 > 0 {
+                                    div.seg style=(format!("height: {:.1}%; background: var(--primary);", p90 as f64 / p99 as f64 * 100.0)) {}
+                                }
+                            }
+                        }
+                        span.bar-date { @if i % every == 0 { (fmt_day(p.date)) } }
+                    }
+                }
+            }
+            div.cluster style="--gap: 0.9rem; font-size: 0.8rem;" {
+                (trend_key("var(--primary)", &t.t("legend-p90"), last.p90_duration_ms, t))
+                (trend_key("var(--warn)", &t.t("legend-p95"), last.p95_duration_ms, t))
+                (trend_key("var(--danger)", &t.t("legend-p99"), last.p99_duration_ms, t))
+                span.muted { (t.t("legend-avg")) " " (last.avg_duration_ms as u32) " " (t.t("unit-ms")) }
+            }
+        }
+    }
+}
+
+/// Format a duration edge compactly: "120 ms" below 1 s, else "1.5 s".
+fn fmt_ms(ms: u32, t: &I18n) -> String {
+    if ms < 1000 {
+        format!("{} {}", ms, t.t("unit-ms"))
+    } else {
+        format!("{} {}", (ms as f64 / 1000.0), t.t("unit-s"))
+    }
+}
+
+/// Latency distribution as a single stacked bar: one segment per bucket, width
+/// proportional to its share, colored cool→hot (fast→slow), with a legend.
+fn latency_histogram(buckets: &[DurationBucket], t: &I18n) -> Markup {
+    let total: u64 = buckets.iter().map(|b| b.count).sum();
+    if total == 0 {
+        return html! { p.muted { (t.t("no-data")) } };
+    }
+    // (label, count, color) per bucket, hue ramped green (fast) → red (slow).
+    let m = buckets.len().max(2) as f64;
+    let mut lower = 0u32;
+    let segs: Vec<(String, u64, String)> = buckets
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let label = match b.upper_ms {
+                Some(upper) => {
+                    let l = format!("{}–{}", lower, fmt_ms(upper, t));
+                    lower = upper;
+                    l
+                }
+                None => format!("≥ {}", fmt_ms(lower, t)),
+            };
+            let hue = 150.0 - (i as f64) * (125.0 / (m - 1.0));
+            (label, b.count, format!("oklch(66% 0.15 {hue:.0})"))
+        })
+        .collect();
+
+    html! {
+        div.stack style="--gap: 0.7rem;" {
+            div.stacked-bar {
+                @for (label, count, color) in &segs {
+                    @if *count > 0 {
+                        span style=(format!(
+                            "width: {:.2}%; background: {};",
+                            *count as f64 / total as f64 * 100.0, color
+                        ))
+                        title=(format!("{}: {} · {:.0}%", label, count, *count as f64 / total as f64 * 100.0)) {}
+                    }
+                }
+            }
+            div.donut-legend.stack style="--gap: 0.35rem;" {
+                @for (label, count, color) in &segs {
+                    @if *count > 0 {
+                        div.legend-row {
+                            span.swatch style=(format!("background: {color};")) {}
+                            div.cluster style="--gap: 0.4rem;" {
+                                span { (label) }
+                                span.muted { (count) " · " (format!("{:.0}%", *count as f64 / total as f64 * 100.0)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One rendered donut slice plus its legend data.
+struct DonutSlice {
+    name: String,
+    count: u64,
+    pct: f64,
+    dashoffset: f64,
+    color: String,
+    tags: Vec<(String, u64)>,
+}
+
+/// Donut of per-template render share. Templates below 5% fold into "Other";
+/// each real slice lists its tag breakdown in the legend.
+fn donut(templates: &[TemplateSummary], t: &I18n) -> Markup {
+    let total: u64 = templates.iter().map(|s| s.total_renders).sum();
+    if total == 0 {
+        return html! { p.muted { (t.t("no-data")) } };
+    }
+
+    // Split into kept templates and an "Other" bucket (< 5% share).
+    let kept: Vec<&TemplateSummary> = templates
+        .iter()
+        .filter(|s| s.total_renders as f64 / total as f64 >= 0.05)
+        .collect();
+    let other_count: u64 = total - kept.iter().map(|s| s.total_renders).sum::<u64>();
+    let other_n = templates.len() - kept.len();
+
+    // Palette: rotate hue around the wheel; "Other" is the neutral track color.
+    let n = kept.len().max(1);
+    let color = |i: usize| format!("oklch(64% 0.16 {:.0})", 20.0 + (i as f64) * (300.0 / n as f64));
+
+    let mut slices: Vec<DonutSlice> = Vec::new();
+    let mut offset = 25.0_f64; // start the first slice at 12 o'clock
+    for (i, s) in kept.iter().enumerate() {
+        let pct = s.total_renders as f64 / total as f64 * 100.0;
+        slices.push(DonutSlice {
+            name: s.template_name.clone(),
+            count: s.total_renders,
+            pct,
+            dashoffset: offset,
+            color: color(i),
+            tags: s.by_tag.iter().map(|c| (c.tag.clone(), c.renders)).collect(),
+        });
+        offset -= pct;
+    }
+    if other_count > 0 {
+        let pct = other_count as f64 / total as f64 * 100.0;
+        slices.push(DonutSlice {
+            name: t.ta("chart-other", &[("n", other_n.to_string())]),
+            count: other_count,
+            pct,
+            dashoffset: offset,
+            color: "var(--track)".to_string(),
+            tags: Vec::new(),
+        });
+    }
+
+    html! {
+        div.donut-chart {
+            svg.donut-svg viewBox="0 0 42 42" role="img" {
+                circle cx="21" cy="21" r="15.9155" fill="none" stroke="var(--track)" stroke-width="4" {}
+                @for s in &slices {
+                    circle cx="21" cy="21" r="15.9155" fill="none"
+                        stroke=(s.color) stroke-width="4"
+                        stroke-dasharray=(format!("{:.3} {:.3}", s.pct, 100.0 - s.pct))
+                        stroke-dashoffset=(format!("{:.3}", s.dashoffset)) {}
+                }
+                text x="21" y="20.5" class="donut-total" text-anchor="middle" { (total) }
+                text x="21" y="25" class="donut-label" text-anchor="middle" { (t.t("unit-renders")) }
+            }
+            div.donut-legend.stack style="--gap: 0.5rem;" {
+                @for s in &slices {
+                    div.legend-row {
+                        span.swatch style=(format!("background: {};", s.color)) {}
+                        div.stack style="--gap: 0.15rem;" {
+                            div.cluster style="--gap: 0.4rem;" {
+                                span { (s.name) }
+                                span.muted { (s.count) " · " (format!("{:.0}%", s.pct)) }
+                            }
+                            @if !s.tags.is_empty() {
+                                div.cluster style="--gap: 0.3rem;" {
+                                    @for (tag, cnt) in &s.tags {
+                                        span.badge {
+                                            (tag) " "
+                                            span.muted { (format!("{:.0}%", *cnt as f64 / s.count as f64 * 100.0)) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -474,12 +704,6 @@ pub fn dashboard_page(
     now: OffsetDateTime,
     t: &I18n,
 ) -> Markup {
-    let volume: Vec<u64> = summary.volume_by_day.iter().map(|v| v.renders).collect();
-    let tpl_bars: Vec<(String, u64)> = summary
-        .templates
-        .iter()
-        .map(|s| (s.template_name.clone(), s.total_renders))
-        .collect();
 
     let body = html! {
         div.split {
@@ -499,15 +723,27 @@ pub fn dashboard_page(
             (stat_card(&t.t("kpi-templates"), html! { (templates.len()) }))
         }
 
-        // Charts row.
+        // Charts.
         div.grid style="--min: 22rem;" {
             div.card.stack {
                 h2.eyebrow { (t.t("chart-volume")) }
-                (sparkline(&volume, t))
+                (volume_bars(&summary.volume_by_day, t))
+            }
+            div.card.stack {
+                h2.eyebrow { (t.t("chart-errors")) }
+                (outcome_bars(&summary.volume_by_day, t))
+            }
+            div.card.stack {
+                h2.eyebrow { (t.t("chart-latency")) }
+                (latency_trend(&summary.duration_by_day, t))
+            }
+            div.card.stack {
+                h2.eyebrow { (t.t("chart-latency-dist")) }
+                (latency_histogram(&summary.duration_histogram, t))
             }
             div.card.stack {
                 h2.eyebrow { (t.t("chart-per-template")) }
-                (bars(&tpl_bars, t))
+                (donut(&summary.templates, t))
             }
         }
 
@@ -590,7 +826,7 @@ pub fn template_detail_page(
                 }
                 span.muted { (t.ta("by-author", &[("author", metadata.author.clone())])) }
                 // Confirmation via the native Invoker Commands API — no JS.
-                button.danger type="button" command="show-modal" commandfor="confirm-delete" { (t.t("btn-delete-version")) }
+                button.danger.self-start type="button" command="show-modal" commandfor="confirm-delete" { (t.t("btn-delete-version")) }
                 dialog #confirm-delete {
                     form.stack method="post" action=(format!("/ui/templates/{}/delete", name)) {
                         h3 { (t.ta("delete-confirm-title", &[("name", name.to_string()), ("tag", tag.to_string())])) }
@@ -666,7 +902,7 @@ pub fn template_detail_page(
 
         div id="render-result" {}
 
-        (template_renders_section(recent, now, t, false))
+        (template_renders_section(recent, now, t))
     };
     let body = html! {
         template-detail-page {
@@ -827,19 +1063,11 @@ async fn ui_render(
         }
     };
     let reference = format!("{}:{}", name, form.tag);
+    // Returns just the PDF-preview fragment (swapped into #render-result). The
+    // recent-renders table is worker-aggregated and wouldn't include this render
+    // yet, so there's nothing to OOB-update here.
     match state.registry.render_and_store(&reference, &data).await {
-        Ok(result) => {
-            let now = OffsetDateTime::now_utc();
-            let recent = state
-                .registry
-                .list_template_renders(&name, 20)
-                .await
-                .unwrap_or_default();
-            html! {
-                (render_result_fragment(&result.render_id, &t))
-                (template_renders_section(&recent, now, &t, true))
-            }
-        }
+        Ok(result) => render_result_fragment(&result.render_id, &t),
         Err(e) => render_error_fragment(&e.to_string(), &t),
     }
 }
@@ -996,9 +1224,14 @@ mod tests {
             generated_at: now,
             volume_by_day: vec![],
             duration_by_day: vec![],
+            duration_histogram: vec![],
             templates: vec![TemplateSummary {
                 template_name: "invoice".to_string(),
                 total_renders: 5,
+                by_tag: vec![papermake_registry::render_storage::summary::TagCount {
+                    tag: "latest".to_string(),
+                    renders: 5,
+                }],
                 recent: vec![rec.clone()],
             }],
             recent: vec![rec],
@@ -1043,6 +1276,80 @@ mod tests {
         assert!(html.contains("/assets/logo.svg"));
         // No Kelp remnants.
         assert!(!html.contains("kelp"));
+    }
+
+    #[test]
+    fn test_dashboard_charts_render_donut_and_series() {
+        use papermake_registry::render_storage::summary::{DurationBucket, TagCount};
+        use papermake_registry::render_storage::types::{DurationPoint, VolumePoint};
+
+        let now = datetime!(2026-07-09 12:00 UTC);
+        let d = now.date();
+        let summary = Summary {
+            generated_at: now,
+            volume_by_day: vec![
+                VolumePoint { date: d, renders: 10, failures: 1 },
+                VolumePoint { date: d, renders: 20, failures: 3 },
+            ],
+            duration_by_day: vec![
+                DurationPoint { date: d, avg_duration_ms: 120.0, p90_duration_ms: 240, p95_duration_ms: 260, p99_duration_ms: 280 },
+                DurationPoint { date: d, avg_duration_ms: 150.0, p90_duration_ms: 310, p95_duration_ms: 340, p99_duration_ms: 380 },
+            ],
+            duration_histogram: vec![
+                DurationBucket { upper_ms: Some(100), count: 12 },
+                DurationBucket { upper_ms: Some(250), count: 6 },
+                DurationBucket { upper_ms: None, count: 2 },
+            ],
+            // 70 / 27 / 3 out of 100 → the 3% template folds into "Other".
+            templates: vec![
+                TemplateSummary {
+                    template_name: "invoice".to_string(),
+                    total_renders: 70,
+                    by_tag: vec![
+                        TagCount { tag: "latest".to_string(), renders: 56 },
+                        TagCount { tag: "v2".to_string(), renders: 14 },
+                    ],
+                    recent: vec![],
+                },
+                TemplateSummary {
+                    template_name: "letter".to_string(),
+                    total_renders: 27,
+                    by_tag: vec![TagCount { tag: "latest".to_string(), renders: 27 }],
+                    recent: vec![],
+                },
+                TemplateSummary {
+                    template_name: "tiny".to_string(),
+                    total_renders: 3,
+                    by_tag: vec![TagCount { tag: "latest".to_string(), renders: 3 }],
+                    recent: vec![],
+                },
+            ],
+            recent: vec![],
+            totals: Totals { renders_24h: 30, success_rate_24h: 0.9, p90_latency_ms_24h: 310 },
+        };
+
+        let html = dashboard_page(&summary, &[], now, &en()).into_string();
+        // All five chart titles present.
+        for title in [
+            "Renders per day",
+            "Failures per day",
+            "Render latency",
+            "Latency distribution",
+            "Renders per template",
+        ] {
+            assert!(html.contains(title), "missing chart: {title}");
+        }
+        // Donut rendered with arc slices and center total.
+        assert!(html.contains("donut-svg"));
+        assert!(html.contains("stroke-dasharray"));
+        assert!(html.contains(">100<")); // center total = 70+27+3
+        // Legend lists templates + their tag breakdown, and the "Other" rollup.
+        assert!(html.contains("invoice"));
+        assert!(html.contains("class=\"swatch\""));
+        assert!(html.contains("Other (1)")); // one template below 5%
+        // Latency legend shows both series.
+        assert!(html.contains("p90"));
+        assert!(html.contains("avg"));
     }
 
     #[test]
@@ -1186,11 +1493,12 @@ mod tests {
     }
 
     #[test]
-    fn test_template_renders_section_supports_oob_swap() {
+    fn test_template_renders_section_renders_plain() {
         let now = datetime!(2026-07-09 12:00 UTC);
-        let html = template_renders_section(&[], now, &en(), true).into_string();
+        let html = template_renders_section(&[], now, &en()).into_string();
         assert!(html.contains("id=\"template-renders\""));
-        assert!(html.contains("hx-swap-oob=\"true\""));
+        // No OOB: the render fragment only swaps the PDF preview.
+        assert!(!html.contains("hx-swap-oob"));
         assert!(html.contains("Recent renders"));
     }
 

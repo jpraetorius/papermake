@@ -247,18 +247,26 @@ impl RenderStorage for MemoryRenderStorage {
         let records = self.records.read().await;
         let cutoff = OffsetDateTime::now_utc() - Duration::days(days as i64);
 
-        let mut daily_counts: HashMap<time::Date, u64> = HashMap::new();
+        let mut daily_counts: HashMap<time::Date, (u64, u64)> = HashMap::new();
 
         for record in records.iter() {
             if record.timestamp >= cutoff {
                 let date = record.timestamp.date();
-                *daily_counts.entry(date).or_insert(0) += 1;
+                let e = daily_counts.entry(date).or_insert((0, 0));
+                e.0 += 1;
+                if !record.success {
+                    e.1 += 1;
+                }
             }
         }
 
         let mut result: Vec<VolumePoint> = daily_counts
             .into_iter()
-            .map(|(date, renders)| VolumePoint { date, renders })
+            .map(|(date, (renders, failures))| VolumePoint {
+                date,
+                renders,
+                failures,
+            })
             .collect();
 
         result.sort_by_key(|a| a.date);
@@ -299,22 +307,33 @@ impl RenderStorage for MemoryRenderStorage {
         let records = self.records.read().await;
         let cutoff = OffsetDateTime::now_utc() - Duration::days(days as i64);
 
-        let mut daily_stats: HashMap<time::Date, (u64, u64)> = HashMap::new(); // (total_duration, count)
+        let mut daily_stats: HashMap<time::Date, Vec<u32>> = HashMap::new();
 
         for record in records.iter() {
             if record.timestamp >= cutoff && record.success {
-                let date = record.timestamp.date();
-                let (total_duration, count) = daily_stats.entry(date).or_insert((0, 0));
-                *total_duration += record.duration_ms as u64;
-                *count += 1;
+                daily_stats
+                    .entry(record.timestamp.date())
+                    .or_default()
+                    .push(record.duration_ms);
             }
         }
 
         let mut result: Vec<DurationPoint> = daily_stats
             .into_iter()
-            .map(|(date, (total_duration, count))| DurationPoint {
-                date,
-                avg_duration_ms: total_duration as f64 / count as f64,
+            .map(|(date, mut ds)| {
+                ds.sort_unstable();
+                let total: u64 = ds.iter().map(|&d| d as u64).sum();
+                let pct = |p: f64| {
+                    let idx = (((ds.len() - 1) as f64) * p).round() as usize;
+                    ds[idx.min(ds.len() - 1)]
+                };
+                DurationPoint {
+                    date,
+                    avg_duration_ms: total as f64 / ds.len() as f64,
+                    p90_duration_ms: pct(0.9),
+                    p95_duration_ms: pct(0.95),
+                    p99_duration_ms: pct(0.99),
+                }
             })
             .collect();
 

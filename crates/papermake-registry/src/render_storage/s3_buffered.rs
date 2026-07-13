@@ -362,14 +362,20 @@ mod tests {
             volume_by_day: vec![VolumePoint {
                 date: now.date(),
                 renders: 1,
+                failures: 0,
             }],
             duration_by_day: vec![DurationPoint {
                 date: now.date(),
                 avg_duration_ms: 100.0,
+                p90_duration_ms: 100,
+                p95_duration_ms: 100,
+                p99_duration_ms: 100,
             }],
+            duration_histogram: Vec::new(),
             templates: vec![TemplateSummary {
                 template_name: "invoice".to_string(),
                 total_renders: 1,
+                by_tag: Vec::new(),
                 recent: vec![rec_a.clone()],
             }],
             recent: vec![rec_a.clone()],
