@@ -405,10 +405,22 @@ pub fn template_detail_page(
                     "Delete version " strong { (name) ":" (tag) } ". Assets not shared with "
                     "other versions are removed too; shared assets are kept."
                 }
-                form method="post" action=(format!("/ui/templates/{}/delete", name))
-                     onsubmit=(format!("return confirm('Delete {}:{}? This cannot be undone.')", name, tag)) {
-                    input type="hidden" name="tag" value=(tag);
-                    button.danger type="submit" { "Delete this version" }
+                // Confirmation via the native Invoker Commands API — no JS. The
+                // trigger only opens the dialog; the delete request is fired
+                // solely by the submit button inside it.
+                button.danger type="button" command="show-modal" commandfor="confirm-delete" {
+                    "Delete this version"
+                }
+                dialog #confirm-delete {
+                    form.stack method="post" action=(format!("/ui/templates/{}/delete", name)) {
+                        h3 { "Delete " (name) ":" (tag) "?" }
+                        p.muted { "This permanently deletes the version and cannot be undone." }
+                        input type="hidden" name="tag" value=(tag);
+                        div.cluster {
+                            button type="button" command="close" commandfor="confirm-delete" { "Cancel" }
+                            button.danger type="submit" { "Delete" }
+                        }
+                    }
                 }
             }
         }))
@@ -804,9 +816,12 @@ mod tests {
         assert!(html.contains("aria-current=\"true\""));
         // Test render + publish target the viewed tag.
         assert!(html.contains("name=\"tag\" value=\"v2\""));
-        // Delete this version.
+        // Delete this version, guarded by a native <dialog> via Invoker Commands.
         assert!(html.contains("/ui/templates/invoice/delete"));
         assert!(html.contains("Delete this version"));
+        assert!(html.contains("command=\"show-modal\""));
+        assert!(html.contains("commandfor=\"confirm-delete\""));
+        assert!(html.contains("<dialog id=\"confirm-delete\""));
     }
 
     #[test]

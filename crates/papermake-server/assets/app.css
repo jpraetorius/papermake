@@ -193,6 +193,17 @@
   a.badge:hover { background: color-mix(in oklab, var(--track), var(--text) 10%); }
   a.badge[aria-current="true"] { background: var(--primary); color: var(--primary-ink); border-color: transparent; }
 
+  dialog {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    padding: 1.5rem;
+    max-width: min(90vw, 30rem);
+    box-shadow: var(--shadow);
+  }
+  dialog::backdrop { background: oklch(0% 0 0 / 0.45); }
+
   .callout { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }
   .callout.warn { background: color-mix(in oklab, var(--warn), transparent 88%); border-color: color-mix(in oklab, var(--warn), transparent 55%); }
 
