@@ -12,6 +12,7 @@ target/
 .idea/
 
 .env*
+!.env.example
 
 fonts/
 /storage/

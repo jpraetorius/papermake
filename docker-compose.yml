@@ -33,11 +33,16 @@ services:
     restart: unless-stopped
     networks:
       - papermake
+    volumes:
+      # Optional: drop TTF/OTF/TTC files here to add fonts without rebuilding.
+      # (Scanned alongside the image's baked fonts via FONTS_DIR.)
+      - ./fonts:/fonts:ro
     # No container healthcheck: the distroless runtime image has no shell/curl.
     # Probe from the host instead: curl -f http://localhost:3000/health
 
-  # Papermake Worker - aggregates raw analytics into summary.json and prunes
-  # expired outputs. One aggregator regardless of render-instance count.
+  # Papermake Worker - runs batch-render jobs, aggregates analytics into
+  # summary.json, and prunes expired outputs. Run exactly ONE: batch jobs are
+  # claimed with a lease, and single-active is required (no atomic claim on S3).
   papermake-worker:
     build:
       context: .
@@ -53,6 +58,10 @@ services:
 
       WORKER_INTERVAL_SECONDS: "60"
       ANALYTICS_RETENTION_DAYS: "30"
+      WORKER_LEASE_SECONDS: "120"
+      WORKER_MAX_ATTEMPTS: "3"
+      PAPERMAKE_WORKER_ID: "worker-1"
+      RENDER_RETENTION_DAYS: "30"
 
       RUST_LOG: "papermake_worker=info,papermake_registry=info"
     depends_on:
@@ -61,6 +70,9 @@ services:
     restart: unless-stopped
     networks:
       - papermake
+    volumes:
+      # Same optional font drop-in as the server (batch renders match).
+      - ./fonts:/fonts:ro
 
   # RustFS - S3-compatible object storage (Apache-2.0, Rust, MinIO-compatible).
   rustfs:

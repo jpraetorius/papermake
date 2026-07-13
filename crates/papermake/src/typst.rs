@@ -31,11 +31,17 @@ static CACHED_FONTS: Lazy<(FontBook, Vec<Font>)> = Lazy::new(|| {
             fonts.push(font);
         }
     }
+    // FONTS_DIR may list several directories (OS path separator, `:` on Unix),
+    // so a corporate image can bake fonts in AND an operator can mount extra
+    // fonts via a volume — both scanned, no rebuild needed. Missing dirs are
+    // skipped.
     if let Some(fonts_dir) = std::env::var_os("FONTS_DIR") {
-        for (path, info) in typst_kit::fonts::scan(&PathBuf::from(fonts_dir)) {
-            if let Some(font) = path.load() {
-                book.push(info);
-                fonts.push(font);
+        for dir in std::env::split_paths(&fonts_dir) {
+            for (path, info) in typst_kit::fonts::scan(&dir) {
+                if let Some(font) = path.load() {
+                    book.push(info);
+                    fonts.push(font);
+                }
             }
         }
     }
@@ -51,6 +57,16 @@ static CACHED_FONTS: Lazy<(FontBook, Vec<Font>)> = Lazy::new(|| {
 pub fn preload_fonts() {
     // Dereferencing the lazy static forces its initialization.
     let _ = &*CACHED_FONTS;
+}
+
+/// Parse every font face from raw TTF/OTF/TTC bytes — e.g. a font shipped as a
+/// template asset. Malformed data yields an empty vec (never panics).
+pub fn load_font_faces(data: &[u8]) -> Vec<Font> {
+    let bytes = Bytes::new(data.to_vec());
+    let face_count = typst::text::FontInfo::iter(data).count();
+    (0..face_count as u32)
+        .filter_map(|index| Font::new(bytes.clone(), index))
+        .collect()
 }
 
 /// File system abstraction for Typst rendering
@@ -146,6 +162,28 @@ impl PapermakeWorld {
     ) -> Self {
         let mut world = Self::new(template_content, data);
         world.file_system = Some(file_system);
+        world
+    }
+
+    /// Like [`with_file_system`](Self::with_file_system) but also registers
+    /// extra font faces (e.g. from a template's bundled font assets) on top of
+    /// the process font set. Additive: same-family system/`FONTS_DIR` fonts
+    /// remain available.
+    pub fn with_file_system_and_fonts(
+        template_content: String,
+        data: String,
+        file_system: Arc<dyn RenderFileSystem>,
+        extra_fonts: Vec<Font>,
+    ) -> Self {
+        let mut world = Self::with_file_system(template_content, data, file_system);
+        if !extra_fonts.is_empty() {
+            let mut book = (*world.book).clone();
+            for font in &extra_fonts {
+                book.push(font.info().clone());
+            }
+            world.book = LazyHash::new(book);
+            world.fonts.extend(extra_fonts);
+        }
         world
     }
 

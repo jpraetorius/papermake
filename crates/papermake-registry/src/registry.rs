@@ -1,9 +1,25 @@
+use papermake::Font;
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use time;
 use tokio::sync::Semaphore;
+
+/// Process-global cache of parsed template fonts, keyed by the font blob's
+/// content hash (immutable) so identical fonts are parsed once and reused
+/// across renders and templates. Soft-capped to bound memory.
+static TEMPLATE_FONT_CACHE: LazyLock<Mutex<HashMap<String, Arc<Vec<Font>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Max distinct font blobs to keep parsed in memory before clearing the cache.
+const TEMPLATE_FONT_CACHE_CAP: usize = 512;
+
+/// Whether a bundle path is a font file Typst can use (TTF/OTF/TTC).
+fn is_font_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".ttf") || lower.ends_with(".otf") || lower.ends_with(".ttc")
+}
 
 use crate::{
     address::ContentAddress,
@@ -531,7 +547,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         // Step 4: Hydrate template files/assets before entering Typst. Typst's
         // file callbacks are synchronous, so doing async blob reads from inside
         // them can block the Tokio runtime under load.
-        let file_system = self.hydrate_file_system(reference, &manifest).await?;
+        let (file_system, fonts) = self.hydrate_file_system(reference, &manifest).await?;
 
         // Step 5: Render the template using papermake
         tracing::info!(
@@ -540,7 +556,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             "registry render invoking typst",
         );
         let render_result = self
-            .render_typst_blocking(reference, entrypoint_content, file_system, data.clone())
+            .render_typst_blocking(
+                reference,
+                entrypoint_content,
+                file_system,
+                fonts,
+                data.clone(),
+            )
             .await?;
         tracing::info!(
             reference = %reference,
@@ -594,12 +616,15 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         &self,
         reference: &str,
         manifest: &Manifest,
-    ) -> Result<Arc<dyn papermake::RenderFileSystem>, RegistryError> {
+    ) -> Result<(Arc<dyn papermake::RenderFileSystem>, Vec<Font>), RegistryError> {
         const TEMPLATE_FILE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
         let started = std::time::Instant::now();
         let mut file_system = papermake::InMemoryFileSystem::new();
         let mut total_bytes = 0usize;
+        // Font faces contributed by the template's own font assets (any
+        // .ttf/.otf/.ttc file), registered on top of the process font set.
+        let mut fonts: Vec<Font> = Vec::new();
 
         tracing::debug!(
             reference = %reference,
@@ -637,6 +662,24 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             let file_bytes = bytes.len();
             total_bytes += file_bytes;
 
+            // Register font assets (parsed once per content hash, cached).
+            if is_font_path(path) {
+                let faces = {
+                    let mut cache = TEMPLATE_FONT_CACHE.lock().unwrap();
+                    if let Some(faces) = cache.get(file_hash) {
+                        faces.clone()
+                    } else {
+                        let parsed = Arc::new(papermake::load_font_faces(&bytes));
+                        if cache.len() >= TEMPLATE_FONT_CACHE_CAP {
+                            cache.clear();
+                        }
+                        cache.insert(file_hash.clone(), parsed.clone());
+                        parsed
+                    }
+                };
+                fonts.extend(faces.iter().cloned());
+            }
+
             // Typst asks for rooted virtual paths (e.g. `/assets/logo.svg`),
             // while manifests store bundle paths without a leading slash.
             file_system.add_file(path, bytes.clone());
@@ -663,7 +706,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             "registry render hydrated template file system",
         );
 
-        Ok(Arc::new(file_system))
+        Ok((Arc::new(file_system), fonts))
     }
 
     /// Run the CPU-bound Typst compile/PDF generation on Tokio's blocking pool.
@@ -675,6 +718,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         reference: &str,
         entrypoint_content: String,
         file_system: Arc<dyn papermake::RenderFileSystem>,
+        fonts: Vec<Font>,
         data: serde_json::Value,
     ) -> Result<papermake::RenderResult, RegistryError> {
         let started = std::time::Instant::now();
@@ -719,7 +763,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 "typst blocking render started",
             );
 
-            let result = papermake::render_template(entrypoint_content, file_system, &data);
+            let result = papermake::render_template_with_fonts(
+                entrypoint_content,
+                file_system,
+                &data,
+                fonts,
+            );
 
             match &result {
                 Ok(render_result) => {
@@ -1192,11 +1241,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             )))
         })?;
 
-        let file_system = self.hydrate_file_system(reference, &manifest).await?;
-        let world = papermake::PapermakeWorld::with_file_system(
+        let (file_system, fonts) = self.hydrate_file_system(reference, &manifest).await?;
+        let world = papermake::PapermakeWorld::with_file_system_and_fonts(
             entrypoint_content.clone(),
             "{}".to_string(),
             file_system.clone(),
+            fonts,
         );
         let retain_days = crate::render_storage::retention::effective_retain_days(
             retain_override,
@@ -3148,6 +3198,16 @@ Hello #data.name"#
         // All three analytics records were staged.
         let recent = registry.list_recent_renders(10).await.unwrap();
         assert_eq!(recent.len(), 3);
+    }
+
+    #[test]
+    fn test_is_font_path() {
+        assert!(is_font_path("Ubuntu-R.ttf"));
+        assert!(is_font_path("fonts/Custom.OTF"));
+        assert!(is_font_path("a/b/collection.ttc"));
+        assert!(!is_font_path("assets/logo.png"));
+        assert!(!is_font_path("main.typ"));
+        assert!(!is_font_path("notes.ttf.txt"));
     }
 
     #[tokio::test]

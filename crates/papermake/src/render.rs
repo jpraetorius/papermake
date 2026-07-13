@@ -101,10 +101,28 @@ pub fn render_template(
     data: &serde_json::Value,
 ) -> Result<RenderResult> {
     let data_str = serde_json::to_string(&data)?;
-
     let world = PapermakeWorld::with_file_system(main_typ, data_str, file_system);
+    Ok(compile_world(&world))
+}
 
-    let compile_result = typst::compile(&world);
+/// Render a template with additional font faces registered (e.g. fonts shipped
+/// as template assets), on top of the process font set. See
+/// [`render_template`] for the base behavior.
+pub fn render_template_with_fonts(
+    main_typ: String,
+    file_system: Arc<dyn RenderFileSystem>,
+    data: &serde_json::Value,
+    extra_fonts: Vec<crate::Font>,
+) -> Result<RenderResult> {
+    let data_str = serde_json::to_string(&data)?;
+    let world =
+        PapermakeWorld::with_file_system_and_fonts(main_typ, data_str, file_system, extra_fonts);
+    Ok(compile_world(&world))
+}
+
+/// Compile a prepared world to a `RenderResult` (PDF bytes or diagnostics).
+fn compile_world(world: &PapermakeWorld) -> RenderResult {
+    let compile_result = typst::compile(world);
 
     let mut errors = Vec::new();
     let mut pdf = None;
@@ -155,11 +173,11 @@ pub fn render_template(
         }
     }
 
-    Ok(RenderResult {
+    RenderResult {
         pdf,
         errors,
         success,
-    })
+    }
 }
 
 /// Render a template with caching support

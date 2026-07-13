@@ -81,11 +81,31 @@ curl -X POST "http://localhost:3000/api/templates/invoice/publish?tag=latest" \
 Files are content-addressed and deduplicated: publishing two templates that
 share an identical `logo.png` stores it once.
 
-Font files can be versioned as assets if you need to keep them near a template,
-but Typst font resolution does not load template assets as font families. Install
-the font on the server image/host or set `FONTS_DIR` before startup. Rendered
-PDFs embed the subset of each resolved font that is used by the document, so PDF
-readers do not need those fonts installed.
+### Bundling fonts
+
+A template can ship its own fonts: any `.ttf`/`.otf`/`.ttc` file in the bundle
+(anywhere — e.g. `fonts/Inter.ttf`) is registered for that template's renders,
+on top of the server's built-in fonts. Reference the font in the template by its
+**family name**, as usual:
+
+```typst
+#set text(font: "Inter")
+```
+
+This makes a template self-contained — no need to rebuild the server image to
+add its typeface. Notes:
+
+- Typst matches fonts by **family name**, not file path, so the bundled file
+  just needs to provide the family your template selects.
+- Only **TTF/OTF/TTC** are supported (no WOFF/WOFF2).
+- Template fonts are **additive**: server fonts (embedded + `FONTS_DIR`) remain
+  available; a same-named system font isn't replaced.
+- Rendered PDFs embed the subset of each resolved font actually used, so PDF
+  readers don't need the fonts installed.
+
+Prefer baking common corporate fonts into the image (or a mounted `FONTS_DIR`
+volume) — see [Self-hosting → Fonts](self-hosting.md#fonts) — and bundle only
+template-specific typefaces.
 
 ## Tags and versions
 

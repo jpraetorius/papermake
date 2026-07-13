@@ -46,7 +46,10 @@ FROM gcr.io/distroless/cc-debian13:nonroot AS final
 # Copy stable runtime assets before the application binary so app changes only
 # invalidate the final server-binary layer.
 COPY --from=fonts /opt/papermake/fonts/ubuntu /opt/papermake/fonts/ubuntu
-ENV FONTS_DIR=/opt/papermake/fonts/ubuntu
+# Scan the baked corporate fonts AND an optional mounted /fonts volume, so
+# operators can add fonts without rebuilding the image (FONTS_DIR is a
+# `:`-separated list; missing dirs are skipped).
+ENV FONTS_DIR=/opt/papermake/fonts/ubuntu:/fonts
 CMD ["/app/server"]
 
 # Copy the executable from the "build" stage last; this is the layer that
