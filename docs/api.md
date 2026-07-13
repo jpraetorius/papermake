@@ -117,8 +117,12 @@ Response:
 { "data": { "render_id": "0192…", "pdf_hash": "sha256:…", "duration_ms": 42 } }
 ```
 
-If the render fails, the endpoint returns an error (and a failure record is
-still logged).
+Rendering is CPU-bound and runs under a concurrency limit
+(`MAX_CONCURRENT_RENDERS`) with a deadline (`RENDER_TIMEOUT_SECONDS`, which
+includes time spent waiting for a free render slot). Errors:
+
+- **`422`** — the template failed to compile (a failure record is still logged).
+- **`408`** — the render timed out (busy server or a slow/expensive template).
 
 ### `POST /api/render/{reference}/batch`
 Submit an **async batch**: render one template against many inputs. Returns

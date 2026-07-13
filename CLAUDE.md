@@ -281,8 +281,9 @@ let pdf_bytes = registry.render(
 
 ### Environment variables
 - Server/worker S3: `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
+- Server rendering: `MAX_CONCURRENT_RENDERS`, `RENDER_TIMEOUT_SECONDS`, `FONTS_DIR` (optional).
 - Server buffered analytics/retention: `PAPERMAKE_INSTANCE_ID`, `FLUSH_INTERVAL_SECONDS`, `FLUSH_MAX_RECORDS`, `RENDER_RETENTION_DAYS`.
-- Worker: `WORKER_INTERVAL_SECONDS`, `ANALYTICS_RETENTION_DAYS`.
+- Worker: `WORKER_INTERVAL_SECONDS`, `ANALYTICS_RETENTION_DAYS`, `WORKER_LEASE_SECONDS`, `WORKER_MAX_ATTEMPTS`, `PAPERMAKE_WORKER_ID`, `RENDER_RETENTION_DAYS`.
 
 ## Phase 1: Basic HTTP Server
 - [x] Set up Axum server with basic routing
@@ -440,7 +441,8 @@ let pdf_bytes = registry.render(
 ### Error Handling
 - **400 Bad Request**: Invalid input or malformed requests
 - **404 Not Found**: Template or resource not found (incl. unknown/pruned render_id)
-- **422 Unprocessable Entity**: PDF requested for a render that failed
+- **408 Request Timeout**: A render exceeded `RENDER_TIMEOUT_SECONDS` (incl. wait for a render slot)
+- **422 Unprocessable Entity**: Render failed to compile / PDF requested for a failed render
 - **409 Conflict**: Version tag conflicts (planned)
 - **500 Internal Server Error**: Server or storage errors
 - All errors return JSON with error details

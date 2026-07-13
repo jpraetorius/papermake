@@ -162,7 +162,25 @@ curl -X POST "http://localhost:3000/api/render/invoice:latest" \
 curl "http://localhost:3000/api/renders/0192…/pdf" --output invoice.pdf
 ```
 
-`retain_days` is optional and overrides the template/global default for this render. A PDF request for a render that **failed** returns `422`; an unknown or already-pruned `render_id` returns `404`.
+`retain_days` is optional and overrides the template/global default for this render. Renders run under a concurrency limit (`MAX_CONCURRENT_RENDERS`) with a deadline (`RENDER_TIMEOUT_SECONDS`): the render call returns `422` if the template fails to compile, or `408` if it times out. A PDF request for a render that **failed** returns `422`; an unknown or already-pruned `render_id` returns `404`.
+
+### Batch rendering
+
+To render one template against many inputs, submit an async job — it's picked up by the worker (a single warm Typst world for the whole batch) and you poll for results:
+
+```bash
+# Submit → 202 with a job_id
+curl -X POST "http://localhost:3000/api/render/invoice:latest/batch" \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs": [ {"data": {"number": "INV-001"}, "key": "cust-a"}, {"data": {"number": "INV-002"}} ]}'
+# → { "data": { "job_id": "0192…", "total": 2, "status_url": "/api/jobs/0192…" } }
+
+# Poll the job; each item maps an input (by index or your key) to a render_id
+curl "http://localhost:3000/api/jobs/0192…"
+# then fetch each PDF at /api/renders/{render_id}/pdf
+```
+
+See the [API reference](docs/api.md) for the full job document.
 
 ### Analytics & history
 
@@ -178,7 +196,7 @@ curl "http://localhost:3000/api/analytics/performance?days=30"    # avg duration
 ### Web UI
 
 - **`/`** — dashboard: 24h totals (count, success rate, p90 latency), volume sparkline, per-template bars, recent renders, template list.
-- **`/templates/{name}`** — template detail: metadata/tags, an editor prefilled with the source, a **Test Render** button (htmx-powered, shows the PDF inline in an `<iframe>` with no page reload), and a publish form.
+- **`/templates/{name}`** — template detail: metadata/tags, an editor prefilled with the source, a **Test Render** button (htmx-powered, shows the PDF inline in an `<iframe>` — or open it in a new tab — with no page reload), and a publish form.
 
 ## 🗄️ How storage works
 
