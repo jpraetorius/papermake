@@ -17,3 +17,6 @@ fonts/
 /storage/
 .vscode/
 data/
+
+# Local sample template (kept on disk, not tracked)
+/templates/alh-corporate/
