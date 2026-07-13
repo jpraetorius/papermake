@@ -589,20 +589,8 @@ pub fn template_detail_page(
                     span.badge { (tag) }
                 }
                 span.muted { (t.ta("by-author", &[("author", metadata.author.clone())])) }
-            }
-            // Every tagged version — click to view/edit that specific one. The
-            // delete action for the current version sits to the left of the list.
-            div.stack style="--gap: 0.3rem;" {
-                span.eyebrow { (t.t("section-versions")) }
-                div.cluster {
-                    // Confirmation via the native Invoker Commands API — no JS.
-                    button.danger type="button" command="show-modal" commandfor="confirm-delete"
-                        style="padding: 0.2rem 0.6rem; font-size: 0.8rem;" { (t.t("btn-delete-version")) }
-                    @for v in tags {
-                        a.badge href=(format!("/templates/{}:{}", name, v))
-                            aria-current=[(v == tag).then_some("true")] { (v) }
-                    }
-                }
+                // Confirmation via the native Invoker Commands API — no JS.
+                button.danger type="button" command="show-modal" commandfor="confirm-delete" { (t.t("btn-delete-version")) }
                 dialog #confirm-delete {
                     form.stack method="post" action=(format!("/ui/templates/{}/delete", name)) {
                         h3 { (t.ta("delete-confirm-title", &[("name", name.to_string()), ("tag", tag.to_string())])) }
@@ -613,6 +601,17 @@ pub fn template_detail_page(
                             button type="button" command="close" commandfor="confirm-delete" { (t.t("btn-cancel")) }
                             button.danger type="submit" { (t.t("btn-delete")) }
                         }
+                    }
+                }
+            }
+            // Every tagged version — click to view/edit that specific one. The
+            // delete action for the current version sits to the left of the list.
+            div.stack style="--gap: 0.3rem;" {
+                span.eyebrow { (t.t("section-versions")) }
+                div.cluster {
+                    @for v in tags {
+                        a.badge href=(format!("/templates/{}:{}", name, v))
+                            aria-current=[(v == tag).then_some("true")] { (v) }
                     }
                 }
             }
