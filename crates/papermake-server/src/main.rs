@@ -156,6 +156,7 @@ fn api_routes() -> Router<AppState> {
         .nest("/templates", routes::templates::router())
         .nest("/render", routes::render::router())
         .nest("/renders", routes::renders::router())
+        .nest("/jobs", routes::jobs::router())
         .nest("/analytics", routes::analytics::router())
 }
 

@@ -121,31 +121,56 @@ If the render fails, the endpoint returns an error (and a failure record is
 still logged).
 
 ### `POST /api/render/{reference}/batch`
-Render one template against many inputs, reusing a single warm Typst world for
-the whole batch (fonts + layout memoization stay hot, imports fetched once).
-Returns the `render_id`s; fetch each PDF separately by id.
+Submit an **async batch**: render one template against many inputs. Returns
+`202 Accepted` with a `job_id` immediately; rendering runs in the background
+(one warm Typst world — fonts + layout memoization stay hot, imports fetched
+once). Poll the job and fetch each PDF by `render_id`.
 
 Request:
 
 ```json
 {
-  "inputs": [ { "number": "INV-001" }, { "number": "INV-002" } ],
+  "inputs": [
+    { "data": { "number": "INV-001" }, "key": "cust-a" },
+    { "data": { "number": "INV-002" } }
+  ],
   "retain_days": 30
 }
 ```
 
-- `inputs` (required) — one data payload per render, injected as `sys.inputs.data`.
+- `inputs[].data` (required) — payload injected as `sys.inputs.data`.
+- `inputs[].key` (optional) — caller-chosen label echoed back on the result item.
 - `retain_days` (optional) — retention applied to every render in the batch.
 
-Response (ids are in input order; a failed input still yields an id whose
-`meta.json` records the failure):
+Response:
 
 ```json
-{ "data": { "render_ids": ["0192…a", "0192…b"] } }
+{ "data": { "job_id": "0192…", "total": 2, "status_url": "/api/jobs/0192…" } }
 ```
 
-> CPU-bound and rendered inline — best for offline/bulk jobs rather than a hot
-> request path.
+### `GET /api/jobs/{job_id}`
+Poll a batch job. The job document is persisted in S3, so this returns the full
+result whether the job is still running **or already finished**. Map each result
+back to its input by `index` (position) or by your `key`; fetch its PDF at
+`GET /api/renders/{render_id}/pdf` (you can pull completed items before the whole
+job finishes).
+
+```json
+{ "data": {
+  "job_id": "0192…", "reference": "invoice:latest",
+  "status": "running",            // running | completed
+  "total": 2, "done": 1, "failed": 0,
+  "items": [
+    { "index": 0, "key": "cust-a", "render_id": "0192a…", "status": "success" },
+    { "index": 1, "render_id": null, "status": "pending" }
+  ]
+}}
+```
+
+> Rendering is CPU-bound and runs on the server as a background task — best for
+> bulk jobs. Because state lives in S3, a client that only polls after
+> completion still gets every `render_id`; note an in-flight job is lost if the
+> server restarts mid-run (resubmit it).
 
 ## Renders & history
 

@@ -48,6 +48,7 @@
 //! ```
 
 pub mod address;
+pub mod batch;
 pub mod bundle;
 pub mod error;
 pub mod manifest;

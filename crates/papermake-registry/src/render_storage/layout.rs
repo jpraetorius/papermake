@@ -19,6 +19,14 @@ pub const RAW_PREFIX: &str = "analytics/raw/";
 /// Prefix for the expiry index (partitioned by expiry date).
 pub const EXPIRY_PREFIX: &str = "expiry/";
 
+/// Prefix for batch-job documents.
+pub const JOBS_PREFIX: &str = "jobs/";
+
+/// Key for a batch job's document.
+pub fn job_key(job_id: &str) -> String {
+    format!("{}{}/job.json", JOBS_PREFIX, job_id)
+}
+
 /// Format a date as `YYYY-MM-DD` (stable, independent of the `time` Display impl).
 pub fn date_str(date: Date) -> String {
     format!(

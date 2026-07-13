@@ -360,7 +360,9 @@ let pdf_bytes = registry.render(
 │   └── /{reference}/source (GET) - Entrypoint source (text/plain)
 ├── render/
 │   ├── /{reference} (POST) - Render template to PDF (optional retain_days)
-│   └── /{reference}/batch (POST) - Render many inputs against one template (warm world) → render_ids
+│   └── /{reference}/batch (POST) - Async batch: warm world over many inputs → 202 { job_id }
+├── jobs/
+│   └── /{job_id} (GET) - Poll a batch job (persisted in S3; items map inputs → render_ids)
 ├── renders/
 │   ├── / (GET) - List recent renders
 │   └── /{render_id}/pdf (GET) - Download rendered PDF

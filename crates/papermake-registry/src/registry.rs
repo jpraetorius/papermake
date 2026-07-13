@@ -5,6 +5,7 @@ use time;
 
 use crate::{
     address::ContentAddress,
+    batch::{BatchInput, BatchItem, BatchJob, ItemStatus, JobStatus},
     bundle::{TemplateBundle, TemplateInfo},
     error::{RegistryError, StorageError},
     manifest::Manifest,
@@ -14,6 +15,18 @@ use crate::{
     },
     storage::{BlobStorage, filesystem::RegistryFileSystem},
 };
+
+/// Prepared, reusable context for a batch: everything resolved once so each
+/// input only swaps data on the warm world.
+struct BatchCtx {
+    reference: String,
+    template_name: String,
+    template_tag: String,
+    manifest_hash: String,
+    retain_days: u32,
+    entrypoint_content: String,
+    file_system: Arc<dyn papermake::RenderFileSystem>,
+}
 
 /// Default global output retention when neither the render nor the template
 /// specifies one. Overridable per-registry via [`Registry::with_retention_days`]
@@ -506,11 +519,143 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         inputs: &[serde_json::Value],
         retain_override: Option<u32>,
     ) -> Result<Vec<String>, RegistryError> {
+        let (ctx, mut world) = self.prepare_batch(reference, retain_override).await?;
+        let mut render_ids = Vec::with_capacity(inputs.len());
+        for data in inputs {
+            let (render_id, _success) = self.render_one(&ctx, &mut world, data).await?;
+            render_ids.push(render_id);
+        }
+        Ok(render_ids)
+    }
+
+    /// Create (and persist) a batch job document in `Running` state with one
+    /// pending item per input. Returns the job so the caller can spawn
+    /// [`Registry::run_batch_job`] and hand the `job_id` back to the client.
+    pub async fn create_batch_job(
+        &self,
+        reference: &str,
+        inputs: &[BatchInput],
+    ) -> Result<BatchJob, RegistryError> {
+        let now = time::OffsetDateTime::now_utc();
+        let items = inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| BatchItem {
+                index,
+                key: input.key.clone(),
+                render_id: None,
+                status: ItemStatus::Pending,
+            })
+            .collect();
+        let job = BatchJob {
+            job_id: uuid::Uuid::now_v7().to_string(),
+            reference: reference.to_string(),
+            status: JobStatus::Running,
+            total: inputs.len(),
+            done: 0,
+            failed: 0,
+            created_at: now,
+            updated_at: now,
+            items,
+        };
+        self.put_job(&job).await?;
+        Ok(job)
+    }
+
+    /// Run a batch job to completion, updating its persisted document as each
+    /// input is rendered. Intended to be spawned as a background task; the final
+    /// `Completed` document (with every `render_id`) is persisted so a client
+    /// polling **after** completion still gets the full result.
+    pub async fn run_batch_job(
+        &self,
+        mut job: BatchJob,
+        inputs: Vec<BatchInput>,
+        retain_override: Option<u32>,
+    ) -> Result<(), RegistryError> {
+        // Persist job state at most every N items to bound S3 writes on large
+        // batches (the final state is always written).
+        const FLUSH_EVERY: usize = 20;
+
+        let (ctx, mut world) = match self.prepare_batch(&job.reference, retain_override).await {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                // The whole job couldn't start (e.g. bad reference) — record it.
+                for item in &mut job.items {
+                    item.status = ItemStatus::Failed;
+                }
+                job.failed = job.total;
+                job.status = JobStatus::Completed;
+                job.updated_at = time::OffsetDateTime::now_utc();
+                self.put_job(&job).await?;
+                return Err(e);
+            }
+        };
+
+        for (i, input) in inputs.iter().enumerate() {
+            match self.render_one(&ctx, &mut world, &input.data).await {
+                Ok((render_id, success)) => {
+                    job.items[i].render_id = Some(render_id);
+                    job.items[i].status = if success {
+                        ItemStatus::Success
+                    } else {
+                        ItemStatus::Failed
+                    };
+                    if success {
+                        job.done += 1;
+                    } else {
+                        job.failed += 1;
+                    }
+                }
+                Err(_) => {
+                    // Storage error persisting this item — count it as failed and
+                    // keep going so one bad item doesn't sink the whole batch.
+                    job.items[i].status = ItemStatus::Failed;
+                    job.failed += 1;
+                }
+            }
+            job.updated_at = time::OffsetDateTime::now_utc();
+            if (job.done + job.failed).is_multiple_of(FLUSH_EVERY) {
+                let _ = self.put_job(&job).await;
+            }
+        }
+
+        job.status = JobStatus::Completed;
+        job.updated_at = time::OffsetDateTime::now_utc();
+        self.put_job(&job).await?;
+        Ok(())
+    }
+
+    /// Fetch a persisted batch job document (for polling). Not-found → error.
+    pub async fn get_batch_job(&self, job_id: &str) -> Result<BatchJob, RegistryError> {
+        let bytes = self
+            .storage
+            .get(&crate::render_storage::layout::job_key(job_id))
+            .await
+            .map_err(|e| Self::map_blob_not_found(e, job_id))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))
+    }
+
+    /// Persist a batch job document.
+    async fn put_job(&self, job: &BatchJob) -> Result<(), RegistryError> {
+        let bytes = serde_json::to_vec(job)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))?;
+        self.storage
+            .put(&crate::render_storage::layout::job_key(&job.job_id), bytes)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))
+    }
+
+    /// Resolve + load a template and build one warm world, reused for a batch.
+    async fn prepare_batch(
+        &self,
+        reference: &str,
+        retain_override: Option<u32>,
+    ) -> Result<(BatchCtx, papermake::PapermakeWorld), RegistryError> {
         let parsed_ref = Reference::parse(reference)?;
         let template_name = parsed_ref.name.clone();
         let template_tag = parsed_ref.tag.unwrap_or_else(|| "latest".to_string());
 
-        // Resolve + load the template ONCE for the whole batch.
         let manifest_hash = self.resolve(reference).await?;
         let manifest_key = ContentAddress::manifest_key(&manifest_hash);
         let manifest_bytes = self.storage.get(&manifest_key).await.map_err(|e| {
@@ -552,115 +697,128 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
         let file_system: Arc<dyn papermake::RenderFileSystem> =
             Arc::new(RegistryFileSystem::new(self.storage.clone(), manifest)?);
-
-        // One warm world reused across every input (data swapped per render).
-        let mut world = papermake::PapermakeWorld::with_file_system(
+        let world = papermake::PapermakeWorld::with_file_system(
             entrypoint_content.clone(),
             "{}".to_string(),
             file_system.clone(),
         );
-
         let retain_days = crate::render_storage::retention::effective_retain_days(
             retain_override,
             per_template_retain,
             self.default_retention_days,
         );
 
-        let mut render_ids = Vec::with_capacity(inputs.len());
-        for data in inputs {
-            let render_id = uuid::Uuid::now_v7().to_string();
+        Ok((
+            BatchCtx {
+                reference: reference.to_string(),
+                template_name,
+                template_tag,
+                manifest_hash,
+                retain_days,
+                entrypoint_content,
+                file_system,
+            },
+            world,
+        ))
+    }
 
-            // Persist the input data by render_id.
-            let data_bytes = serde_json::to_vec(data)?;
-            let data_hash = ContentAddress::hash(&data_bytes);
-            self.storage
-                .put(&ContentAddress::render_data_key(&render_id), data_bytes)
-                .await
-                .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+    /// Render a single input against the warm world and persist its artifacts +
+    /// analytics record (like `render_and_store`). Returns `(render_id, success)`.
+    async fn render_one(
+        &self,
+        ctx: &BatchCtx,
+        world: &mut papermake::PapermakeWorld,
+        data: &serde_json::Value,
+    ) -> Result<(String, bool), RegistryError> {
+        let render_id = uuid::Uuid::now_v7().to_string();
 
-            let start = std::time::Instant::now();
-            let outcome = papermake::render_template_with_cache(
-                entrypoint_content.clone(),
-                file_system.clone(),
-                data.clone(),
-                Some(&mut world),
-            );
-            let duration_ms = start.elapsed().as_millis() as u32;
+        let data_bytes = serde_json::to_vec(data)?;
+        let data_hash = ContentAddress::hash(&data_bytes);
+        self.storage
+            .put(&ContentAddress::render_data_key(&render_id), data_bytes)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
-            let timestamp = time::OffsetDateTime::now_utc();
-            let expiry_date =
-                crate::render_storage::retention::expiry_date(timestamp.date(), retain_days);
+        let start = std::time::Instant::now();
+        let outcome = papermake::render_template_with_cache(
+            ctx.entrypoint_content.clone(),
+            ctx.file_system.clone(),
+            data.clone(),
+            Some(world),
+        );
+        let duration_ms = start.elapsed().as_millis() as u32;
 
-            let record = match outcome {
-                Ok(result) if result.success => {
-                    let pdf = result.pdf.unwrap_or_default();
-                    let pdf_hash = ContentAddress::hash(&pdf);
-                    let pdf_size_bytes = pdf.len() as u32;
-                    self.storage
-                        .put(&ContentAddress::render_pdf_key(&render_id), pdf)
-                        .await
-                        .map_err(|e| {
-                            RegistryError::Storage(StorageError::backend(e.to_string()))
-                        })?;
-                    RenderRecord {
-                        render_id: render_id.clone(),
-                        timestamp,
-                        template_ref: reference.to_string(),
-                        template_name: template_name.clone(),
-                        template_tag: template_tag.clone(),
-                        manifest_hash: manifest_hash.clone(),
-                        data_hash,
-                        pdf_hash,
-                        success: true,
-                        duration_ms,
-                        pdf_size_bytes,
-                        error: None,
-                        expiry_date,
-                    }
-                }
-                other => {
-                    let error = match other {
-                        Ok(result) => {
-                            let msg = result
-                                .errors
-                                .iter()
-                                .map(|e| e.to_string())
-                                .collect::<Vec<_>>()
-                                .join("; ");
-                            if msg.is_empty() {
-                                "template rendering failed".to_string()
-                            } else {
-                                msg
-                            }
-                        }
-                        Err(e) => e.to_string(),
-                    };
-                    RenderRecord {
-                        render_id: render_id.clone(),
-                        timestamp,
-                        template_ref: reference.to_string(),
-                        template_name: template_name.clone(),
-                        template_tag: template_tag.clone(),
-                        manifest_hash: manifest_hash.clone(),
-                        data_hash,
-                        pdf_hash: String::new(),
-                        success: false,
-                        duration_ms,
-                        pdf_size_bytes: 0,
-                        error: Some(error),
-                        expiry_date,
-                    }
-                }
-            };
+        let timestamp = time::OffsetDateTime::now_utc();
+        let expiry_date =
+            crate::render_storage::retention::expiry_date(timestamp.date(), ctx.retain_days);
 
-            self.put_render_meta(&record).await?;
-            if let Some(render_storage) = &self.render_storage {
-                render_storage.store_render(record).await?;
+        let (record, success) = match outcome {
+            Ok(result) if result.success => {
+                let pdf = result.pdf.unwrap_or_default();
+                let pdf_hash = ContentAddress::hash(&pdf);
+                let pdf_size_bytes = pdf.len() as u32;
+                self.storage
+                    .put(&ContentAddress::render_pdf_key(&render_id), pdf)
+                    .await
+                    .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+                let record = RenderRecord {
+                    render_id: render_id.clone(),
+                    timestamp,
+                    template_ref: ctx.reference.clone(),
+                    template_name: ctx.template_name.clone(),
+                    template_tag: ctx.template_tag.clone(),
+                    manifest_hash: ctx.manifest_hash.clone(),
+                    data_hash,
+                    pdf_hash,
+                    success: true,
+                    duration_ms,
+                    pdf_size_bytes,
+                    error: None,
+                    expiry_date,
+                };
+                (record, true)
             }
-            render_ids.push(render_id);
-        }
+            other => {
+                let error = match other {
+                    Ok(result) => {
+                        let msg = result
+                            .errors
+                            .iter()
+                            .map(|e| e.to_string())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        if msg.is_empty() {
+                            "template rendering failed".to_string()
+                        } else {
+                            msg
+                        }
+                    }
+                    Err(e) => e.to_string(),
+                };
+                let record = RenderRecord {
+                    render_id: render_id.clone(),
+                    timestamp,
+                    template_ref: ctx.reference.clone(),
+                    template_name: ctx.template_name.clone(),
+                    template_tag: ctx.template_tag.clone(),
+                    manifest_hash: ctx.manifest_hash.clone(),
+                    data_hash,
+                    pdf_hash: String::new(),
+                    success: false,
+                    duration_ms,
+                    pdf_size_bytes: 0,
+                    error: Some(error),
+                    expiry_date,
+                };
+                (record, false)
+            }
+        };
 
-        Ok(render_ids)
+        self.put_render_meta(&record).await?;
+        if let Some(render_storage) = &self.render_storage {
+            render_storage.store_render(record).await?;
+        }
+        Ok((render_id, success))
     }
 
     /// List all templates in the registry
@@ -2363,6 +2521,63 @@ Hello #data.name"#
         // All three analytics records were staged.
         let recent = registry.list_recent_renders(10).await.unwrap();
         assert_eq!(recent.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_batch_job_persists_and_completes() {
+        use crate::batch::{BatchInput, ItemStatus, JobStatus};
+
+        let storage = MemoryStorage::new();
+        let render_storage = crate::render_storage::MemoryRenderStorage::new();
+        let registry = Registry::new(storage, render_storage);
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+
+        let inputs = vec![
+            BatchInput {
+                data: serde_json::json!({ "name": "A" }),
+                key: Some("cust-a".to_string()),
+            },
+            BatchInput {
+                data: serde_json::json!({ "name": "B" }),
+                key: None,
+            },
+        ];
+
+        // Job is persisted immediately (running, all items pending).
+        let job = registry
+            .create_batch_job("batch:latest", &inputs)
+            .await
+            .unwrap();
+        let job_id = job.job_id.clone();
+        let initial = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(initial.status, JobStatus::Running);
+        assert_eq!(initial.total, 2);
+        assert!(
+            initial
+                .items
+                .iter()
+                .all(|i| i.status == ItemStatus::Pending)
+        );
+
+        // Run to completion (synchronously in the test; the server spawns this).
+        registry.run_batch_job(job, inputs, None).await.unwrap();
+
+        // Polling AFTER completion still returns the full, persisted result.
+        let done = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(done.status, JobStatus::Completed);
+        assert_eq!(done.done, 2);
+        assert_eq!(done.failed, 0);
+        assert_eq!(done.items[0].key.as_deref(), Some("cust-a"));
+        assert_eq!(done.items[1].key, None);
+        for item in &done.items {
+            assert_eq!(item.status, ItemStatus::Success);
+            let render_id = item.render_id.as_ref().expect("render_id set");
+            let pdf = registry.get_render_pdf(render_id).await.unwrap();
+            assert!(pdf.starts_with(b"%PDF"));
+        }
     }
 
     #[tokio::test]

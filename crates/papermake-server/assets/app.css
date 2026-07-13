@@ -303,7 +303,6 @@ tbody tr:nth-child(even) {
     content: "";
     position: absolute;
     left: 50%;
-    top: 100%;
     transform: translateX(-50%);
     border-style: solid;
       border-color: transparent;
@@ -311,14 +310,14 @@ tbody tr:nth-child(even) {
     
     /* Dark outer triangle */
     .navbar nav a[aria-current="page"]::before {
-      margin-top: -0.75rem;
-      border-width: 1.45rem;
+      margin-top: 2.7rem;
+        border-width: 1.45rem;
       border-bottom-color: var(--border);
     }
     
     /* Main triangle */
     .navbar nav a[aria-current="page"]::after {
-      margin-top: -0.7rem;
+      margin-top: 2.9rem;
       border-width: 1.4rem;
       border-bottom-color: var(--bg);
   }

@@ -1,6 +1,8 @@
 //! HTTP route handlers
 
 pub mod analytics;
+// Batch job status
+pub mod jobs;
 // Render
 pub mod render;
 // Retrieve renders
