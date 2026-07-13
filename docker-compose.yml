@@ -34,8 +34,9 @@ services:
     networks:
       - papermake
     volumes:
-      # Optional: drop TTF/OTF/TTC files here to add fonts without rebuilding.
-      # (Scanned alongside the image's baked fonts via FONTS_DIR.)
+      # Fonts are provided via this mount (FONTS_DIR=/fonts in the image), on top
+      # of Typst's embedded set — nothing is baked in. ./fonts is gitignored, so
+      # drop the TTF/OTF/TTC files your templates need in there.
       - ./fonts:/fonts:ro
     # No container healthcheck: the distroless runtime image has no shell/curl.
     # Probe from the host instead: curl -f http://localhost:3000/health
@@ -71,7 +72,7 @@ services:
     networks:
       - papermake
     volumes:
-      # Same optional font drop-in as the server (batch renders match).
+      # Same /fonts mount as the server, so batch renders resolve the same fonts.
       - ./fonts:/fonts:ro
 
   # RustFS - S3-compatible object storage (Apache-2.0, Rust, MinIO-compatible).

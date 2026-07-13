@@ -14,10 +14,16 @@ target/
 .env*
 !.env.example
 
-fonts/
+# Local font drop-in mounted into the containers at /fonts (see docker-compose).
+# Root-anchored so template-bundled fonts (templates/*/assets/fonts/) still track.
+/fonts/
 /storage/
 .vscode/
 data/
 
-# Local sample template (kept on disk, not tracked)
+# Local sample templates (kept on disk, not tracked)
 /templates/alh-corporate/
+/templates/monaspace-demo/
+
+# Local-only font helper (verification convenience, not part of the repo)
+/scripts/fetch-fonts.sh

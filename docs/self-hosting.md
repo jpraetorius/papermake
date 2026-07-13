@@ -20,6 +20,10 @@ Brings up `papermake-server` (port 3000), `papermake-worker`, and `rustfs`
 (S3 API `:9000`, web console `:9001`). The server creates its bucket on
 startup. See [Getting started](getting-started.md).
 
+Fonts are supplied by the mounted `./fonts` directory (gitignored, so empty on a
+fresh clone). Drop the TTF/OTF/TTC files your templates need in there before
+starting — Typst's embedded fonts are always available regardless.
+
 ```bash
 docker compose logs -f papermake-server papermake-worker
 docker compose down        # add -v to also delete stored data
@@ -77,7 +81,7 @@ All configuration is via environment variables (see
 | `FLUSH_INTERVAL_SECONDS` | `30` | Analytics flush interval |
 | `FLUSH_MAX_RECORDS` | `1000` | Buffer size that triggers an eager flush |
 | `RENDER_RETENTION_DAYS` | `30` | Global output retention default (`0` = forever) |
-| `FONTS_DIR` | (image default) | One or more directories (`:`-separated) of TTF/OTF/TTC files scanned at startup; missing dirs are skipped. Mount a volume here to add fonts without rebuilding. |
+| `FONTS_DIR` | `/fonts` in Docker; unset otherwise | One or more directories (`:`-separated) of TTF/OTF/TTC files scanned at startup; missing dirs are skipped. Compose mounts the repo's `./fonts` here; add more without rebuilding. |
 | `RUST_LOG` | — | Log filter, e.g. `papermake_server=debug` |
 
 ### Worker
@@ -90,22 +94,23 @@ All configuration is via environment variables (see
 | `WORKER_MAX_ATTEMPTS` | `3` | Give up on a job (mark `failed`) after this many claims |
 | `PAPERMAKE_WORKER_ID` | `worker` | Job owner id (falls back to `PAPERMAKE_INSTANCE_ID`) |
 | `RENDER_RETENTION_DAYS` | `30` | Retention for batch-rendered outputs |
-| `FONTS_DIR` | (image default) | Same as the server — the worker renders batch jobs, so it needs the same fonts |
+| `FONTS_DIR` | `/fonts` in Docker; unset otherwise | Same as the server — the worker renders batch jobs, so it needs the same fonts |
 
 ## Fonts
 
 Renders use three font sources, all merged:
 1. **Typst's embedded fonts** — always available.
-2. **`FONTS_DIR`** — one or more directories scanned at startup (the image bakes
-   a set and also scans a mounted `/fonts` volume, so you can add fonts by
-   dropping files in a mount without rebuilding). Set `FONTS_DIR` to a
+2. **`FONTS_DIR`** — one or more directories scanned at startup. Nothing is
+   baked into the image beyond Typst's embedded set; instead the image sets
+   `FONTS_DIR=/fonts` and Compose mounts the repo's `./fonts` there, so you add
+   fonts by dropping files in the mount without rebuilding. Set `FONTS_DIR` to a
    `:`-separated list of directories.
 3. **Template-bundled fonts** — any `.ttf`/`.otf`/`.ttc` file in a template's
    bundle is registered for that template's renders (see
    [Writing templates](templates.md)), so templates can be self-contained.
 
 Both the server (single renders) and the worker (batch renders) need the same
-fonts — the images bake identical sets and mount the same `/fonts` volume.
+fonts — they mount the same `/fonts` volume and set the same `FONTS_DIR`.
 Templates reference fonts by **family name** (`#set text(font: "…")`); Typst
 supports TTF/OTF/TTC only (no WOFF/WOFF2).
 

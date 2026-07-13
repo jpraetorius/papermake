@@ -103,9 +103,9 @@ add its typeface. Notes:
 - Rendered PDFs embed the subset of each resolved font actually used, so PDF
   readers don't need the fonts installed.
 
-Prefer baking common corporate fonts into the image (or a mounted `FONTS_DIR`
-volume) — see [Self-hosting → Fonts](self-hosting.md#fonts) — and bundle only
-template-specific typefaces.
+Prefer providing common corporate fonts via a mounted `FONTS_DIR` volume (or
+baked into a custom image) — see [Self-hosting → Fonts](self-hosting.md#fonts) —
+and bundle only template-specific typefaces.
 
 ## Tags and versions
 
