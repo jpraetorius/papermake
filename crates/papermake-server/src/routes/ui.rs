@@ -799,7 +799,9 @@ mod tests {
         assert!(APP_CSS.starts_with(b"/* Papermake UI"));
         assert!(HTMX_JS.starts_with(b"var htmx"));
         assert!(LOGO_SVG.starts_with(b"<svg"));
-        assert!(std::str::from_utf8(LOGO_SVG).unwrap().contains("polygon"));
+        let logo = std::str::from_utf8(LOGO_SVG).unwrap();
+        assert!(logo.contains("viewBox")); // scales in the favicon + navbar
+        assert!(logo.contains("<path"));
     }
 
     #[test]

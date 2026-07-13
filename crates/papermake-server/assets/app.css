@@ -138,6 +138,8 @@
     display: inline-flex; align-items: center; gap: 0.5rem;
     font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text);
   }
+  /* Logo artwork has a light background; round it into a small tile. */
+  .navbar .brand img { border-radius: 6px; }
   .navbar nav { display: flex; align-items: center; gap: 1rem; }
 
   /* Current location: bold, accent-colored, with a caret pointing down at the
