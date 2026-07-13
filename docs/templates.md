@@ -83,7 +83,9 @@ share an identical `logo.png` stores it once.
 
 Font files can be versioned as assets if you need to keep them near a template,
 but Typst font resolution does not load template assets as font families. Install
-the font on the server image/host or set `FONTS_DIR` before startup.
+the font on the server image/host or set `FONTS_DIR` before startup. Rendered
+PDFs embed the subset of each resolved font that is used by the document, so PDF
+readers do not need those fonts installed.
 
 ## Tags and versions
 
