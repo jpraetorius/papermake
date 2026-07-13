@@ -57,7 +57,7 @@ with the template (as `schema.json`) for documentation/validation tooling.
 
 ## Multiple files, assets, and imports
 
-Templates can include additional files — images, fonts, or Typst components you
+Templates can include additional files — images or Typst components you
 `#import`. Reference them by their path within the template bundle:
 
 ```typst
@@ -80,6 +80,10 @@ curl -X POST "http://localhost:3000/api/templates/invoice/publish?tag=latest" \
 
 Files are content-addressed and deduplicated: publishing two templates that
 share an identical `logo.png` stores it once.
+
+Font files can be versioned as assets if you need to keep them near a template,
+but Typst font resolution does not load template assets as font families. Install
+the font on the server image/host or set `FONTS_DIR` before startup.
 
 ## Tags and versions
 
