@@ -5,7 +5,7 @@ use axum::{
     routing::post,
 };
 
-use papermake_registry::{RegistryError, batch::BatchInput};
+use papermake_registry::{PdfStandard, RegistryError, RenderOptions, batch::BatchInput};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{error, info};
@@ -29,6 +29,10 @@ pub struct RenderRequest {
     /// the template default, then the global default, when absent.
     #[serde(default)]
     pub retain_days: Option<u32>,
+    /// Optional PDF standard for the output (`"1.7"`, `"a-2b"`, `"a-3b"`).
+    /// Absent = plain PDF 1.7.
+    #[serde(default)]
+    pub pdf_standard: Option<PdfStandard>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,12 +57,17 @@ pub async fn render_template(
         reference = %reference,
         data_size_bytes,
         retain_days = ?request.retain_days,
+        pdf_standard = ?request.pdf_standard,
         "render request accepted",
     );
 
+    let options = RenderOptions {
+        pdf_standards: request.pdf_standard.map(|s| vec![s]).unwrap_or_default(),
+    };
+
     let result = match state
         .registry
-        .render_and_store_with_retention(&reference, &request.data, request.retain_days)
+        .render_and_store_with(&reference, &request.data, request.retain_days, &options)
         .await
     {
         Ok(result) => {

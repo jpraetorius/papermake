@@ -59,6 +59,9 @@ pub mod storage;
 
 pub use bundle::TemplateInfo;
 pub use error::RegistryError;
+// Re-export the PDF export knobs so server callers don't need a direct
+// papermake dependency.
+pub use papermake::{PdfStandard, RenderOptions};
 pub use registry::Registry;
 pub use render_storage::{AnalyticsQuery, AnalyticsResult, RenderRecord, RenderStorage};
 pub use storage::{BlobStorage, TypstFileSystem};
