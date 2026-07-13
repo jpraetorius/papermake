@@ -120,6 +120,33 @@ Response:
 If the render fails, the endpoint returns an error (and a failure record is
 still logged).
 
+### `POST /api/render/{reference}/batch`
+Render one template against many inputs, reusing a single warm Typst world for
+the whole batch (fonts + layout memoization stay hot, imports fetched once).
+Returns the `render_id`s; fetch each PDF separately by id.
+
+Request:
+
+```json
+{
+  "inputs": [ { "number": "INV-001" }, { "number": "INV-002" } ],
+  "retain_days": 30
+}
+```
+
+- `inputs` (required) — one data payload per render, injected as `sys.inputs.data`.
+- `retain_days` (optional) — retention applied to every render in the batch.
+
+Response (ids are in input order; a failed input still yields an id whose
+`meta.json` records the failure):
+
+```json
+{ "data": { "render_ids": ["0192…a", "0192…b"] } }
+```
+
+> CPU-bound and rendered inline — best for offline/bulk jobs rather than a hot
+> request path.
+
 ## Renders & history
 
 ### `GET /api/renders`

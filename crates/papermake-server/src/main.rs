@@ -53,6 +53,11 @@ async fn main() -> Result<()> {
         config.host, config.port
     );
 
+    // Load fonts now (embedded + system + FONTS_DIR) so the cost is paid at
+    // startup rather than on the first render.
+    papermake::preload_fonts();
+    info!("Fonts preloaded");
+
     let s3_storage = S3Storage::from_env().unwrap(); // TODO: improve error handling
 
     // Ensure S3 bucket exists

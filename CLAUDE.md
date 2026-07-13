@@ -359,7 +359,8 @@ let pdf_bytes = registry.render(
 │   ├── /{reference} (GET) - Get template metadata
 │   └── /{reference}/source (GET) - Entrypoint source (text/plain)
 ├── render/
-│   └── /{reference} (POST) - Render template to PDF (optional retain_days)
+│   ├── /{reference} (POST) - Render template to PDF (optional retain_days)
+│   └── /{reference}/batch (POST) - Render many inputs against one template (warm world) → render_ids
 ├── renders/
 │   ├── / (GET) - List recent renders
 │   └── /{render_id}/pdf (GET) - Download rendered PDF

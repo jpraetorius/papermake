@@ -43,6 +43,16 @@ static CACHED_FONTS: Lazy<(FontBook, Vec<Font>)> = Lazy::new(|| {
     (book, fonts)
 });
 
+/// Eagerly load and cache the font set (embedded + system + `FONTS_DIR`).
+///
+/// Fonts are otherwise loaded lazily on the first render, making it slow. Call
+/// this once at process startup so that cost is paid at boot and every render —
+/// including the first — stays fast.
+pub fn preload_fonts() {
+    // Dereferencing the lazy static forces its initialization.
+    let _ = &*CACHED_FONTS;
+}
+
 /// File system abstraction for Typst rendering
 ///
 /// This trait provides file access to TypstWorld during rendering,

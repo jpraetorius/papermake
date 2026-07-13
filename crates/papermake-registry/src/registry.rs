@@ -473,6 +473,196 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         }
     }
 
+    /// Render one template against many inputs, reusing a single warm Typst
+    /// world for the whole batch.
+    ///
+    /// The template is resolved, its manifest/entrypoint loaded, and its world
+    /// built **once**; each input then only swaps the injected data. Imports are
+    /// fetched from blob storage once (cached in the world) and Typst's layout
+    /// memoization stays warm across the batch — a large win when rendering the
+    /// same template many times.
+    ///
+    /// Each render is persisted exactly like [`Registry::render_and_store`]
+    /// (`renders/{id}/{meta.json,pdf,data}` + analytics record + retention), so
+    /// PDFs are fetched afterwards by id. Returns the `render_id`s in input
+    /// order; a failed input still gets an id (its meta records the failure).
+    ///
+    /// Note: Typst compilation is CPU-bound and runs inline here — a very large
+    /// batch will occupy the calling task for a while; prefer running it off the
+    /// request path (e.g. the worker) for big jobs.
+    pub async fn batch_render(
+        &self,
+        reference: &str,
+        inputs: &[serde_json::Value],
+    ) -> Result<Vec<String>, RegistryError> {
+        self.batch_render_with_retention(reference, inputs, None)
+            .await
+    }
+
+    /// Like [`Registry::batch_render`] with a per-batch retention override.
+    pub async fn batch_render_with_retention(
+        &self,
+        reference: &str,
+        inputs: &[serde_json::Value],
+        retain_override: Option<u32>,
+    ) -> Result<Vec<String>, RegistryError> {
+        let parsed_ref = Reference::parse(reference)?;
+        let template_name = parsed_ref.name.clone();
+        let template_tag = parsed_ref.tag.unwrap_or_else(|| "latest".to_string());
+
+        // Resolve + load the template ONCE for the whole batch.
+        let manifest_hash = self.resolve(reference).await?;
+        let manifest_key = ContentAddress::manifest_key(&manifest_hash);
+        let manifest_bytes = self.storage.get(&manifest_key).await.map_err(|e| {
+            RegistryError::Storage(StorageError::backend(format!(
+                "Failed to load manifest {}: {}",
+                manifest_hash, e
+            )))
+        })?;
+        let manifest = Manifest::from_bytes(&manifest_bytes).map_err(|e| {
+            RegistryError::ContentAddressing(crate::error::ContentAddressingError::manifest_error(
+                e.to_string(),
+            ))
+        })?;
+        let per_template_retain = manifest.metadata.retain_days;
+        let entrypoint_hash = manifest
+            .entrypoint_hash()
+            .ok_or_else(|| {
+                RegistryError::Template(crate::error::TemplateError::invalid(
+                    "Manifest missing entrypoint hash",
+                ))
+            })?
+            .clone();
+        let entrypoint_bytes = self
+            .storage
+            .get(&ContentAddress::blob_key(&entrypoint_hash))
+            .await
+            .map_err(|e| {
+                RegistryError::Storage(StorageError::backend(format!(
+                    "Failed to load entrypoint file: {}",
+                    e
+                )))
+            })?;
+        let entrypoint_content = String::from_utf8(entrypoint_bytes).map_err(|e| {
+            RegistryError::Template(crate::error::TemplateError::invalid(format!(
+                "Entrypoint file is not valid UTF-8: {}",
+                e
+            )))
+        })?;
+
+        let file_system: Arc<dyn papermake::RenderFileSystem> =
+            Arc::new(RegistryFileSystem::new(self.storage.clone(), manifest)?);
+
+        // One warm world reused across every input (data swapped per render).
+        let mut world = papermake::PapermakeWorld::with_file_system(
+            entrypoint_content.clone(),
+            "{}".to_string(),
+            file_system.clone(),
+        );
+
+        let retain_days = crate::render_storage::retention::effective_retain_days(
+            retain_override,
+            per_template_retain,
+            self.default_retention_days,
+        );
+
+        let mut render_ids = Vec::with_capacity(inputs.len());
+        for data in inputs {
+            let render_id = uuid::Uuid::now_v7().to_string();
+
+            // Persist the input data by render_id.
+            let data_bytes = serde_json::to_vec(data)?;
+            let data_hash = ContentAddress::hash(&data_bytes);
+            self.storage
+                .put(&ContentAddress::render_data_key(&render_id), data_bytes)
+                .await
+                .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+
+            let start = std::time::Instant::now();
+            let outcome = papermake::render_template_with_cache(
+                entrypoint_content.clone(),
+                file_system.clone(),
+                data.clone(),
+                Some(&mut world),
+            );
+            let duration_ms = start.elapsed().as_millis() as u32;
+
+            let timestamp = time::OffsetDateTime::now_utc();
+            let expiry_date =
+                crate::render_storage::retention::expiry_date(timestamp.date(), retain_days);
+
+            let record = match outcome {
+                Ok(result) if result.success => {
+                    let pdf = result.pdf.unwrap_or_default();
+                    let pdf_hash = ContentAddress::hash(&pdf);
+                    let pdf_size_bytes = pdf.len() as u32;
+                    self.storage
+                        .put(&ContentAddress::render_pdf_key(&render_id), pdf)
+                        .await
+                        .map_err(|e| {
+                            RegistryError::Storage(StorageError::backend(e.to_string()))
+                        })?;
+                    RenderRecord {
+                        render_id: render_id.clone(),
+                        timestamp,
+                        template_ref: reference.to_string(),
+                        template_name: template_name.clone(),
+                        template_tag: template_tag.clone(),
+                        manifest_hash: manifest_hash.clone(),
+                        data_hash,
+                        pdf_hash,
+                        success: true,
+                        duration_ms,
+                        pdf_size_bytes,
+                        error: None,
+                        expiry_date,
+                    }
+                }
+                other => {
+                    let error = match other {
+                        Ok(result) => {
+                            let msg = result
+                                .errors
+                                .iter()
+                                .map(|e| e.to_string())
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            if msg.is_empty() {
+                                "template rendering failed".to_string()
+                            } else {
+                                msg
+                            }
+                        }
+                        Err(e) => e.to_string(),
+                    };
+                    RenderRecord {
+                        render_id: render_id.clone(),
+                        timestamp,
+                        template_ref: reference.to_string(),
+                        template_name: template_name.clone(),
+                        template_tag: template_tag.clone(),
+                        manifest_hash: manifest_hash.clone(),
+                        data_hash,
+                        pdf_hash: String::new(),
+                        success: false,
+                        duration_ms,
+                        pdf_size_bytes: 0,
+                        error: Some(error),
+                        expiry_date,
+                    }
+                }
+            };
+
+            self.put_render_meta(&record).await?;
+            if let Some(render_storage) = &self.render_storage {
+                render_storage.store_render(record).await?;
+            }
+            render_ids.push(render_id);
+        }
+
+        Ok(render_ids)
+    }
+
     /// List all templates in the registry
     ///
     /// This method scans all references in storage and groups them by template
@@ -2136,6 +2326,43 @@ Hello #data.name"#
             .await
             .unwrap();
         assert_eq!(meta.expiry_date, None);
+    }
+
+    #[tokio::test]
+    async fn test_batch_render_reuses_template() {
+        let storage = MemoryStorage::new();
+        let render_storage = crate::render_storage::MemoryRenderStorage::new();
+        let registry = Registry::new(storage, render_storage);
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+
+        let inputs = vec![
+            serde_json::json!({ "name": "A" }),
+            serde_json::json!({ "name": "B" }),
+            serde_json::json!({ "name": "C" }),
+        ];
+        let ids = registry
+            .batch_render("batch:latest", &inputs)
+            .await
+            .unwrap();
+
+        assert_eq!(ids.len(), 3);
+        // Distinct render ids.
+        assert_eq!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
+        // Each render's PDF is fetchable by id, and its input round-trips.
+        for (id, input) in ids.iter().zip(&inputs) {
+            let pdf = registry.get_render_pdf(id).await.unwrap();
+            assert!(pdf.starts_with(b"%PDF"));
+            assert_eq!(&registry.get_render_data(id).await.unwrap(), input);
+        }
+        // All three analytics records were staged.
+        let recent = registry.list_recent_renders(10).await.unwrap();
+        assert_eq!(recent.len(), 3);
     }
 
     #[tokio::test]
