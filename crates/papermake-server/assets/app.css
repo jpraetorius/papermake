@@ -137,21 +137,23 @@
 
 @layer components {
   .navbar {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 1rem; padding: 0.75rem 1.25rem;
+    --navbar-pad-y: 0.75rem; /* inherits to the active-link caret below */
+    display: flex; align-items: stretch; justify-content: space-between;
+    gap: 1rem; padding: var(--navbar-pad-y) 1.25rem;
     background: var(--surface); border-bottom: 1px solid var(--border);
   }
   .navbar .brand {
-    display: inline-flex; align-items: center; gap: 0.5rem;
+    display: inline-flex; align-items: center; gap: 0.6rem;
     font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text);
   }
-  /* Logo artwork has a light background; round it into a small tile. */
-  .navbar .brand img { border-radius: 6px; }
-  .navbar nav { display: flex; align-items: center; gap: 1rem; }
+  /* Logo artwork has a light background; frame it as a bordered tile. */
+  .navbar .brand img { border-radius: 12px; border: 2px solid oklch(32% 0.03 265); }
+  /* Full-height links so the active caret can sit on the navbar's bottom edge. */
+  .navbar nav { display: flex; align-items: stretch; gap: 1.25rem; }
 
-  /* Current location: bold, accent-colored, with a caret pointing down at the
-     content area below the navbar. */
-  .navbar nav a { position: relative; }
+  /* Current location: bold, accent-colored, with a caret in the content-area
+     gray whose tip rises from the content up into the navbar. */
+  .navbar nav a { display: inline-flex; align-items: center; position: relative; }
   .navbar nav a[aria-current="page"] {
     color: var(--primary);
     font-weight: 700;
@@ -161,11 +163,10 @@
     content: "";
     position: absolute;
     left: 50%;
-    top: 100%;
+    bottom: calc(-1 * var(--navbar-pad-y) - 1px); /* reach the navbar's bottom edge */
     transform: translateX(-50%);
-    margin-top: 0.45rem;
-    border: 0.4rem solid transparent;
-    border-top-color: var(--primary);
+    border: 0.5rem solid transparent;
+    border-bottom-color: var(--bg); /* upward tip, in the content background */
   }
 
   .card {

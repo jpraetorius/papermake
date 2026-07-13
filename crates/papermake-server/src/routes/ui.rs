@@ -58,7 +58,6 @@ pub fn router() -> Router<AppState> {
 enum Nav {
     Dashboard,
     Templates,
-    New,
 }
 
 /// Shared page shell: stylesheet, htmx, and a navbar with the current path
@@ -79,13 +78,12 @@ fn layout(title: &str, active: Nav, body: Markup) -> Markup {
             body {
                 header.navbar {
                     a.brand href="/" {
-                        img src="/assets/logo.svg" alt="" width="26" height="26";
+                        img src="/assets/logo.svg" alt="" width="64" height="64";
                         span { "Papermake" }
                     }
                     nav {
                         a href="/" aria-current=[current(Nav::Dashboard)] { "Dashboard" }
                         a href="/templates" aria-current=[current(Nav::Templates)] { "Templates" }
-                        a.btn href="/templates/new" aria-current=[current(Nav::New)] { "＋ New template" }
                     }
                 }
                 main.container.stack { (body) }
@@ -448,7 +446,7 @@ pub fn new_template_page() -> Markup {
             }
         }
     };
-    layout("New template", Nav::New, body)
+    layout("New template", Nav::Templates, body)
 }
 
 /// htmx fragment shown after a successful test render.
