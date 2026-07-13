@@ -134,7 +134,10 @@
     gap: 1rem; padding: 0.75rem 1.25rem;
     background: var(--surface); border-bottom: 1px solid var(--border);
   }
-  .navbar .brand { font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text); }
+  .navbar .brand {
+    display: inline-flex; align-items: center; gap: 0.5rem;
+    font-weight: 700; font-size: 1.1rem; text-decoration: none; color: var(--text);
+  }
   .navbar nav { display: flex; align-items: center; gap: 1rem; }
 
   .card {

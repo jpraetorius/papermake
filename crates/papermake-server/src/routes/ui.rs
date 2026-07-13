@@ -44,6 +44,7 @@ pub fn router() -> Router<AppState> {
         // works under distroless and regardless of the working directory).
         .route("/assets/app.css", get(app_css))
         .route("/assets/htmx.min.js", get(htmx_js))
+        .route("/assets/logo.svg", get(logo_svg))
 }
 
 // ---------------------------------------------------------------------------
@@ -59,12 +60,16 @@ fn layout(title: &str, body: Markup) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { (title) " · Papermake" }
+                link rel="icon" type="image/svg+xml" href="/assets/logo.svg";
                 link rel="stylesheet" href="/assets/app.css";
                 script src="/assets/htmx.min.js" {}
             }
             body {
                 header.navbar {
-                    a.brand href="/" { "📄 Papermake" }
+                    a.brand href="/" {
+                        img src="/assets/logo.svg" alt="" width="26" height="26";
+                        span { "Papermake" }
+                    }
                     nav {
                         a href="/" { "Dashboard" }
                         a.btn href="/templates/new" { "＋ New template" }
@@ -202,7 +207,7 @@ fn renders_table(records: &[RenderRecord], now: OffsetDateTime) -> Markup {
                                 td.nowrap { (relative_time(r.timestamp, now)) }
                                 td {
                                     @if r.success {
-                                        a href=(format!("/api/renders/{}/pdf", r.render_id)) { "download" }
+                                        a href=(format!("/api/renders/{}/pdf", r.render_id)) download { "download" }
                                     } @else { "—" }
                                 }
                             }
@@ -555,6 +560,8 @@ async fn publish(
 const APP_CSS: &[u8] = include_bytes!("../../assets/app.css");
 /// Vendored htmx (htmx@4.0.0-beta5), embedded at compile time.
 const HTMX_JS: &[u8] = include_bytes!("../../assets/htmx.min.js");
+/// Paper-crane logo / favicon (SVG), embedded at compile time.
+const LOGO_SVG: &[u8] = include_bytes!("../../assets/logo.svg");
 
 async fn app_css() -> impl IntoResponse {
     (
@@ -573,6 +580,16 @@ async fn htmx_js() -> impl IntoResponse {
             (CACHE_CONTROL, "public, max-age=3600"),
         ],
         HTMX_JS,
+    )
+}
+
+async fn logo_svg() -> impl IntoResponse {
+    (
+        [
+            (CONTENT_TYPE, "image/svg+xml"),
+            (CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LOGO_SVG,
     )
 }
 
@@ -637,6 +654,9 @@ mod tests {
         assert!(html.contains("class=\"card"));
         assert!(html.contains("/assets/app.css"));
         assert!(html.contains("/assets/htmx.min.js"));
+        // Favicon + logo.
+        assert!(html.contains("rel=\"icon\""));
+        assert!(html.contains("/assets/logo.svg"));
         // No Kelp remnants.
         assert!(!html.contains("kelp"));
     }
@@ -691,6 +711,8 @@ mod tests {
     fn test_embedded_assets() {
         assert!(APP_CSS.starts_with(b"/* Papermake UI"));
         assert!(HTMX_JS.starts_with(b"var htmx"));
+        assert!(LOGO_SVG.starts_with(b"<svg"));
+        assert!(std::str::from_utf8(LOGO_SVG).unwrap().contains("polygon"));
     }
 
     #[test]

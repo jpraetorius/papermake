@@ -79,11 +79,14 @@ pub async fn get_render_pdf(
 
     let filename = format!("render-{}.pdf", render_id);
 
+    // `inline` so the PDF renders in the browser (e.g. the editor's <iframe>
+    // preview). Explicit "download" links in the UI set the HTML `download`
+    // attribute to force a save instead.
     Ok(Response::builder()
         .header(CONTENT_TYPE, "application/pdf")
         .header(
             CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{}\"", filename),
+            format!("inline; filename=\"{}\"", filename),
         )
         .body(Body::from(pdf_bytes))
         .unwrap())
