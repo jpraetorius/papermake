@@ -17,6 +17,7 @@ RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=cache,target=/app/target/ \
     --mount=type=cache,target=/usr/local/cargo/git/db \
     --mount=type=cache,target=/usr/local/cargo/registry/ \
+    cargo clean --release -p papermake -p papermake-registry -p papermake-worker && \
     cargo build --locked --release -p papermake-worker && \
     cp ./target/release/papermake-worker /bin/worker
 
