@@ -23,6 +23,9 @@ pub struct BatchInput {
 pub enum JobStatus {
     Running,
     Completed,
+    /// The server running this job was restarted mid-run; it will not resume.
+    /// Any items already rendered keep their `render_id`.
+    Interrupted,
 }
 
 /// Per-item state.

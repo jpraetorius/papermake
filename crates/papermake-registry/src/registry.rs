@@ -625,6 +625,45 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         Ok(())
     }
 
+    /// Mark orphaned batch jobs as `Interrupted`.
+    ///
+    /// A batch runs in a background task tied to the process; if the server is
+    /// restarted mid-run its job doc is left stuck in `Running`. Call this at
+    /// startup with the boot time: any job still `Running` that was created
+    /// before boot cannot have a live task, so it's flipped to `Interrupted`
+    /// (already-rendered items keep their `render_id`). Returns how many were
+    /// reaped.
+    pub async fn reap_interrupted_jobs(
+        &self,
+        started_before: time::OffsetDateTime,
+    ) -> Result<usize, RegistryError> {
+        let keys = self
+            .storage
+            .list_keys(crate::render_storage::layout::JOBS_PREFIX)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+
+        let mut reaped = 0;
+        for key in keys {
+            if !key.ends_with("/job.json") {
+                continue;
+            }
+            let Ok(bytes) = self.storage.get(&key).await else {
+                continue;
+            };
+            let Ok(mut job) = serde_json::from_slice::<BatchJob>(&bytes) else {
+                continue;
+            };
+            if job.status == JobStatus::Running && job.created_at < started_before {
+                job.status = JobStatus::Interrupted;
+                job.updated_at = time::OffsetDateTime::now_utc();
+                self.put_job(&job).await?;
+                reaped += 1;
+            }
+        }
+        Ok(reaped)
+    }
+
     /// Fetch a persisted batch job document (for polling). Not-found → error.
     pub async fn get_batch_job(&self, job_id: &str) -> Result<BatchJob, RegistryError> {
         let bytes = self
@@ -2578,6 +2617,37 @@ Hello #data.name"#
             let pdf = registry.get_render_pdf(render_id).await.unwrap();
             assert!(pdf.starts_with(b"%PDF"));
         }
+    }
+
+    #[tokio::test]
+    async fn test_reap_interrupted_jobs() {
+        use crate::batch::{BatchInput, JobStatus};
+
+        let storage = MemoryStorage::new();
+        let registry = Registry::new_storage_only(storage);
+
+        // create_batch_job just persists the doc (no rendering), so no publish
+        // is needed for this test.
+        let inputs = vec![BatchInput {
+            data: serde_json::json!({}),
+            key: None,
+        }];
+        let job = registry
+            .create_batch_job("x:latest", &inputs)
+            .await
+            .unwrap();
+        let job_id = job.job_id.clone();
+
+        // A cutoff after the job's creation reaps it.
+        let cutoff = time::OffsetDateTime::now_utc() + time::Duration::seconds(1);
+        assert_eq!(registry.reap_interrupted_jobs(cutoff).await.unwrap(), 1);
+        assert_eq!(
+            registry.get_batch_job(&job_id).await.unwrap().status,
+            JobStatus::Interrupted
+        );
+
+        // Idempotent: an already-interrupted job is not reaped again.
+        assert_eq!(registry.reap_interrupted_jobs(cutoff).await.unwrap(), 0);
     }
 
     #[tokio::test]

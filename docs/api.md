@@ -158,7 +158,7 @@ job finishes).
 ```json
 { "data": {
   "job_id": "0192…", "reference": "invoice:latest",
-  "status": "running",            // running | completed
+  "status": "running",            // running | completed | interrupted
   "total": 2, "done": 1, "failed": 0,
   "items": [
     { "index": 0, "key": "cust-a", "render_id": "0192a…", "status": "success" },
@@ -169,8 +169,10 @@ job finishes).
 
 > Rendering is CPU-bound and runs on the server as a background task — best for
 > bulk jobs. Because state lives in S3, a client that only polls after
-> completion still gets every `render_id`; note an in-flight job is lost if the
-> server restarts mid-run (resubmit it).
+> completion still gets every `render_id`. If the server restarts mid-run the
+> job can't resume; on startup it's marked `interrupted` (rather than left stuck
+> on `running`), with any already-rendered items keeping their `render_id` —
+> resubmit the remainder.
 
 ## Renders & history
 
