@@ -2921,6 +2921,7 @@ name = "papermake-worker"
 version = "0.1.0"
 dependencies = [
  "dotenv",
+ "papermake",
  "papermake-registry",
  "time",
  "tokio",

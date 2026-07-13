@@ -3,8 +3,10 @@
 Papermake needs two processes and an S3-compatible object store:
 
 - **`papermake-server`** — the HTTP API + web UI. Run one or more.
-- **`papermake-worker`** — aggregates analytics and prunes expired outputs. Run
-  exactly **one**, regardless of how many servers you run.
+- **`papermake-worker`** — runs batch-render jobs, aggregates analytics, and
+  prunes expired outputs. Run exactly **one**: batch jobs are claimed with a
+  lease and, since RustFS has no atomic claim, correctness relies on a single
+  active worker (see [Scaling](#scaling)).
 - **S3** — RustFS (bundled for local/dev), or any S3-compatible service in
   production.
 
@@ -44,8 +46,9 @@ cargo run -r -p papermake-server
 cargo run -r -p papermake-worker  # separate shell
 ```
 
-Without the worker running, renders still work and PDFs are downloadable, but
-analytics (`summary.json`) won't be built and expired outputs won't be pruned.
+Without the worker running, single renders still work and PDFs are downloadable,
+but **batch jobs stay `queued`**, analytics (`summary.json`) won't be built, and
+expired outputs won't be pruned.
 
 ## Environment variables
 
@@ -81,16 +84,24 @@ All configuration is via environment variables (see
 
 | Variable | Default | Description |
 |---|---|---|
-| `WORKER_INTERVAL_SECONDS` | `60` | Aggregate + prune cadence |
+| `WORKER_INTERVAL_SECONDS` | `60` | Drain-jobs + aggregate + prune cadence |
 | `ANALYTICS_RETENTION_DAYS` | `30` | How long to keep raw analytics NDJSON |
+| `WORKER_LEASE_SECONDS` | `120` | Batch-job lease; a dead worker's job is reclaimable after this |
+| `WORKER_MAX_ATTEMPTS` | `3` | Give up on a job (mark `failed`) after this many claims |
+| `PAPERMAKE_WORKER_ID` | `worker` | Job owner id (falls back to `PAPERMAKE_INSTANCE_ID`) |
+| `RENDER_RETENTION_DAYS` | `30` | Retention for batch-rendered outputs |
 
 ## Scaling
 
 - **Servers scale horizontally.** Each buffers its own records and flushes to
   S3 under an instance-scoped key prefix, so instances never collide. Give each
   a distinct `PAPERMAKE_INSTANCE_ID`.
-- **Run a single worker.** One aggregator produces one consistent `summary.json`
-  for all servers. Running several is harmless but redundant.
+- **Run a single worker.** It produces one consistent `summary.json`, and —
+  critically — it's the only process that claims batch jobs. Because RustFS has
+  no atomic conditional write, safe claiming relies on there being one active
+  worker; running several could double-process a job. Use a single replica
+  (`Recreate` strategy / StatefulSet). If the worker restarts mid-job, the next
+  instance reclaims it after the lease expires and resumes the remaining items.
 - Analytics are eventually consistent across servers; artifact retrieval by
   `render_id` is immediate everywhere. See
   [Analytics & retention](analytics-and-retention.md).
@@ -109,7 +120,8 @@ All configuration is via environment variables (see
 ├── analytics/
 │   ├── raw/dt=<date>/<instance>/*.ndjson   # buffered render records
 │   └── agg/summary.json                    # the aggregate the API reads
-└── expiry/dt=<expiry-date>/<instance>/*.ndjson   # retention index
+├── expiry/dt=<expiry-date>/<instance>/*.ndjson   # retention index
+└── jobs/<job_id>/{job.json, inputs.json}   # batch-job status + inputs
 ```
 
 Templates, manifests, and assets are content-addressed (deduplicated). Rendered

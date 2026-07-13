@@ -123,9 +123,9 @@ pub struct BatchAccepted {
     pub status_url: String,
 }
 
-/// Submit an async batch render. Returns `202 Accepted` with a `job_id`; the
-/// job renders in the background (one warm world) and its document is persisted
-/// in S3, so clients can poll it during or after the run and fetch each PDF by
+/// Submit an async batch render. Returns `202 Accepted` with a `job_id`. The
+/// job is durably enqueued in S3; a worker claims and renders it, updating the
+/// persisted job document. Poll `GET /api/jobs/{job_id}` and fetch each PDF by
 /// `render_id`.
 #[axum::debug_handler]
 pub async fn batch_render(
@@ -149,9 +149,11 @@ pub async fn batch_render(
         })
         .collect();
 
+    // Enqueue only — a worker picks it up. Servers never render batches, so
+    // scaling the API is safe.
     let job = state
         .registry
-        .create_batch_job(&reference, &inputs)
+        .enqueue_batch_job(&reference, &inputs, request.retain_days)
         .await
         .map_err(|e| {
             error!(
@@ -162,33 +164,10 @@ pub async fn batch_render(
             ApiError::Internal(e.to_string())
         })?;
 
-    let job_id = job.job_id.clone();
-    let total = job.total;
-
-    // Render in the background; run_batch_job updates the persisted job doc as
-    // it goes and writes the final Completed state.
-    let registry = state.registry.clone();
-    let retain = request.retain_days;
-    let log_id = job_id.clone();
-    tokio::spawn(async move {
-        tracing::info!(
-            job_id = %log_id,
-            "batch render background job started",
-        );
-        if let Err(e) = registry.run_batch_job(job, inputs, retain).await {
-            tracing::error!("batch job {} failed: {}", log_id, e);
-        } else {
-            tracing::info!(
-                job_id = %log_id,
-                "batch render background job completed",
-            );
-        }
-    });
-
     let accepted = BatchAccepted {
-        status_url: format!("/api/jobs/{}", job_id),
-        job_id,
-        total,
+        status_url: format!("/api/jobs/{}", job.job_id),
+        job_id: job.job_id,
+        total: job.total,
     };
     Ok((StatusCode::ACCEPTED, Json(ApiResponse::new(accepted))))
 }

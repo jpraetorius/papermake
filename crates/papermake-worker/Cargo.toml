@@ -1,9 +1,10 @@
 [package]
 name = "papermake-worker"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
+papermake = { path = "../papermake" }
 papermake-registry = { path = "../papermake-registry" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

@@ -917,122 +917,79 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         Ok(render_ids)
     }
 
-    /// Create (and persist) a batch job document in `Running` state with one
-    /// pending item per input. Returns the job so the caller can spawn
-    /// [`Registry::run_batch_job`] and hand the `job_id` back to the client.
-    pub async fn create_batch_job(
+    /// Enqueue a batch job: persist its inputs and a `queued` job document, and
+    /// return the job (for its `job_id`). The server calls this; a worker picks
+    /// it up via [`Registry::claim_next_job`]. Does no rendering.
+    pub async fn enqueue_batch_job(
         &self,
         reference: &str,
         inputs: &[BatchInput],
+        retain_override: Option<u32>,
     ) -> Result<BatchJob, RegistryError> {
+        let job_id = uuid::Uuid::now_v7().to_string();
+
+        // Persist the inputs (the worker is a separate process).
+        let inputs_bytes = serde_json::to_vec(inputs)?;
+        self.storage
+            .put(
+                &crate::render_storage::layout::job_inputs_key(&job_id),
+                inputs_bytes,
+            )
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+
         let now = time::OffsetDateTime::now_utc();
-        let items = inputs
-            .iter()
-            .enumerate()
-            .map(|(index, input)| BatchItem {
-                index,
-                key: input.key.clone(),
-                render_id: None,
-                status: ItemStatus::Pending,
-            })
-            .collect();
         let job = BatchJob {
-            job_id: uuid::Uuid::now_v7().to_string(),
+            job_id,
             reference: reference.to_string(),
-            status: JobStatus::Running,
+            status: JobStatus::Queued,
             total: inputs.len(),
             done: 0,
             failed: 0,
+            retain_days: retain_override,
+            owner: None,
+            lease_expires_at: None,
+            attempts: 0,
             created_at: now,
             updated_at: now,
-            items,
+            items: inputs
+                .iter()
+                .enumerate()
+                .map(|(index, input)| BatchItem {
+                    index,
+                    key: input.key.clone(),
+                    render_id: None,
+                    status: ItemStatus::Pending,
+                })
+                .collect(),
         };
         self.put_job(&job).await?;
         Ok(job)
     }
 
-    /// Run a batch job to completion, updating its persisted document as each
-    /// input is rendered. Intended to be spawned as a background task; the final
-    /// `Completed` document (with every `render_id`) is persisted so a client
-    /// polling **after** completion still gets the full result.
-    pub async fn run_batch_job(
-        &self,
-        mut job: BatchJob,
-        inputs: Vec<BatchInput>,
-        retain_override: Option<u32>,
-    ) -> Result<(), RegistryError> {
-        // Persist job state at most every N items to bound S3 writes on large
-        // batches (the final state is always written).
-        const FLUSH_EVERY: usize = 20;
-
-        let (ctx, mut world) = match self.prepare_batch(&job.reference, retain_override).await {
-            Ok(prepared) => prepared,
-            Err(e) => {
-                // The whole job couldn't start (e.g. bad reference) — record it.
-                for item in &mut job.items {
-                    item.status = ItemStatus::Failed;
-                }
-                job.failed = job.total;
-                job.status = JobStatus::Completed;
-                job.updated_at = time::OffsetDateTime::now_utc();
-                self.put_job(&job).await?;
-                return Err(e);
-            }
-        };
-
-        for (i, input) in inputs.iter().enumerate() {
-            match self.render_one(&ctx, &mut world, &input.data).await {
-                Ok((render_id, success)) => {
-                    job.items[i].render_id = Some(render_id);
-                    job.items[i].status = if success {
-                        ItemStatus::Success
-                    } else {
-                        ItemStatus::Failed
-                    };
-                    if success {
-                        job.done += 1;
-                    } else {
-                        job.failed += 1;
-                    }
-                }
-                Err(_) => {
-                    // Storage error persisting this item — count it as failed and
-                    // keep going so one bad item doesn't sink the whole batch.
-                    job.items[i].status = ItemStatus::Failed;
-                    job.failed += 1;
-                }
-            }
-            job.updated_at = time::OffsetDateTime::now_utc();
-            if (job.done + job.failed).is_multiple_of(FLUSH_EVERY) {
-                let _ = self.put_job(&job).await;
-            }
-        }
-
-        job.status = JobStatus::Completed;
-        job.updated_at = time::OffsetDateTime::now_utc();
-        self.put_job(&job).await?;
-        Ok(())
-    }
-
-    /// Mark orphaned batch jobs as `Interrupted`.
+    /// Claim the next processable batch job for `worker_id`, or `None`.
     ///
-    /// A batch runs in a background task tied to the process; if the server is
-    /// restarted mid-run its job doc is left stuck in `Running`. Call this at
-    /// startup with the boot time: any job still `Running` that was created
-    /// before boot cannot have a live task, so it's flipped to `Interrupted`
-    /// (already-rendered items keep their `render_id`). Returns how many were
-    /// reaped.
-    pub async fn reap_interrupted_jobs(
+    /// A job is claimable when it is `Queued`, or `Running` with an **expired
+    /// lease** (its previous owner is gone). Claiming bumps `attempts`, sets
+    /// owner + a fresh lease (`now + lease_ttl_secs`), and persists. A job that
+    /// has already been attempted `max_attempts` times is marked `Failed` and
+    /// skipped (poison-job guard). Also returns the job's inputs.
+    ///
+    /// Safe because only one worker is active at a time (no atomic claim on the
+    /// backend); the lease is what makes a dead worker's job reclaimable.
+    pub async fn claim_next_job(
         &self,
-        started_before: time::OffsetDateTime,
-    ) -> Result<usize, RegistryError> {
+        worker_id: &str,
+        lease_ttl_secs: u64,
+        max_attempts: u32,
+        now: time::OffsetDateTime,
+    ) -> Result<Option<(BatchJob, Vec<BatchInput>)>, RegistryError> {
         let keys = self
             .storage
             .list_keys(crate::render_storage::layout::JOBS_PREFIX)
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
-        let mut reaped = 0;
         for key in keys {
             if !key.ends_with("/job.json") {
                 continue;
@@ -1043,14 +1000,126 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             let Ok(mut job) = serde_json::from_slice::<BatchJob>(&bytes) else {
                 continue;
             };
-            if job.status == JobStatus::Running && job.created_at < started_before {
-                job.status = JobStatus::Interrupted;
+
+            let claimable = match job.status {
+                JobStatus::Queued => true,
+                JobStatus::Running => job.lease_expires_at.is_none_or(|exp| exp < now),
+                JobStatus::Completed | JobStatus::Failed => false,
+            };
+            if !claimable {
+                continue;
+            }
+
+            // Poison-job guard: give up after too many attempts.
+            if job.attempts >= max_attempts {
+                job.status = JobStatus::Failed;
+                job.owner = None;
+                job.lease_expires_at = None;
+                job.updated_at = now;
+                self.put_job(&job).await?;
+                continue;
+            }
+
+            job.status = JobStatus::Running;
+            job.owner = Some(worker_id.to_string());
+            job.lease_expires_at = Some(now + time::Duration::seconds(lease_ttl_secs as i64));
+            job.attempts += 1;
+            job.updated_at = now;
+            self.put_job(&job).await?;
+
+            let inputs = self.load_job_inputs(&job.job_id).await?;
+            return Ok(Some((job, inputs)));
+        }
+        Ok(None)
+    }
+
+    /// Run a claimed job to completion, **resuming** where a previous attempt
+    /// left off (items that already have a `render_id` are skipped). The
+    /// persisted document is updated as it goes (with lease heartbeats) and a
+    /// final `Completed` document is written, so a client polling afterwards
+    /// gets the full result.
+    pub async fn run_claimed_job(
+        &self,
+        mut job: BatchJob,
+        inputs: Vec<BatchInput>,
+        lease_ttl_secs: u64,
+    ) -> Result<(), RegistryError> {
+        // Heartbeat/persist every N items to bound writes and keep the lease fresh.
+        const FLUSH_EVERY: usize = 20;
+
+        let (ctx, mut world) = match self.prepare_batch(&job.reference, job.retain_days).await {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                // The template couldn't be loaded at all — the whole job fails.
+                for item in &mut job.items {
+                    if item.render_id.is_none() {
+                        item.status = ItemStatus::Failed;
+                    }
+                }
+                job.failed = job.items.iter().filter(|i| i.render_id.is_none()).count();
+                job.status = JobStatus::Failed;
+                job.owner = None;
+                job.lease_expires_at = None;
                 job.updated_at = time::OffsetDateTime::now_utc();
                 self.put_job(&job).await?;
-                reaped += 1;
+                return Err(e);
+            }
+        };
+
+        for (i, input) in inputs.iter().enumerate() {
+            // Resume: skip items already rendered by a previous attempt.
+            if job.items[i].render_id.is_some() {
+                continue;
+            }
+
+            let (item_status, is_failure) =
+                match self.render_one(&ctx, &mut world, &input.data).await {
+                    Ok((render_id, success)) => {
+                        job.items[i].render_id = Some(render_id);
+                        if success {
+                            (ItemStatus::Success, false)
+                        } else {
+                            (ItemStatus::Failed, true)
+                        }
+                    }
+                    // Storage error persisting this item — count it failed, keep going.
+                    Err(_) => (ItemStatus::Failed, true),
+                };
+            job.items[i].status = item_status;
+            if is_failure {
+                job.failed += 1;
+            } else {
+                job.done += 1;
+            }
+
+            let processed = job.done + job.failed;
+            if processed.is_multiple_of(FLUSH_EVERY) {
+                job.lease_expires_at = Some(
+                    time::OffsetDateTime::now_utc()
+                        + time::Duration::seconds(lease_ttl_secs as i64),
+                );
+                job.updated_at = time::OffsetDateTime::now_utc();
+                let _ = self.put_job(&job).await;
             }
         }
-        Ok(reaped)
+
+        job.status = JobStatus::Completed;
+        job.owner = None;
+        job.lease_expires_at = None;
+        job.updated_at = time::OffsetDateTime::now_utc();
+        self.put_job(&job).await?;
+        Ok(())
+    }
+
+    /// Load a batch job's persisted inputs.
+    async fn load_job_inputs(&self, job_id: &str) -> Result<Vec<BatchInput>, RegistryError> {
+        let bytes = self
+            .storage
+            .get(&crate::render_storage::layout::job_inputs_key(job_id))
+            .await
+            .map_err(|e| Self::map_blob_not_found(e, job_id))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))
     }
 
     /// Fetch a persisted batch job document (for polling). Not-found → error.
@@ -3082,7 +3151,7 @@ Hello #data.name"#
     }
 
     #[tokio::test]
-    async fn test_batch_job_persists_and_completes() {
+    async fn test_batch_job_enqueue_claim_run() {
         use crate::batch::{BatchInput, ItemStatus, JobStatus};
 
         let storage = MemoryStorage::new();
@@ -3104,32 +3173,51 @@ Hello #data.name"#
             },
         ];
 
-        // Job is persisted immediately (running, all items pending).
+        // Server enqueues: job is queued with pending items, inputs persisted.
         let job = registry
-            .create_batch_job("batch:latest", &inputs)
+            .enqueue_batch_job("batch:latest", &inputs, None)
             .await
             .unwrap();
         let job_id = job.job_id.clone();
-        let initial = registry.get_batch_job(&job_id).await.unwrap();
-        assert_eq!(initial.status, JobStatus::Running);
-        assert_eq!(initial.total, 2);
+        let queued = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(queued.status, JobStatus::Queued);
+        assert_eq!(queued.total, 2);
+        assert!(queued.items.iter().all(|i| i.status == ItemStatus::Pending));
+
+        // Worker claims it (running, owned, leased) with the persisted inputs.
+        let now = time::OffsetDateTime::now_utc();
+        let (claimed, claimed_inputs) = registry
+            .claim_next_job("worker-1", 120, 3, now)
+            .await
+            .unwrap()
+            .expect("a job should be claimable");
+        assert_eq!(claimed.job_id, job_id);
+        assert_eq!(claimed.status, JobStatus::Running);
+        assert_eq!(claimed.owner.as_deref(), Some("worker-1"));
+        assert_eq!(claimed.attempts, 1);
+        assert_eq!(claimed_inputs.len(), 2);
+        // Nothing else is claimable now (single running job with a fresh lease).
         assert!(
-            initial
-                .items
-                .iter()
-                .all(|i| i.status == ItemStatus::Pending)
+            registry
+                .claim_next_job("worker-1", 120, 3, now)
+                .await
+                .unwrap()
+                .is_none()
         );
 
-        // Run to completion (synchronously in the test; the server spawns this).
-        registry.run_batch_job(job, inputs, None).await.unwrap();
+        // Worker runs it to completion.
+        registry
+            .run_claimed_job(claimed, claimed_inputs, 120)
+            .await
+            .unwrap();
 
-        // Polling AFTER completion still returns the full, persisted result.
+        // Polling AFTER completion returns the full, persisted result.
         let done = registry.get_batch_job(&job_id).await.unwrap();
         assert_eq!(done.status, JobStatus::Completed);
         assert_eq!(done.done, 2);
         assert_eq!(done.failed, 0);
+        assert_eq!(done.owner, None);
         assert_eq!(done.items[0].key.as_deref(), Some("cust-a"));
-        assert_eq!(done.items[1].key, None);
         for item in &done.items {
             assert_eq!(item.status, ItemStatus::Success);
             let render_id = item.render_id.as_ref().expect("render_id set");
@@ -3139,34 +3227,69 @@ Hello #data.name"#
     }
 
     #[tokio::test]
-    async fn test_reap_interrupted_jobs() {
+    async fn test_batch_job_orphan_reclaim_resumes() {
         use crate::batch::{BatchInput, JobStatus};
 
         let storage = MemoryStorage::new();
-        let registry = Registry::new_storage_only(storage);
+        let render_storage = crate::render_storage::MemoryRenderStorage::new();
+        let registry = Registry::new(storage, render_storage);
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
 
-        // create_batch_job just persists the doc (no rendering), so no publish
-        // is needed for this test.
-        let inputs = vec![BatchInput {
-            data: serde_json::json!({}),
-            key: None,
-        }];
+        let inputs = vec![
+            BatchInput {
+                data: serde_json::json!({ "name": "A" }),
+                key: None,
+            },
+            BatchInput {
+                data: serde_json::json!({ "name": "B" }),
+                key: None,
+            },
+        ];
         let job = registry
-            .create_batch_job("x:latest", &inputs)
+            .enqueue_batch_job("batch:latest", &inputs, None)
             .await
             .unwrap();
         let job_id = job.job_id.clone();
 
-        // A cutoff after the job's creation reaps it.
-        let cutoff = time::OffsetDateTime::now_utc() + time::Duration::seconds(1);
-        assert_eq!(registry.reap_interrupted_jobs(cutoff).await.unwrap(), 1);
-        assert_eq!(
-            registry.get_batch_job(&job_id).await.unwrap().status,
-            JobStatus::Interrupted
+        // Worker A claims but "dies" before running (lease will expire).
+        let t0 = time::OffsetDateTime::now_utc();
+        let (claimed_a, _) = registry
+            .claim_next_job("worker-a", 60, 3, t0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed_a.attempts, 1);
+
+        // Before the lease expires, the job is NOT claimable by anyone else.
+        let t_soon = t0 + time::Duration::seconds(10);
+        assert!(
+            registry
+                .claim_next_job("worker-b", 60, 3, t_soon)
+                .await
+                .unwrap()
+                .is_none()
         );
 
-        // Idempotent: an already-interrupted job is not reaped again.
-        assert_eq!(registry.reap_interrupted_jobs(cutoff).await.unwrap(), 0);
+        // After the lease expires, worker B reclaims and runs it to completion.
+        let t_late = t0 + time::Duration::seconds(120);
+        let (claimed_b, inputs_b) = registry
+            .claim_next_job("worker-b", 60, 3, t_late)
+            .await
+            .unwrap()
+            .expect("expired lease is reclaimable");
+        assert_eq!(claimed_b.owner.as_deref(), Some("worker-b"));
+        assert_eq!(claimed_b.attempts, 2);
+        registry
+            .run_claimed_job(claimed_b, inputs_b, 60)
+            .await
+            .unwrap();
+
+        let done = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(done.status, JobStatus::Completed);
+        assert_eq!(done.done, 2);
     }
 
     #[tokio::test]

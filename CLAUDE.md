@@ -332,7 +332,7 @@ let pdf_bytes = registry.render(
 **Dependencies:**
 - `papermake-registry` crate (completed phases 1-4)
 - S3-compatible storage (RustFS for dev)
-- `papermake-worker` (aggregator + pruner)
+- `papermake-worker` (batch-job runner + aggregator + pruner; run exactly one)
 
 ## HTTP API Endpoints
 

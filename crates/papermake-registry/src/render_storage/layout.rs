@@ -22,9 +22,14 @@ pub const EXPIRY_PREFIX: &str = "expiry/";
 /// Prefix for batch-job documents.
 pub const JOBS_PREFIX: &str = "jobs/";
 
-/// Key for a batch job's document.
+/// Key for a batch job's document (the polled status).
 pub fn job_key(job_id: &str) -> String {
     format!("{}{}/job.json", JOBS_PREFIX, job_id)
+}
+
+/// Key for a batch job's persisted inputs (read by the worker).
+pub fn job_inputs_key(job_id: &str) -> String {
+    format!("{}{}/inputs.json", JOBS_PREFIX, job_id)
 }
 
 /// Format a date as `YYYY-MM-DD` (stable, independent of the `time` Display impl).

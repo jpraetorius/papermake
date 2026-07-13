@@ -122,9 +122,10 @@ still logged).
 
 ### `POST /api/render/{reference}/batch`
 Submit an **async batch**: render one template against many inputs. Returns
-`202 Accepted` with a `job_id` immediately; rendering runs in the background
-(one warm Typst world — fonts + layout memoization stay hot, imports fetched
-once). Poll the job and fetch each PDF by `render_id`.
+`202 Accepted` with a `job_id` immediately; the job is durably enqueued in S3
+and the **worker** claims and renders it (one warm Typst world — fonts + layout
+memoization stay hot, imports fetched once). Poll the job and fetch each PDF by
+`render_id`.
 
 Request:
 
@@ -158,7 +159,7 @@ job finishes).
 ```json
 { "data": {
   "job_id": "0192…", "reference": "invoice:latest",
-  "status": "running",            // running | completed | interrupted
+  "status": "running",            // queued | running | completed | failed
   "total": 2, "done": 1, "failed": 0,
   "items": [
     { "index": 0, "key": "cust-a", "render_id": "0192a…", "status": "success" },
@@ -167,12 +168,13 @@ job finishes).
 }}
 ```
 
-> Rendering is CPU-bound and runs on the server as a background task — best for
-> bulk jobs. Because state lives in S3, a client that only polls after
-> completion still gets every `render_id`. If the server restarts mid-run the
-> job can't resume; on startup it's marked `interrupted` (rather than left stuck
-> on `running`), with any already-rendered items keeping their `render_id` —
-> resubmit the remainder.
+> The worker claims a job with an owner + lease and heartbeats it while
+> rendering. If that worker dies mid-run, the lease expires and the (single
+> active) worker reclaims the job on its next cycle and **resumes** the
+> remaining items — already-rendered items keep their `render_id`, so no work is
+> repeated and nothing gets stuck in `running`. A job that repeatedly crashes
+> the worker is marked `failed` after a few attempts. Because state lives in S3,
+> a client that only polls after completion still gets every `render_id`.
 
 ## Renders & history
 

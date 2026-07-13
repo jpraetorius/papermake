@@ -88,17 +88,6 @@ async fn main() -> Result<()> {
             ),
     );
 
-    // Reap orphaned batch jobs: any job still "running" was created by a
-    // previous process (this one is just starting), so mark it interrupted.
-    match registry
-        .reap_interrupted_jobs(time::OffsetDateTime::now_utc())
-        .await
-    {
-        Ok(0) => {}
-        Ok(n) => info!("Marked {} orphaned batch job(s) as interrupted", n),
-        Err(e) => error!("Failed to reap orphaned batch jobs: {}", e),
-    }
-
     // Background flush loop against the same buffer render_and_store stages into.
     if let Some(rs) = registry.render_storage() {
         let interval = config.flush_interval_seconds;
