@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use maud::{DOCTYPE, Markup, html};
+use maud::{DOCTYPE, Markup, PreEscaped, html};
 use serde::Deserialize;
 use time::OffsetDateTime;
 
@@ -242,6 +242,213 @@ fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+fn infer_data_fields(source: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut i = 0;
+
+    while i < source.len() {
+        let remaining = &source[i..];
+        if remaining.starts_with("data.at(") {
+            if let Some((field, consumed)) = parse_first_string_arg(remaining, "data.at(") {
+                push_unique(&mut fields, field);
+                i += consumed;
+                continue;
+            }
+        } else if remaining.starts_with("data.") {
+            if let Some((field, consumed)) = parse_data_path(remaining) {
+                push_unique(&mut fields, field);
+                i += consumed;
+                continue;
+            }
+        } else if remaining.starts_with("field(")
+            && let Some((field, consumed)) = parse_first_string_arg(remaining, "field(")
+        {
+            push_unique(&mut fields, field);
+            i += consumed;
+            continue;
+        }
+
+        i += remaining.chars().next().map(char::len_utf8).unwrap_or(1);
+    }
+
+    fields
+}
+
+fn parse_data_path(source: &str) -> Option<(String, usize)> {
+    let mut offset = "data.".len();
+    let (first, consumed) = parse_identifier(&source[offset..])?;
+    if first == "at" {
+        return None;
+    }
+    offset += consumed;
+
+    let mut parts = vec![first];
+    while source[offset..].starts_with('.') {
+        let next_offset = offset + 1;
+        let Some((part, consumed)) = parse_identifier(&source[next_offset..]) else {
+            break;
+        };
+        parts.push(part);
+        offset = next_offset + consumed;
+    }
+
+    Some((parts.join("."), offset))
+}
+
+fn parse_identifier(source: &str) -> Option<(String, usize)> {
+    let mut chars = source.char_indices();
+    let (_, first) = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    Some((source[..end].to_string(), end))
+}
+
+fn parse_first_string_arg(source: &str, prefix: &str) -> Option<(String, usize)> {
+    let mut offset = prefix.len();
+    while let Some(ch) = source[offset..].chars().next()
+        && ch.is_whitespace()
+    {
+        offset += ch.len_utf8();
+    }
+
+    let quote = source[offset..].chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    offset += quote.len_utf8();
+
+    let mut value = String::new();
+    let mut escaped = false;
+    for (idx, ch) in source[offset..].char_indices() {
+        if escaped {
+            value.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return Some((value, offset + idx + ch.len_utf8()));
+        } else {
+            value.push(ch);
+        }
+    }
+
+    None
+}
+
+fn push_unique(fields: &mut Vec<String>, field: String) {
+    if field.trim().is_empty() || fields.iter().any(|existing| existing == &field) {
+        return;
+    }
+    fields.push(field);
+}
+
+fn sample_data_json(fields: &[String]) -> String {
+    if fields.is_empty() {
+        return "{}".to_string();
+    }
+
+    let mut root = serde_json::Map::new();
+    for field in fields {
+        let parts: Vec<&str> = field.split('.').filter(|part| !part.is_empty()).collect();
+        insert_json_path(&mut root, &parts);
+    }
+
+    serde_json::to_string_pretty(&serde_json::Value::Object(root))
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
+fn insert_json_path(map: &mut serde_json::Map<String, serde_json::Value>, parts: &[&str]) {
+    let Some((head, tail)) = parts.split_first() else {
+        return;
+    };
+
+    if tail.is_empty() {
+        map.entry((*head).to_string())
+            .or_insert_with(|| serde_json::Value::String(String::new()));
+        return;
+    }
+
+    let entry = map
+        .entry((*head).to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if !entry.is_object() {
+        *entry = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(child) = entry.as_object_mut() {
+        insert_json_path(child, tail);
+    }
+}
+
+fn template_detail_component_script() -> Markup {
+    html! {
+        script type="module" {
+            (PreEscaped(r#"
+if (!customElements.get('template-detail-page')) {
+  customElements.define('template-detail-page', class extends HTMLElement {
+    connectedCallback() {
+      this.input = this.querySelector('[data-json-input]');
+      this.fields = Array.from(this.querySelectorAll('[data-data-field]'));
+      this.onInput = () => this.updateFields();
+      this.input?.addEventListener('input', this.onInput);
+      this.updateFields();
+    }
+
+    disconnectedCallback() {
+      this.input?.removeEventListener('input', this.onInput);
+    }
+
+    updateFields() {
+      let data = null;
+      try {
+        data = JSON.parse(this.input?.value || '{}');
+      } catch (_) {
+        data = null;
+      }
+
+      for (const field of this.fields) {
+        const path = field.dataset.dataField || '';
+        const used = data !== null && this.hasValueAtPath(data, path);
+        field.toggleAttribute('data-used', used);
+      }
+    }
+
+    hasValueAtPath(data, path) {
+      const value = path.split('.').filter(Boolean).reduce((cursor, part) => {
+        if (cursor && typeof cursor === 'object' && Object.hasOwn(cursor, part)) {
+          return cursor[part];
+        }
+        return undefined;
+      }, data);
+      return this.hasMeaningfulValue(value);
+    }
+
+    hasMeaningfulValue(value) {
+      if (value === undefined || value === null) return false;
+      if (typeof value === 'string') return value.trim().length > 0;
+      if (Array.isArray(value)) return value.some((item) => this.hasMeaningfulValue(item));
+      if (typeof value === 'object') {
+        return Object.values(value).some((item) => this.hasMeaningfulValue(item));
+      }
+      return true;
+    }
+  });
+}
+"#))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Pages (pure)
 // ---------------------------------------------------------------------------
@@ -356,7 +563,11 @@ pub fn template_detail_page(
     now: OffsetDateTime,
     t: &I18n,
 ) -> Markup {
-    let body = html! {
+    let data_fields = infer_data_fields(source);
+    let sample_data = sample_data_json(&data_fields);
+    let data_rows = if data_fields.len() > 4 { "10" } else { "6" };
+
+    let detail = html! {
         div.split {
             div.stack style="--gap: 0.25rem;" {
                 div.cluster style="--gap: 0.5rem;" {
@@ -401,10 +612,22 @@ pub fn template_detail_page(
                      hx-target="#render-result" hx-swap="innerHTML" {
                     input type="hidden" name="tag" value=(tag);
                     label for="data" { (t.t("label-input-data")) }
-                    textarea id="data" name="data" rows="6" { "{}" }
+                    textarea id="data" name="data" rows=(data_rows) data-json-input { (sample_data) }
+                    @if !data_fields.is_empty() {
+                        div.data-fields.stack style="--gap: 0.45rem;" {
+                            span.eyebrow { (t.t("available-data-fields")) }
+                            div.cluster style="--gap: 0.35rem;" {
+                                @for field in &data_fields {
+                                    span.data-field data-data-field=(field) {
+                                        code { (field) }
+                                        span.field-check aria-hidden="true" { "✓" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     div { button.primary type="submit" { (t.t("btn-test-render")) } }
                 }
-                div id="render-result" {}
             }
 
             // Source + publish.
@@ -428,7 +651,15 @@ pub fn template_detail_page(
             }
         }
 
+        div id="render-result" {}
+
         (section(&t.t("section-recent-renders"), renders_table(recent, now, t)))
+    };
+    let body = html! {
+        template-detail-page {
+            (detail)
+        }
+        (template_detail_component_script())
     };
     layout(name, Nav::Templates, t, body)
 }
@@ -469,11 +700,12 @@ pub fn new_template_page(t: &I18n) -> Markup {
 /// htmx fragment shown after a successful test render.
 pub fn render_result_fragment(render_id: &str, t: &I18n) -> Markup {
     html! {
-        div.stack style="--gap: 0.5rem;" {
+        div.card.stack.render-preview style="--gap: 0.5rem;" {
             p.muted { (t.t("rendered")) " " code { (short_id(render_id)) } }
-            iframe src=(format!("/api/renders/{}/pdf", render_id))
-                   title="Rendered PDF"
-                   style="width: 100%; height: 600px; border: 1px solid var(--border); border-radius: var(--radius);" {}
+            div.pdf-preview {
+                iframe src=(format!("/api/renders/{}/pdf", render_id))
+                       title="Rendered PDF" {}
+            }
         }
     }
 }
@@ -831,7 +1063,10 @@ mod tests {
             "v2",
             &meta,
             &["latest".to_string(), "v2".to_string()],
-            "= Hello",
+            r#"#let field(key, default) = data.at(key, default: default)
+= #data.customer.name
+#field("document_number", "")
+"#,
             &[],
             now,
             &en(),
@@ -839,7 +1074,7 @@ mod tests {
         .into_string();
         assert!(html.contains("Test Render"));
         assert!(html.contains("hx-post=\"/ui/templates/invoice/render\""));
-        assert!(html.contains("= Hello")); // source prefilled
+        assert!(html.contains("data.customer.name")); // source prefilled
         assert!(html.contains("/ui/templates/invoice/publish"));
         // Each version links to its tag-specific detail; the current tag is marked.
         assert!(html.contains("href=\"/templates/invoice:v2\""));
@@ -847,12 +1082,56 @@ mod tests {
         assert!(html.contains("aria-current=\"true\""));
         // Test render + publish target the viewed tag.
         assert!(html.contains("name=\"tag\" value=\"v2\""));
+        // Data references are inferred into a prefilled JSON skeleton + field list.
+        assert!(html.contains("<template-detail-page>"));
+        assert!(html.contains("customElements.define('template-detail-page'"));
+        assert!(html.contains("data-json-input"));
+        assert!(html.contains("Available data fields"));
+        assert!(html.contains("customer"));
+        assert!(html.contains("document_number"));
+        assert!(html.contains("data-data-field=\"customer.name\""));
+        assert!(html.contains("data-data-field=\"document_number\""));
+        assert!(html.contains("class=\"data-fields"));
+        assert!(html.contains("class=\"field-check\""));
         // Delete this version, guarded by a native <dialog> via Invoker Commands.
         assert!(html.contains("/ui/templates/invoice/delete"));
         assert!(html.contains("Delete this version"));
         assert!(html.contains("command=\"show-modal\""));
         assert!(html.contains("commandfor=\"confirm-delete\""));
         assert!(html.contains("<dialog id=\"confirm-delete\""));
+
+        let render_target = html.find("id=\"render-result\"").unwrap();
+        let publish_form = html.find("/ui/templates/invoice/publish").unwrap();
+        let recent_renders = html.find("Recent renders").unwrap();
+        assert!(publish_form < render_target);
+        assert!(render_target < recent_renders);
+    }
+
+    #[test]
+    fn test_infer_data_fields_from_typst_source() {
+        let fields = infer_data_fields(
+            r#"
+#let field(key, default) = data.at(key, default: default)
+#data.customer.name
+#data.total
+#data.at("fallback", default: "x")
+#field("document_number", "")
+#field("document_number", "")
+"#,
+        );
+        assert_eq!(
+            fields,
+            vec![
+                "customer.name".to_string(),
+                "total".to_string(),
+                "fallback".to_string(),
+                "document_number".to_string(),
+            ]
+        );
+        let sample = sample_data_json(&fields);
+        assert!(sample.contains("\"customer\""));
+        assert!(sample.contains("\"name\""));
+        assert!(sample.contains("\"document_number\""));
     }
 
     #[test]
@@ -870,6 +1149,8 @@ mod tests {
         let html = render_result_fragment("0192abcd-ef", &en()).into_string();
         assert!(html.contains("<iframe"));
         assert!(html.contains("/api/renders/0192abcd-ef/pdf"));
+        assert!(html.contains("class=\"card stack render-preview\""));
+        assert!(html.contains("class=\"pdf-preview\""));
     }
 
     #[test]
@@ -877,6 +1158,10 @@ mod tests {
         assert!(APP_CSS.starts_with(b"/* Papermake UI"));
         assert!(HTMX_JS.starts_with(b"var htmx"));
         assert!(LOGO_SVG.starts_with(b"<svg"));
+        let css = std::str::from_utf8(APP_CSS).unwrap();
+        assert!(css.contains(".pdf-preview"));
+        assert!(css.contains("aspect-ratio: 16 / 10"));
+        assert!(css.contains(".data-field[data-used] .field-check"));
         let logo = std::str::from_utf8(LOGO_SVG).unwrap();
         assert!(logo.contains("viewBox")); // scales in the favicon + navbar
         assert!(logo.contains("<path"));

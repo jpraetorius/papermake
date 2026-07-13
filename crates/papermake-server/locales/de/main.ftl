@@ -54,6 +54,7 @@ templates-empty-hint = Erstellen Sie eine, um sie hier zu veröffentlichen, zu b
 
 # Form labels
 label-input-data = Eingabedaten (JSON)
+available-data-fields = Verfügbare Datenfelder
 label-author = Autor
 label-tag = Tag
 label-name = Name

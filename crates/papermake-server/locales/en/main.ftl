@@ -54,6 +54,7 @@ templates-empty-hint = Create one to publish, edit, and test-render it here.
 
 # Form labels
 label-input-data = Input data (JSON)
+available-data-fields = Available data fields
 label-author = Author
 label-tag = Tag
 label-name = Name
