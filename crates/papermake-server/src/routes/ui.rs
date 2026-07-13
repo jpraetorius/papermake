@@ -35,6 +35,7 @@ Welcome to Papermake.\n";
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(dashboard))
+        .route("/templates", get(templates_list))
         .route("/templates/new", get(new_template))
         .route("/templates/{reference}", get(template_detail))
         .route("/ui/templates", post(ui_create))
@@ -72,6 +73,7 @@ fn layout(title: &str, body: Markup) -> Markup {
                     }
                     nav {
                         a href="/" { "Dashboard" }
+                        a href="/templates" { "Templates" }
                         a.btn href="/templates/new" { "＋ New template" }
                     }
                 }
@@ -272,31 +274,49 @@ pub fn dashboard_page(
         }
 
         (section("Recent renders", renders_table(&summary.recent, now)))
+    };
+    layout("Dashboard", body)
+}
 
-        (section("Templates", html! {
-            @if templates.is_empty() {
-                div.card.stack.center {
-                    p { strong { "No templates yet." } }
-                    p.muted { "Create one to publish, edit, and test-render it here." }
-                    p { a.btn.primary href="/templates/new" { "Create your first template" } }
-                }
-            } @else {
-                div.grid style="--min: 15rem;" {
-                    @for t in templates {
-                        a.card.stack href=(format!("/templates/{}", t.name))
-                            style="--gap: 0.4rem; text-decoration: none; color: inherit;" {
-                            strong { (t.full_name()) }
-                            span.muted { (t.metadata.name) }
-                            div.cluster {
-                                @for tag in &t.tags { span.badge { (tag) } }
+/// Templates index: all templates in an alphabetical table.
+pub fn templates_page(templates: &[TemplateInfo]) -> Markup {
+    let body = html! {
+        div.split {
+            h1 { "Templates" }
+            a.btn.primary href="/templates/new" { "＋ New template" }
+        }
+
+        @if templates.is_empty() {
+            div.card.stack.center {
+                p { strong { "No templates yet." } }
+                p.muted { "Create one to publish, edit, and test-render it here." }
+                p { a.btn.primary href="/templates/new" { "Create your first template" } }
+            }
+        } @else {
+            div.card.flush.scroll-x {
+                table {
+                    thead {
+                        tr { th { "Template" } th { "Name" } th { "Author" } th { "Tags" } }
+                    }
+                    tbody {
+                        @for t in templates {
+                            tr {
+                                td { a href=(format!("/templates/{}", t.name)) { (t.full_name()) } }
+                                td { (t.metadata.name) }
+                                td.muted { (t.metadata.author) }
+                                td {
+                                    div.cluster style="--gap: 0.3rem;" {
+                                        @for tag in &t.tags { span.badge { (tag) } }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-        }))
+        }
     };
-    layout("Dashboard", body)
+    layout("Templates", body)
 }
 
 /// Template detail: metadata/tags, test-render, editor/publish, recent renders.
@@ -430,6 +450,12 @@ async fn dashboard(State(state): State<AppState>) -> Markup {
 
 async fn new_template() -> Markup {
     new_template_page()
+}
+
+async fn templates_list(State(state): State<AppState>) -> Markup {
+    let mut templates = state.registry.list_templates().await.unwrap_or_default();
+    templates.sort_by_key(|t| t.full_name());
+    templates_page(&templates)
 }
 
 async fn template_detail(State(state): State<AppState>, Path(reference): Path<String>) -> Response {
@@ -639,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dashboard_page_contains_metrics_and_templates() {
+    fn test_dashboard_page_shows_metrics_not_template_list() {
         let now = datetime!(2026-07-09 12:00 UTC);
         let summary = sample_summary(now);
         let templates = vec![sample_template()];
@@ -648,8 +674,10 @@ mod tests {
         assert!(html.contains("Renders · 24h"));
         assert!(html.contains("Success rate · 24h"));
         assert!(html.contains("p90 latency · 24h"));
-        assert!(html.contains("Invoice Template"));
-        assert!(html.contains("/templates/invoice"));
+        // The template list now lives on its own page, not the dashboard.
+        assert!(!html.contains("Invoice Template"));
+        // Navbar links to the dedicated templates page.
+        assert!(html.contains("href=\"/templates\""));
         // Own classes + assets are wired.
         assert!(html.contains("class=\"card"));
         assert!(html.contains("/assets/app.css"));
@@ -662,10 +690,19 @@ mod tests {
     }
 
     #[test]
-    fn test_dashboard_empty_state_prompts_creation() {
-        let now = datetime!(2026-07-09 12:00 UTC);
-        let summary = Summary::empty(now);
-        let html = dashboard_page(&summary, &[], now).into_string();
+    fn test_templates_page_lists_templates() {
+        let templates = vec![sample_template()];
+        let html = templates_page(&templates).into_string();
+        assert!(html.contains("Templates"));
+        assert!(html.contains("<table"));
+        assert!(html.contains("Invoice Template"));
+        assert!(html.contains("/templates/invoice"));
+        assert!(html.contains("a@b.com"));
+    }
+
+    #[test]
+    fn test_templates_page_empty_state_prompts_creation() {
+        let html = templates_page(&[]).into_string();
         assert!(html.contains("No templates yet."));
         assert!(html.contains("/templates/new"));
     }
