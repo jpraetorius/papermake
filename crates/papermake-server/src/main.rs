@@ -3,13 +3,19 @@
 //! Provides REST API endpoints for template management, PDF rendering,
 //! and analytics for the Papermake PDF generation system.
 
-use axum::{Router, extract::DefaultBodyLimit, response::Json, routing::get};
+use axum::{
+    Router,
+    extract::DefaultBodyLimit,
+    http::{Request, Response, header},
+    response::Json,
+    routing::get,
+};
 use papermake_registry::{Registry, S3BufferedRenderStorage, S3Storage};
 use serde_json::{Value, json};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tower::ServiceBuilder;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::{error, info};
+use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
+use tracing::{Span, error, info, info_span};
 
 mod config;
 mod error;
@@ -40,10 +46,9 @@ async fn main() -> Result<()> {
 
     // Initialize tracing
     tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "papermake_server=debug,tower_http=debug".to_string()),
-        )
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| {
+            "papermake_server=info,papermake_registry=info,tower_http=info".to_string()
+        }))
         .init();
 
     // Load configuration
@@ -75,7 +80,12 @@ async fn main() -> Result<()> {
 
     // Create registry
     let registry = Arc::new(
-        Registry::new(s3_storage, render_storage).with_retention_days(config.render_retention_days),
+        Registry::new(s3_storage, render_storage)
+            .with_retention_days(config.render_retention_days)
+            .with_render_limits(
+                config.max_concurrent_renders,
+                Duration::from_secs(config.render_timeout_seconds),
+            ),
     );
 
     // Reap orphaned batch jobs: any job still "running" was created by a
@@ -154,7 +164,64 @@ fn create_router(state: AppState) -> Router {
         // Middleware
         .layer(
             ServiceBuilder::new()
-                .layer(TraceLayer::new_for_http())
+                .layer(
+                    TraceLayer::new_for_http()
+                        .make_span_with(|request: &Request<_>| {
+                            let request_id = uuid::Uuid::new_v4();
+                            let user_agent = request
+                                .headers()
+                                .get(header::USER_AGENT)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or("-");
+                            let content_length = request
+                                .headers()
+                                .get(header::CONTENT_LENGTH)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or("-");
+
+                            info_span!(
+                                "http_request",
+                                request_id = %request_id,
+                                method = %request.method(),
+                                uri = %request.uri(),
+                                version = ?request.version(),
+                                user_agent = %user_agent,
+                                content_length = %content_length,
+                                status = tracing::field::Empty,
+                                latency_ms = tracing::field::Empty,
+                            )
+                        })
+                        .on_request(|request: &Request<_>, span: &Span| {
+                            let _entered = span.enter();
+                            info!(
+                                method = %request.method(),
+                                uri = %request.uri(),
+                                "request started",
+                            );
+                        })
+                        .on_response(|response: &Response<_>, latency: Duration, span: &Span| {
+                            let latency_ms = latency.as_millis() as u64;
+                            span.record("status", response.status().as_u16());
+                            span.record("latency_ms", latency_ms);
+                            let _entered = span.enter();
+                            info!(
+                                status = response.status().as_u16(),
+                                latency_ms, "request completed",
+                            );
+                        })
+                        .on_failure(
+                            |failure: ServerErrorsFailureClass, latency: Duration, span: &Span| {
+                                let latency_ms = latency.as_millis() as u64;
+                                span.record("latency_ms", latency_ms);
+                                let _entered = span.enter();
+                                error!(
+                                    failure = %failure,
+                                    latency_ms,
+                                    "request failed",
+                                );
+                            },
+                        ),
+                )
                 .layer(CorsLayer::permissive())
                 .layer(DefaultBodyLimit::max(50 * 1024 * 1024)), // 50MB for large PDFs
         )

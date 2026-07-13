@@ -9,6 +9,7 @@ use papermake_registry::RegistryError;
 use papermake_registry::render_storage::types::RenderStorageError;
 use serde_json::json;
 use thiserror::Error;
+use tracing::{error, warn};
 
 /// Result type for API operations
 pub type Result<T> = std::result::Result<T, ApiError>;
@@ -55,7 +56,8 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, error_message) = match self {
+        let debug_error = format!("{:?}", self);
+        let (status, error_message) = match &self {
             ApiError::TemplateNotFound(_) | ApiError::RenderNotFound(_) => {
                 (StatusCode::NOT_FOUND, self.to_string())
             }
@@ -66,7 +68,10 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Configuration error".to_string(),
             ),
-            ApiError::Registry(ref e) => match e {
+            ApiError::Registry(e) => match e {
+                RegistryError::RenderTimeout { .. } => {
+                    (StatusCode::REQUEST_TIMEOUT, self.to_string())
+                }
                 RegistryError::Template(_) => (StatusCode::NOT_FOUND, self.to_string()),
                 RegistryError::RenderStorage(RenderStorageError::NotFound(_)) => {
                     (StatusCode::NOT_FOUND, self.to_string())
@@ -89,6 +94,22 @@ impl IntoResponse for ApiError {
                 "Internal server error".to_string(),
             ),
         };
+
+        if status.is_server_error() {
+            error!(
+                status = status.as_u16(),
+                error = %self,
+                debug_error = %debug_error,
+                "api error response",
+            );
+        } else if status.is_client_error() {
+            warn!(
+                status = status.as_u16(),
+                error = %self,
+                debug_error = %debug_error,
+                "api error response",
+            );
+        }
 
         let body = Json(json!({
             "error": error_message,

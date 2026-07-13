@@ -1,7 +1,9 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 use time;
+use tokio::sync::Semaphore;
 
 use crate::{
     address::ContentAddress,
@@ -13,7 +15,7 @@ use crate::{
     render_storage::{
         AnalyticsQuery, AnalyticsResult, RenderRecord, RenderStorage, RenderStorageError,
     },
-    storage::{BlobStorage, filesystem::RegistryFileSystem},
+    storage::BlobStorage,
 };
 
 /// Prepared, reusable context for a batch: everything resolved once so each
@@ -33,12 +35,22 @@ struct BatchCtx {
 /// (the server sets it from `RENDER_RETENTION_DAYS`).
 pub const DEFAULT_RENDER_RETENTION_DAYS: u32 = 30;
 
+/// Default maximum number of concurrent Typst render tasks.
+pub const DEFAULT_MAX_CONCURRENT_RENDERS: usize = 10;
+
+/// Default wall-clock timeout for a render, including queue wait.
+pub const DEFAULT_RENDER_TIMEOUT_SECONDS: u64 = 300;
+
 /// Core registry for template publishing and resolution
 pub struct Registry<S: BlobStorage, R: RenderStorage> {
     storage: Arc<S>,
     render_storage: Option<Arc<R>>,
     /// Global default output retention (days); `0` = keep forever.
     default_retention_days: u32,
+    /// Limits CPU-bound Typst work running on the blocking thread pool.
+    render_semaphore: Arc<Semaphore>,
+    /// Wall-clock timeout for acquiring a render slot and waiting for Typst.
+    render_timeout: Duration,
 }
 
 /// Result of a render operation with tracking
@@ -74,6 +86,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage> Registry<S, R> {
             storage: Arc::new(storage),
             render_storage: Some(Arc::new(render_storage)),
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
+            render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
+            render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
         }
     }
 }
@@ -86,6 +100,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             storage: Arc::new(storage),
             render_storage: Some(Arc::new(render_storage)),
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
+            render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
+            render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
         }
     }
 
@@ -95,12 +111,30 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             storage: Arc::new(storage),
             render_storage: None,
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
+            render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
+            render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
         }
     }
 
     /// Set the global default output retention (days); `0` = keep forever.
     pub fn with_retention_days(mut self, days: u32) -> Self {
         self.default_retention_days = days;
+        self
+    }
+
+    /// Set render concurrency and timeout limits. The timeout covers waiting
+    /// for a render slot plus waiting for the blocking Typst task to finish.
+    pub fn with_render_limits(
+        mut self,
+        max_concurrent_renders: usize,
+        render_timeout: Duration,
+    ) -> Self {
+        self.render_semaphore = Arc::new(Semaphore::new(max_concurrent_renders.max(1)));
+        self.render_timeout = if render_timeout.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            render_timeout
+        };
         self
     }
 
@@ -120,6 +154,8 @@ impl<S: BlobStorage + 'static> Registry<S, crate::render_storage::MemoryRenderSt
             storage: Arc::new(storage),
             render_storage: None,
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
+            render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
+            render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
         }
     }
 }
@@ -380,7 +416,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     /// This method implements the end-to-end template rendering workflow:
     /// 1. Resolves the template reference to get the manifest hash
     /// 2. Loads the manifest from storage to get file mappings
-    /// 3. Creates a RegistryFileSystem that resolves files through blob storage
+    /// 3. Hydrates template files/assets into an in-memory file system
     /// 4. Uses papermake to render the template with the provided data
     ///
     /// # Arguments
@@ -417,11 +453,28 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         reference: &str,
         data: &serde_json::Value,
     ) -> Result<Vec<u8>, RegistryError> {
+        let started = std::time::Instant::now();
+        tracing::info!(
+            reference = %reference,
+            "registry render started",
+        );
+
         // Step 1: Resolve the template reference to get manifest hash
         let manifest_hash = self.resolve(reference).await?;
+        tracing::debug!(
+            reference = %reference,
+            manifest_hash = %manifest_hash,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "registry render resolved reference",
+        );
 
         // Step 2: Load the manifest from storage
         let manifest_key = ContentAddress::manifest_key(&manifest_hash);
+        tracing::debug!(
+            reference = %reference,
+            manifest_key = %manifest_key,
+            "registry render loading manifest",
+        );
         let manifest_bytes = self.storage.get(&manifest_key).await.map_err(|e| {
             RegistryError::Storage(StorageError::backend(format!(
                 "Failed to load manifest {}: {}",
@@ -434,6 +487,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 e.to_string(),
             ))
         })?;
+        tracing::debug!(
+            reference = %reference,
+            files = manifest.files.len(),
+            entrypoint = %manifest.entrypoint,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "registry render loaded manifest",
+        );
 
         // Step 3: Get the entrypoint content
         let entrypoint_hash = manifest.entrypoint_hash().ok_or_else(|| {
@@ -443,6 +503,11 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         })?;
 
         let entrypoint_key = ContentAddress::blob_key(entrypoint_hash);
+        tracing::debug!(
+            reference = %reference,
+            entrypoint_key = %entrypoint_key,
+            "registry render loading entrypoint",
+        );
         let entrypoint_bytes = self.storage.get(&entrypoint_key).await.map_err(|e| {
             RegistryError::Storage(StorageError::backend(format!(
                 "Failed to load entrypoint file: {}",
@@ -456,26 +521,60 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 e
             )))
         })?;
+        tracing::debug!(
+            reference = %reference,
+            entrypoint_bytes = entrypoint_content.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "registry render loaded entrypoint",
+        );
 
-        // Step 4: Create RegistryFileSystem for resolving imports
-        let file_system = RegistryFileSystem::new(self.storage.clone(), manifest)?;
+        // Step 4: Hydrate template files/assets before entering Typst. Typst's
+        // file callbacks are synchronous, so doing async blob reads from inside
+        // them can block the Tokio runtime under load.
+        let file_system = self.hydrate_file_system(reference, &manifest).await?;
 
         // Step 5: Render the template using papermake
-        let render_result =
-            papermake::render_template(entrypoint_content, Arc::new(file_system), data)
-                .map_err(RegistryError::Compilation)?;
+        tracing::info!(
+            reference = %reference,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "registry render invoking typst",
+        );
+        let render_result = self
+            .render_typst_blocking(reference, entrypoint_content, file_system, data.clone())
+            .await?;
+        tracing::info!(
+            reference = %reference,
+            success = render_result.success,
+            errors = render_result.errors.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "registry render typst returned",
+        );
 
         // Check if rendering was successful
         if render_result.success {
-            render_result.pdf.ok_or_else(|| {
+            let pdf = render_result.pdf.ok_or_else(|| {
                 RegistryError::Template(crate::error::TemplateError::invalid(
                     "Rendering succeeded but no PDF was generated",
                 ))
-            })
+            })?;
+            tracing::info!(
+                reference = %reference,
+                pdf_size_bytes = pdf.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "registry render completed",
+            );
+            Ok(pdf)
         } else {
             // Collect error messages
             let error_messages: Vec<String> =
                 render_result.errors.iter().map(|e| e.to_string()).collect();
+
+            tracing::error!(
+                reference = %reference,
+                errors = %error_messages.join("; "),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "registry render failed",
+            );
 
             Err(RegistryError::Template(
                 crate::error::TemplateError::invalid(format!(
@@ -484,6 +583,296 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 )),
             ))
         }
+    }
+
+    /// Load every versioned template file into memory before entering Typst.
+    ///
+    /// Typst's `World::file` callback is synchronous. Keeping all blob I/O on
+    /// the async side prevents a render from blocking a Tokio worker while it
+    /// tries to re-enter the same runtime for S3 reads.
+    async fn hydrate_file_system(
+        &self,
+        reference: &str,
+        manifest: &Manifest,
+    ) -> Result<Arc<dyn papermake::RenderFileSystem>, RegistryError> {
+        const TEMPLATE_FILE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let started = std::time::Instant::now();
+        let mut file_system = papermake::InMemoryFileSystem::new();
+        let mut total_bytes = 0usize;
+
+        tracing::debug!(
+            reference = %reference,
+            files = manifest.files.len(),
+            "registry render hydrating template file system",
+        );
+
+        for (path, file_hash) in &manifest.files {
+            let file_started = std::time::Instant::now();
+            let blob_key = ContentAddress::blob_key(file_hash);
+
+            tracing::debug!(
+                reference = %reference,
+                path = %path,
+                blob_key = %blob_key,
+                "registry render loading template file",
+            );
+
+            let bytes =
+                tokio::time::timeout(TEMPLATE_FILE_FETCH_TIMEOUT, self.storage.get(&blob_key))
+                    .await
+                    .map_err(|_| {
+                        RegistryError::Storage(StorageError::backend(format!(
+                            "Timed out after {:?} loading template file '{}' from {}",
+                            TEMPLATE_FILE_FETCH_TIMEOUT, path, blob_key
+                        )))
+                    })?
+                    .map_err(|e| {
+                        RegistryError::Storage(StorageError::backend(format!(
+                            "Failed to load template file '{}' from {}: {}",
+                            path, blob_key, e
+                        )))
+                    })?;
+
+            let file_bytes = bytes.len();
+            total_bytes += file_bytes;
+
+            // Typst asks for rooted virtual paths (e.g. `/assets/logo.svg`),
+            // while manifests store bundle paths without a leading slash.
+            file_system.add_file(path, bytes.clone());
+            if let Some(unrooted_path) = path.strip_prefix('/') {
+                file_system.add_file(unrooted_path, bytes);
+            } else {
+                file_system.add_file(format!("/{path}"), bytes);
+            }
+
+            tracing::debug!(
+                reference = %reference,
+                path = %path,
+                bytes = file_bytes,
+                elapsed_ms = file_started.elapsed().as_millis() as u64,
+                "registry render loaded template file",
+            );
+        }
+
+        tracing::debug!(
+            reference = %reference,
+            files = manifest.files.len(),
+            total_bytes,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "registry render hydrated template file system",
+        );
+
+        Ok(Arc::new(file_system))
+    }
+
+    /// Run the CPU-bound Typst compile/PDF generation on Tokio's blocking pool.
+    ///
+    /// S3/template hydration is already complete before this is called, so the
+    /// blocking task only performs synchronous Typst work over in-memory data.
+    async fn render_typst_blocking(
+        &self,
+        reference: &str,
+        entrypoint_content: String,
+        file_system: Arc<dyn papermake::RenderFileSystem>,
+        data: serde_json::Value,
+    ) -> Result<papermake::RenderResult, RegistryError> {
+        let started = std::time::Instant::now();
+        let timeout = self.render_timeout;
+        let timeout_seconds = timeout.as_secs().max(1);
+
+        tracing::debug!(
+            reference = %reference,
+            timeout_seconds,
+            "typst render waiting for blocking permit",
+        );
+
+        let permit = tokio::time::timeout(timeout, self.render_semaphore.clone().acquire_owned())
+            .await
+            .map_err(|_| RegistryError::RenderTimeout {
+                seconds: timeout_seconds,
+            })?
+            .map_err(|_| {
+                RegistryError::Template(crate::error::TemplateError::invalid(
+                    "Render semaphore was closed",
+                ))
+            })?;
+
+        let waited_ms = started.elapsed().as_millis() as u64;
+        let remaining_timeout = timeout
+            .checked_sub(started.elapsed())
+            .unwrap_or_else(|| Duration::from_millis(1));
+        let reference_for_task = reference.to_string();
+
+        tracing::debug!(
+            reference = %reference,
+            waited_ms,
+            remaining_timeout_ms = remaining_timeout.as_millis() as u64,
+            "typst render acquired blocking permit",
+        );
+
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let task_started = std::time::Instant::now();
+            tracing::info!(
+                reference = %reference_for_task,
+                "typst blocking render started",
+            );
+
+            let result = papermake::render_template(entrypoint_content, file_system, &data);
+
+            match &result {
+                Ok(render_result) => {
+                    tracing::info!(
+                        reference = %reference_for_task,
+                        success = render_result.success,
+                        errors = render_result.errors.len(),
+                        elapsed_ms = task_started.elapsed().as_millis() as u64,
+                        "typst blocking render finished",
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        reference = %reference_for_task,
+                        error = %error,
+                        elapsed_ms = task_started.elapsed().as_millis() as u64,
+                        "typst blocking render failed",
+                    );
+                }
+            }
+
+            result
+        });
+
+        tokio::time::timeout(remaining_timeout, task)
+            .await
+            .map_err(|_| {
+                tracing::error!(
+                    reference = %reference,
+                    timeout_seconds,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "typst blocking render timed out",
+                );
+                RegistryError::RenderTimeout {
+                    seconds: timeout_seconds,
+                }
+            })?
+            .map_err(|e| {
+                RegistryError::Template(crate::error::TemplateError::invalid(format!(
+                    "Render task failed: {}",
+                    e
+                )))
+            })?
+            .map_err(RegistryError::Compilation)
+    }
+
+    /// Run cached batch rendering on the blocking pool, returning the warmed
+    /// world so the next batch item can continue reusing it.
+    async fn render_typst_cached_blocking(
+        &self,
+        ctx: &BatchCtx,
+        mut world: papermake::PapermakeWorld,
+        data: serde_json::Value,
+    ) -> Result<
+        (
+            papermake::PapermakeWorld,
+            Result<papermake::RenderResult, papermake::PapermakeError>,
+        ),
+        RegistryError,
+    > {
+        let started = std::time::Instant::now();
+        let timeout = self.render_timeout;
+        let timeout_seconds = timeout.as_secs().max(1);
+
+        tracing::debug!(
+            reference = %ctx.reference,
+            timeout_seconds,
+            "cached typst render waiting for blocking permit",
+        );
+
+        let permit = tokio::time::timeout(timeout, self.render_semaphore.clone().acquire_owned())
+            .await
+            .map_err(|_| RegistryError::RenderTimeout {
+                seconds: timeout_seconds,
+            })?
+            .map_err(|_| {
+                RegistryError::Template(crate::error::TemplateError::invalid(
+                    "Render semaphore was closed",
+                ))
+            })?;
+
+        let waited_ms = started.elapsed().as_millis() as u64;
+        let remaining_timeout = timeout
+            .checked_sub(started.elapsed())
+            .unwrap_or_else(|| Duration::from_millis(1));
+        let reference = ctx.reference.clone();
+        let entrypoint_content = ctx.entrypoint_content.clone();
+        let file_system = ctx.file_system.clone();
+
+        tracing::debug!(
+            reference = %reference,
+            waited_ms,
+            remaining_timeout_ms = remaining_timeout.as_millis() as u64,
+            "cached typst render acquired blocking permit",
+        );
+
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let task_started = std::time::Instant::now();
+            tracing::info!(
+                reference = %reference,
+                "cached typst blocking render started",
+            );
+
+            let result = papermake::render_template_with_cache(
+                entrypoint_content,
+                file_system,
+                data,
+                Some(&mut world),
+            );
+
+            match &result {
+                Ok(render_result) => {
+                    tracing::info!(
+                        reference = %reference,
+                        success = render_result.success,
+                        errors = render_result.errors.len(),
+                        elapsed_ms = task_started.elapsed().as_millis() as u64,
+                        "cached typst blocking render finished",
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        reference = %reference,
+                        error = %error,
+                        elapsed_ms = task_started.elapsed().as_millis() as u64,
+                        "cached typst blocking render failed",
+                    );
+                }
+            }
+
+            (world, result)
+        });
+
+        tokio::time::timeout(remaining_timeout, task)
+            .await
+            .map_err(|_| {
+                tracing::error!(
+                    reference = %ctx.reference,
+                    timeout_seconds,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "cached typst blocking render timed out",
+                );
+                RegistryError::RenderTimeout {
+                    seconds: timeout_seconds,
+                }
+            })?
+            .map_err(|e| {
+                RegistryError::Template(crate::error::TemplateError::invalid(format!(
+                    "Render task failed: {}",
+                    e
+                )))
+            })
     }
 
     /// Render one template against many inputs, reusing a single warm Typst
@@ -734,8 +1123,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             )))
         })?;
 
-        let file_system: Arc<dyn papermake::RenderFileSystem> =
-            Arc::new(RegistryFileSystem::new(self.storage.clone(), manifest)?);
+        let file_system = self.hydrate_file_system(reference, &manifest).await?;
         let world = papermake::PapermakeWorld::with_file_system(
             entrypoint_content.clone(),
             "{}".to_string(),
@@ -778,14 +1166,32 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
-        let start = std::time::Instant::now();
-        let outcome = papermake::render_template_with_cache(
+        let start_time = std::time::Instant::now();
+        let placeholder_world = papermake::PapermakeWorld::with_file_system(
             ctx.entrypoint_content.clone(),
+            "{}".to_string(),
             ctx.file_system.clone(),
-            data.clone(),
-            Some(world),
         );
-        let duration_ms = start.elapsed().as_millis() as u32;
+        let owned_world = std::mem::replace(world, placeholder_world);
+        let outcome: Result<papermake::RenderResult, String> = match self
+            .render_typst_cached_blocking(ctx, owned_world, data.clone())
+            .await
+        {
+            Ok((updated_world, outcome)) => {
+                *world = updated_world;
+                outcome.map_err(|e| e.to_string())
+            }
+            Err(e) => {
+                tracing::error!(
+                    reference = %ctx.reference,
+                    render_id = %render_id,
+                    error = %e,
+                    "cached typst render task failed",
+                );
+                Err(e.to_string())
+            }
+        };
+        let duration_ms = start_time.elapsed().as_millis() as u32;
 
         let timestamp = time::OffsetDateTime::now_utc();
         let expiry_date =
@@ -832,7 +1238,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                             msg
                         }
                     }
-                    Err(e) => e.to_string(),
+                    Err(e) => e,
                 };
                 let record = RenderRecord {
                     render_id: render_id.clone(),
@@ -1102,6 +1508,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         data: &serde_json::Value,
         retain_override: Option<u32>,
     ) -> Result<RenderResult, RegistryError> {
+        let overall_started = std::time::Instant::now();
         // Step 1: Parse template reference to extract name/tag
         let parsed_ref = Reference::parse(reference)?;
         let template_name = parsed_ref.name.clone();
@@ -1112,22 +1519,45 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         // so by-id lookups are a direct blob read (no record consulted, immediate
         // even before the analytics record is flushed).
         let render_id = uuid::Uuid::now_v7().to_string();
+        tracing::info!(
+            reference = %reference,
+            render_id = %render_id,
+            retain_override = ?retain_override,
+            "registry render_and_store started",
+        );
 
         // Step 3: Store the input data at `renders/{id}/data` (kept for both
         // success and failure so a failed input is inspectable). data_hash is
         // retained on the record as integrity metadata only.
         let data_bytes = serde_json::to_vec(data)?;
         let data_hash = ContentAddress::hash(&data_bytes);
+        tracing::debug!(
+            reference = %reference,
+            render_id = %render_id,
+            data_size_bytes = data_bytes.len(),
+            "registry render_and_store writing input data",
+        );
         self.storage
             .put(&ContentAddress::render_data_key(&render_id), data_bytes)
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        tracing::debug!(
+            reference = %reference,
+            render_id = %render_id,
+            elapsed_ms = overall_started.elapsed().as_millis() as u64,
+            "registry render_and_store wrote input data",
+        );
 
         // Step 4: Measure total operation time including resolution.
         let start_time = std::time::Instant::now();
 
         // Step 5: Try to resolve and render - catch all failures so that even a
         // failed resolution is recorded as a failure render below.
+        tracing::debug!(
+            reference = %reference,
+            render_id = %render_id,
+            "registry render_and_store resolving and rendering",
+        );
         let result: Result<(String, Vec<u8>), RegistryError> = async {
             let manifest_hash = self.resolve(reference).await?;
             let pdf_bytes = self.render(reference, data).await?;
@@ -1136,6 +1566,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         .await;
 
         let duration_ms = start_time.elapsed().as_millis() as u32;
+        tracing::debug!(
+            reference = %reference,
+            render_id = %render_id,
+            render_duration_ms = duration_ms,
+            "registry render_and_store render stage returned",
+        );
 
         // Step 6: Build the render record, persist artifacts + meta.json, stage
         // the analytics record.
@@ -1151,6 +1587,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     )
                     .await
                     .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+                tracing::debug!(
+                    reference = %reference,
+                    render_id = %render_id,
+                    pdf_size_bytes = pdf_bytes.len(),
+                    elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                    "registry render_and_store wrote pdf",
+                );
 
                 // Resolve effective retention: per-render → per-template → global.
                 let timestamp = time::OffsetDateTime::now_utc();
@@ -1182,11 +1625,32 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 // Persist the record as `renders/{id}/meta.json` so by-id lookups
                 // (get_render/get_render_pdf) resolve directly and immediately.
                 self.put_render_meta(&record).await?;
+                tracing::debug!(
+                    reference = %reference,
+                    render_id = %render_id,
+                    elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                    "registry render_and_store wrote render meta",
+                );
 
                 // Stage the analytics record (write-only buffer; not a read source).
                 if let Some(render_storage) = &self.render_storage {
                     render_storage.store_render(record).await?;
+                    tracing::debug!(
+                        reference = %reference,
+                        render_id = %render_id,
+                        elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                        "registry render_and_store staged analytics record",
+                    );
                 }
+
+                tracing::info!(
+                    reference = %reference,
+                    render_id = %render_id,
+                    pdf_hash = %pdf_hash,
+                    render_duration_ms = duration_ms,
+                    total_elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                    "registry render_and_store completed",
+                );
 
                 Ok(RenderResult {
                     render_id,
@@ -1196,6 +1660,14 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 })
             }
             Err(render_error) => {
+                tracing::error!(
+                    reference = %reference,
+                    render_id = %render_id,
+                    render_duration_ms = duration_ms,
+                    total_elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                    error = %render_error,
+                    "registry render_and_store failed",
+                );
                 // No manifest on failure → no per-template default available.
                 let timestamp = time::OffsetDateTime::now_utc();
                 let retain_days = crate::render_storage::retention::effective_retain_days(
@@ -1225,9 +1697,19 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 // Persist the failure meta.json (no PDF) so get_render_pdf can
                 // distinguish "render failed" (4xx) from "unknown id" (404).
                 self.put_render_meta(&record).await?;
+                tracing::debug!(
+                    reference = %reference,
+                    elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                    "registry render_and_store wrote failure meta",
+                );
 
                 if let Some(render_storage) = &self.render_storage {
                     render_storage.store_render(record).await?;
+                    tracing::debug!(
+                        reference = %reference,
+                        elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                        "registry render_and_store staged failure analytics record",
+                    );
                 }
 
                 Err(render_error)
@@ -1924,6 +2406,43 @@ Content: #data.content"#
 
         let pdf_bytes = registry
             .render("john/complex-template:latest", &data)
+            .await
+            .unwrap();
+
+        assert!(!pdf_bytes.is_empty());
+        assert!(pdf_bytes.starts_with(b"%PDF"));
+    }
+
+    #[tokio::test]
+    async fn test_registry_render_template_with_asset_image() {
+        let storage = MemoryStorage::new();
+        let registry = Registry::new_storage_only(storage);
+
+        let metadata = TemplateMetadata::new("Template with Asset", "test@example.com");
+        let main_content = br#"#set page(width: 80mm, height: 50mm)
+#image("assets/logo.svg", width: 24mm)
+
+= #data.title"#
+            .to_vec();
+        let logo = br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="48" viewBox="0 0 120 48">
+  <rect width="120" height="48" fill="#d4001a"/>
+  <circle cx="96" cy="24" r="12" fill="#ffffff"/>
+</svg>"##
+            .to_vec();
+
+        let bundle = TemplateBundle::new(main_content, metadata).add_file("assets/logo.svg", logo);
+
+        registry
+            .publish(bundle, "john/asset-template", "latest")
+            .await
+            .unwrap();
+
+        let data = serde_json::json!({
+            "title": "Asset render"
+        });
+
+        let pdf_bytes = registry
+            .render("john/asset-template:latest", &data)
             .await
             .unwrap();
 

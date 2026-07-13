@@ -35,6 +35,10 @@ pub enum RegistryError {
     #[error("Render storage error: {0}")]
     RenderStorage(#[from] crate::render_storage::RenderStorageError),
 
+    /// Render timed out before Typst finished.
+    #[error("Render timed out after {seconds}s")]
+    RenderTimeout { seconds: u64 },
+
     /// Authorization and permission errors
     #[error("Access denied: {0}")]
     AccessDenied(String),

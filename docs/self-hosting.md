@@ -68,10 +68,13 @@ All configuration is via environment variables (see
 |---|---|---|
 | `HOST` | `0.0.0.0` | Bind address |
 | `PORT` | `3000` | Bind port |
+| `MAX_CONCURRENT_RENDERS` | `10` | Maximum CPU-bound Typst renders running at once per server |
+| `RENDER_TIMEOUT_SECONDS` | `300` | Render timeout, including queue wait for a render slot |
 | `PAPERMAKE_INSTANCE_ID` | random uuid | Stable id used in flushed S3 keys |
 | `FLUSH_INTERVAL_SECONDS` | `30` | Analytics flush interval |
 | `FLUSH_MAX_RECORDS` | `1000` | Buffer size that triggers an eager flush |
 | `RENDER_RETENTION_DAYS` | `30` | Global output retention default (`0` = forever) |
+| `FONTS_DIR` | — | Optional directory of TTF/OTF files scanned at server startup |
 | `RUST_LOG` | — | Log filter, e.g. `papermake_server=debug` |
 
 ### Worker

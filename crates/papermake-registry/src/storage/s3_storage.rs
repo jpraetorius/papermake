@@ -181,7 +181,14 @@ impl BlobStorage for S3Storage {
     }
 
     async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+        let started = std::time::Instant::now();
         self.validate_key(key)?;
+
+        tracing::debug!(
+            bucket = %self.bucket,
+            key = %key,
+            "s3 get request sending",
+        );
 
         let response = self
             .client
@@ -200,6 +207,12 @@ impl BlobStorage for S3Storage {
                     StorageError::Backend(format!("Failed to get file '{}': {}", key, e))
                 }
             })?;
+        tracing::debug!(
+            bucket = %self.bucket,
+            key = %key,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "s3 get response received",
+        );
 
         let content = response
             .content()
@@ -211,6 +224,13 @@ impl BlobStorage for S3Storage {
             .map_err(|e| {
                 StorageError::Backend(format!("Failed to read file '{}' content: {}", key, e))
             })?;
+        tracing::debug!(
+            bucket = %self.bucket,
+            key = %key,
+            bytes = content.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "s3 get content read",
+        );
 
         Ok(content.to_bytes().to_vec())
     }
