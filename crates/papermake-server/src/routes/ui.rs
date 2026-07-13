@@ -52,8 +52,18 @@ pub fn router() -> Router<AppState> {
 // Layout + small helpers (pure)
 // ---------------------------------------------------------------------------
 
-/// Shared page shell: stylesheet, htmx, and a navbar.
-fn layout(title: &str, body: Markup) -> Markup {
+/// Which top-level nav item is the current location.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Nav {
+    Dashboard,
+    Templates,
+    New,
+}
+
+/// Shared page shell: stylesheet, htmx, and a navbar with the current path
+/// highlighted (bold, accent-colored, with a caret pointing at the content).
+fn layout(title: &str, active: Nav, body: Markup) -> Markup {
+    let current = |n: Nav| (active == n).then_some("page");
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -72,9 +82,9 @@ fn layout(title: &str, body: Markup) -> Markup {
                         span { "Papermake" }
                     }
                     nav {
-                        a href="/" { "Dashboard" }
-                        a href="/templates" { "Templates" }
-                        a.btn href="/templates/new" { "＋ New template" }
+                        a href="/" aria-current=[current(Nav::Dashboard)] { "Dashboard" }
+                        a href="/templates" aria-current=[current(Nav::Templates)] { "Templates" }
+                        a.btn href="/templates/new" aria-current=[current(Nav::New)] { "＋ New template" }
                     }
                 }
                 main.container.stack { (body) }
@@ -275,7 +285,7 @@ pub fn dashboard_page(
 
         (section("Recent renders", renders_table(&summary.recent, now)))
     };
-    layout("Dashboard", body)
+    layout("Dashboard", Nav::Dashboard, body)
 }
 
 /// Templates index: all templates in an alphabetical table.
@@ -306,7 +316,9 @@ pub fn templates_page(templates: &[TemplateInfo]) -> Markup {
                                 td.muted { (t.metadata.author) }
                                 td {
                                     div.cluster style="--gap: 0.3rem;" {
-                                        @for tag in &t.tags { span.badge { (tag) } }
+                                        @for tag in &t.tags {
+                                            a.badge href=(format!("/templates/{}:{}", t.name, tag)) { (tag) }
+                                        }
                                     }
                                 }
                             }
@@ -316,12 +328,14 @@ pub fn templates_page(templates: &[TemplateInfo]) -> Markup {
             }
         }
     };
-    layout("Templates", body)
+    layout("Templates", Nav::Templates, body)
 }
 
 /// Template detail: metadata/tags, test-render, editor/publish, recent renders.
+/// `tag` is the version currently being viewed (its source is shown / rendered).
 pub fn template_detail_page(
     name: &str,
+    tag: &str,
     metadata: &TemplateMetadata,
     tags: &[String],
     source: &str,
@@ -331,20 +345,31 @@ pub fn template_detail_page(
     let body = html! {
         div.split {
             div.stack style="--gap: 0.25rem;" {
-                h1 { (name) }
+                div.cluster style="--gap: 0.5rem;" {
+                    h1 { (name) }
+                    span.badge { (tag) }
+                }
                 span.muted { "by " (metadata.author) }
             }
-            div.cluster {
-                @for tag in tags { span.badge { (tag) } }
+            // Every tagged version — click to view/edit that specific one.
+            div.stack style="--gap: 0.3rem;" {
+                span.eyebrow { "Versions" }
+                div.cluster {
+                    @for t in tags {
+                        a.badge href=(format!("/templates/{}:{}", name, t))
+                            aria-current=[(t == tag).then_some("true")] { (t) }
+                    }
+                }
             }
         }
 
         div.grid style="--min: 24rem;" {
             // Test render (htmx: swaps the PDF iframe in without a reload).
             div.card.stack {
-                h2.eyebrow { "Test render" }
+                h2.eyebrow { "Test render · " (tag) }
                 form.stack hx-post=(format!("/ui/templates/{}/render", name))
                      hx-target="#render-result" hx-swap="innerHTML" {
+                    input type="hidden" name="tag" value=(tag);
                     label for="data" { "Input data (JSON)" }
                     textarea id="data" name="data" rows="6" { "{}" }
                     div { button.primary type="submit" { "Test Render" } }
@@ -354,7 +379,7 @@ pub fn template_detail_page(
 
             // Source + publish.
             div.card.stack {
-                h2.eyebrow { "Source" }
+                h2.eyebrow { "Source · " (tag) }
                 form.stack method="post" action=(format!("/ui/templates/{}/publish", name)) {
                     label for="main_typ" { "main.typ" }
                     textarea id="main_typ" name="main_typ" rows="14" class="mono" { (source) }
@@ -365,7 +390,7 @@ pub fn template_detail_page(
                         }
                         div.stack style="--gap: 0.25rem;" {
                             label for="tag" { "Tag" }
-                            input id="tag" name="tag" value="latest";
+                            input id="tag" name="tag" value=(tag);
                         }
                     }
                     div { button type="submit" { "Publish" } }
@@ -375,7 +400,7 @@ pub fn template_detail_page(
 
         (section("Recent renders", renders_table(recent, now)))
     };
-    layout(name, body)
+    layout(name, Nav::Templates, body)
 }
 
 /// "New template" creation form.
@@ -408,7 +433,7 @@ pub fn new_template_page() -> Markup {
             }
         }
     };
-    layout("New template", body)
+    layout("New template", Nav::New, body)
 }
 
 /// htmx fragment shown after a successful test render.
@@ -461,11 +486,11 @@ async fn templates_list(State(state): State<AppState>) -> Markup {
 async fn template_detail(State(state): State<AppState>, Path(reference): Path<String>) -> Response {
     let now = OffsetDateTime::now_utc();
 
-    let name = reference
-        .split(':')
-        .next()
-        .unwrap_or(&reference)
-        .to_string();
+    // Reference is `name` or `name:tag`; default to the "latest" tag.
+    let (name, tag) = match reference.split_once(':') {
+        Some((n, t)) => (n.to_string(), t.to_string()),
+        None => (reference.clone(), "latest".to_string()),
+    };
     let templates = state.registry.list_templates().await.unwrap_or_default();
     let info = templates
         .iter()
@@ -493,12 +518,15 @@ async fn template_detail(State(state): State<AppState>, Path(reference): Path<St
         .await
         .unwrap_or_default();
 
-    template_detail_page(&name, &metadata, &tags, &source, &recent, now).into_response()
+    template_detail_page(&name, &tag, &metadata, &tags, &source, &recent, now).into_response()
 }
 
 #[derive(Debug, Deserialize)]
 struct RenderForm {
     data: String,
+    /// Tag being test-rendered (defaults to "latest").
+    #[serde(default = "default_tag")]
+    tag: String,
 }
 
 async fn ui_render(
@@ -510,7 +538,7 @@ async fn ui_render(
         Ok(v) => v,
         Err(e) => return render_error_fragment(&format!("Invalid JSON: {}", e)),
     };
-    let reference = format!("{}:latest", name);
+    let reference = format!("{}:{}", name, form.tag);
     match state.registry.render_and_store(&reference, &data).await {
         Ok(result) => render_result_fragment(&result.render_id),
         Err(e) => render_error_fragment(&e.to_string()),
@@ -724,8 +752,9 @@ mod tests {
         let meta = TemplateMetadata::new("Invoice", "a@b.com");
         let html = template_detail_page(
             "invoice",
+            "v2",
             &meta,
-            &["latest".to_string()],
+            &["latest".to_string(), "v2".to_string()],
             "= Hello",
             &[],
             now,
@@ -735,6 +764,27 @@ mod tests {
         assert!(html.contains("hx-post=\"/ui/templates/invoice/render\""));
         assert!(html.contains("= Hello")); // source prefilled
         assert!(html.contains("/ui/templates/invoice/publish"));
+        // Each version links to its tag-specific detail; the current tag is marked.
+        assert!(html.contains("href=\"/templates/invoice:v2\""));
+        assert!(html.contains("href=\"/templates/invoice:latest\""));
+        assert!(html.contains("aria-current=\"true\""));
+        // Test render + publish target the viewed tag.
+        assert!(html.contains("name=\"tag\" value=\"v2\""));
+    }
+
+    #[test]
+    fn test_active_nav_marks_current_and_templates_tags_link() {
+        // Active nav highlight.
+        let dash = dashboard_page(
+            &sample_summary(datetime!(2026-07-09 12:00 UTC)),
+            &[],
+            datetime!(2026-07-09 12:00 UTC),
+        )
+        .into_string();
+        assert!(dash.contains("href=\"/\" aria-current=\"page\""));
+        // Templates table renders each tag as a link to its tagged detail.
+        let tpls = templates_page(&[sample_template()]).into_string();
+        assert!(tpls.contains("href=\"/templates/invoice:latest\""));
     }
 
     #[test]

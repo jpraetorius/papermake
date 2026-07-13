@@ -140,6 +140,25 @@
   }
   .navbar nav { display: flex; align-items: center; gap: 1rem; }
 
+  /* Current location: bold, accent-colored, with a caret pointing down at the
+     content area below the navbar. */
+  .navbar nav a { position: relative; }
+  .navbar nav a[aria-current="page"] {
+    color: var(--primary);
+    font-weight: 700;
+    text-decoration: none;
+  }
+  .navbar nav a[aria-current="page"]::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 100%;
+    transform: translateX(-50%);
+    margin-top: 0.45rem;
+    border: 0.4rem solid transparent;
+    border-top-color: var(--primary);
+  }
+
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -154,12 +173,15 @@
     display: inline-flex; align-items: center; gap: 0.3em;
     font-size: 0.78rem; font-weight: 550; line-height: 1;
     padding: 0.28em 0.6em; border-radius: 999px;
-    background: var(--track); color: var(--text);
+    background: var(--track); color: var(--text); text-decoration: none;
     border: 1px solid color-mix(in oklab, var(--border), transparent 20%);
 
     &.ok  { background: color-mix(in oklab, var(--success), transparent 82%); color: color-mix(in oklab, var(--success), var(--text) 35%); border-color: transparent; }
     &.bad { background: color-mix(in oklab, var(--warn), transparent 80%);    color: color-mix(in oklab, var(--warn), var(--text) 35%);    border-color: transparent; }
   }
+  /* Clickable version badges (tags) */
+  a.badge:hover { background: color-mix(in oklab, var(--track), var(--text) 10%); }
+  a.badge[aria-current="true"] { background: var(--primary); color: var(--primary-ink); border-color: transparent; }
 
   .callout { border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.25rem; }
   .callout.warn { background: color-mix(in oklab, var(--warn), transparent 88%); border-color: color-mix(in oklab, var(--warn), transparent 55%); }
