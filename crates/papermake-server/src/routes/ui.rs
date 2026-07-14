@@ -237,7 +237,12 @@ fn latency_trend(points: &[DurationPoint], t: &I18n) -> Markup {
     if points.is_empty() {
         return html! { p.muted { (t.t("no-data")) } };
     }
-    let max = points.iter().map(|p| p.p99_duration_ms).max().unwrap_or(0).max(1);
+    let max = points
+        .iter()
+        .map(|p| p.p99_duration_ms)
+        .max()
+        .unwrap_or(0)
+        .max(1);
     let every = label_every(points.len());
     let last = points.last().unwrap();
     html! {
@@ -374,7 +379,12 @@ fn donut(templates: &[TemplateSummary], t: &I18n) -> Markup {
 
     // Palette: rotate hue around the wheel; "Other" is the neutral track color.
     let n = kept.len().max(1);
-    let color = |i: usize| format!("oklch(64% 0.16 {:.0})", 20.0 + (i as f64) * (300.0 / n as f64));
+    let color = |i: usize| {
+        format!(
+            "oklch(64% 0.16 {:.0})",
+            20.0 + (i as f64) * (300.0 / n as f64)
+        )
+    };
 
     let mut slices: Vec<DonutSlice> = Vec::new();
     let mut offset = 25.0_f64; // start the first slice at 12 o'clock
@@ -386,7 +396,11 @@ fn donut(templates: &[TemplateSummary], t: &I18n) -> Markup {
             pct,
             dashoffset: offset,
             color: color(i),
-            tags: s.by_tag.iter().map(|c| (c.tag.clone(), c.renders)).collect(),
+            tags: s
+                .by_tag
+                .iter()
+                .map(|c| (c.tag.clone(), c.renders))
+                .collect(),
         });
         offset -= pct;
     }
@@ -704,7 +718,6 @@ pub fn dashboard_page(
     now: OffsetDateTime,
     t: &I18n,
 ) -> Markup {
-
     let body = html! {
         div.split {
             h1 { (t.t("dashboard-title")) }
@@ -1288,17 +1301,46 @@ mod tests {
         let summary = Summary {
             generated_at: now,
             volume_by_day: vec![
-                VolumePoint { date: d, renders: 10, failures: 1 },
-                VolumePoint { date: d, renders: 20, failures: 3 },
+                VolumePoint {
+                    date: d,
+                    renders: 10,
+                    failures: 1,
+                },
+                VolumePoint {
+                    date: d,
+                    renders: 20,
+                    failures: 3,
+                },
             ],
             duration_by_day: vec![
-                DurationPoint { date: d, avg_duration_ms: 120.0, p90_duration_ms: 240, p95_duration_ms: 260, p99_duration_ms: 280 },
-                DurationPoint { date: d, avg_duration_ms: 150.0, p90_duration_ms: 310, p95_duration_ms: 340, p99_duration_ms: 380 },
+                DurationPoint {
+                    date: d,
+                    avg_duration_ms: 120.0,
+                    p90_duration_ms: 240,
+                    p95_duration_ms: 260,
+                    p99_duration_ms: 280,
+                },
+                DurationPoint {
+                    date: d,
+                    avg_duration_ms: 150.0,
+                    p90_duration_ms: 310,
+                    p95_duration_ms: 340,
+                    p99_duration_ms: 380,
+                },
             ],
             duration_histogram: vec![
-                DurationBucket { upper_ms: Some(100), count: 12 },
-                DurationBucket { upper_ms: Some(250), count: 6 },
-                DurationBucket { upper_ms: None, count: 2 },
+                DurationBucket {
+                    upper_ms: Some(100),
+                    count: 12,
+                },
+                DurationBucket {
+                    upper_ms: Some(250),
+                    count: 6,
+                },
+                DurationBucket {
+                    upper_ms: None,
+                    count: 2,
+                },
             ],
             // 70 / 27 / 3 out of 100 → the 3% template folds into "Other".
             templates: vec![
@@ -1306,26 +1348,42 @@ mod tests {
                     template_name: "invoice".to_string(),
                     total_renders: 70,
                     by_tag: vec![
-                        TagCount { tag: "latest".to_string(), renders: 56 },
-                        TagCount { tag: "v2".to_string(), renders: 14 },
+                        TagCount {
+                            tag: "latest".to_string(),
+                            renders: 56,
+                        },
+                        TagCount {
+                            tag: "v2".to_string(),
+                            renders: 14,
+                        },
                     ],
                     recent: vec![],
                 },
                 TemplateSummary {
                     template_name: "letter".to_string(),
                     total_renders: 27,
-                    by_tag: vec![TagCount { tag: "latest".to_string(), renders: 27 }],
+                    by_tag: vec![TagCount {
+                        tag: "latest".to_string(),
+                        renders: 27,
+                    }],
                     recent: vec![],
                 },
                 TemplateSummary {
                     template_name: "tiny".to_string(),
                     total_renders: 3,
-                    by_tag: vec![TagCount { tag: "latest".to_string(), renders: 3 }],
+                    by_tag: vec![TagCount {
+                        tag: "latest".to_string(),
+                        renders: 3,
+                    }],
                     recent: vec![],
                 },
             ],
             recent: vec![],
-            totals: Totals { renders_24h: 30, success_rate_24h: 0.9, p90_latency_ms_24h: 310 },
+            totals: Totals {
+                renders_24h: 30,
+                success_rate_24h: 0.9,
+                p90_latency_ms_24h: 310,
+            },
         };
 
         let html = dashboard_page(&summary, &[], now, &en()).into_string();
