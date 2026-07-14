@@ -90,6 +90,7 @@ All configuration is via environment variables (see
 |---|---|---|
 | `WORKER_INTERVAL_SECONDS` | `60` | Drain-jobs + aggregate + prune cadence |
 | `ANALYTICS_RETENTION_DAYS` | `30` | How long to keep raw analytics NDJSON |
+| `JOB_RETENTION_DAYS` | `7` | How long to keep batch-job status docs after last update (`0` = keep forever) |
 | `WORKER_LEASE_SECONDS` | `120` | Batch-job lease; a dead worker's job is reclaimable after this |
 | `WORKER_MAX_ATTEMPTS` | `3` | Give up on a job (mark `failed`) after this many claims |
 | `PAPERMAKE_WORKER_ID` | `worker` | Job owner id (falls back to `PAPERMAKE_INSTANCE_ID`) |
@@ -149,6 +150,12 @@ supports TTF/OTF/TTC only (no WOFF/WOFF2).
 
 Templates, manifests, and assets are content-addressed (deduplicated). Rendered
 outputs are keyed by `render_id` so by-id lookups are a direct read.
+
+The worker keeps time-based prefixes bounded each cycle: `renders/` are pruned
+once their per-render retention expires (via the `expiry/` index), `analytics/raw`
+rolls off after `ANALYTICS_RETENTION_DAYS`, and `jobs/` status docs after
+`JOB_RETENTION_DAYS`. `blobs/`/`manifests/` persist as template content (orphans
+are collected when a version is deleted); `refs/` are small mutable pointers.
 
 ## Migrating from the old scheme
 

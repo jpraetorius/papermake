@@ -10,6 +10,7 @@ use time::{Date, Duration};
 use super::layout;
 use super::types::RenderStorageError;
 use crate::address::ContentAddress;
+use crate::batch::BatchJob;
 use crate::storage::BlobStorage;
 
 /// Resolve the effective retention for a render, in days.
@@ -43,6 +44,8 @@ pub struct PruneStats {
     pub expiry_files_consumed: usize,
     /// Number of old analytics-raw files deleted.
     pub raw_files_deleted: usize,
+    /// Number of stale batch-job documents deleted.
+    pub jobs_pruned: usize,
 }
 
 /// Prune expired outputs and old analytics raw.
@@ -52,12 +55,16 @@ pub struct PruneStats {
 ///   expiry files.
 /// - Deletes `analytics/raw/dt=<old>/…` older than `analytics_retention_days`
 ///   (the persisted `summary.json` keeps the rollups, so history survives).
+/// - Deletes `jobs/{id}/…` batch-job documents whose `updated_at` is older than
+///   `job_retention_days` (status trackers accrue one per submission). `0`
+///   disables job pruning (keep forever).
 ///
 /// `today` is passed in for deterministic tests.
 pub async fn prune<B: BlobStorage + ?Sized>(
     blob: &B,
     today: Date,
     analytics_retention_days: u32,
+    job_retention_days: u32,
 ) -> Result<PruneStats, RenderStorageError> {
     let mut stats = PruneStats::default();
 
@@ -118,6 +125,35 @@ pub async fn prune<B: BlobStorage + ?Sized>(
         .await
         .map_err(|e| RenderStorageError::Query(e.to_string()))?;
     stats.raw_files_deleted = old_raw.len();
+
+    // 3. Batch-job pruning — one status doc (+ inputs) accrues per submission and
+    //    nothing else removes it. Drop jobs last touched before the cutoff
+    //    (terminal or long-abandoned); a live job heartbeats its lease so its
+    //    `updated_at` stays recent. `0` = keep forever.
+    if job_retention_days > 0 {
+        let job_cutoff = today - Duration::days(job_retention_days as i64);
+        let job_keys = blob
+            .list_keys(layout::JOBS_PREFIX)
+            .await
+            .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+        let mut stale: Vec<String> = Vec::new();
+        for key in job_keys.iter().filter(|k| k.ends_with("/job.json")) {
+            let bytes = blob
+                .get(key)
+                .await
+                .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+            if let Ok(job) = serde_json::from_slice::<BatchJob>(&bytes)
+                && job.updated_at.date() < job_cutoff
+            {
+                stale.push(layout::job_key(&job.job_id));
+                stale.push(layout::job_inputs_key(&job.job_id));
+                stats.jobs_pruned += 1;
+            }
+        }
+        blob.delete_many(&stale)
+            .await
+            .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+    }
 
     Ok(stats)
 }
@@ -188,7 +224,7 @@ mod tests {
         write_artifacts(&blob, "future", true).await;
         write_expiry(&blob, date!(2026 - 07 - 10), "inst-1", &["future"]).await;
 
-        let stats = prune(&blob, today, 90).await.unwrap();
+        let stats = prune(&blob, today, 90, 7).await.unwrap();
         assert_eq!(stats.renders_pruned, 2);
         assert_eq!(stats.expiry_files_consumed, 1);
 
@@ -234,8 +270,53 @@ mod tests {
             .await
             .unwrap();
 
-        let stats = prune(&blob, today, 90).await.unwrap();
+        let stats = prune(&blob, today, 90, 7).await.unwrap();
         assert_eq!(stats.raw_files_deleted, 1);
         assert_eq!(blob.list_keys(layout::RAW_PREFIX).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_prune_stale_jobs() {
+        use crate::batch::{BatchJob, JobStatus};
+        let blob = MemoryStorage::new();
+        let today = date!(2026 - 07 - 09);
+
+        let mk = |id: &str, updated: Date| BatchJob {
+            job_id: id.to_string(),
+            reference: "invoice:latest".to_string(),
+            status: JobStatus::Completed,
+            total: 0,
+            done: 0,
+            failed: 0,
+            retain_days: None,
+            owner: None,
+            lease_expires_at: None,
+            attempts: 1,
+            created_at: updated.midnight().assume_utc(),
+            updated_at: updated.midnight().assume_utc(),
+            items: vec![],
+        };
+
+        // Stale (10 days old) + fresh (today); job retention 7 days.
+        for j in [mk("stale", date!(2026 - 06 - 29)), mk("fresh", today)] {
+            blob.put(&layout::job_key(&j.job_id), serde_json::to_vec(&j).unwrap())
+                .await
+                .unwrap();
+            blob.put(&layout::job_inputs_key(&j.job_id), b"[]".to_vec())
+                .await
+                .unwrap();
+        }
+
+        let stats = prune(&blob, today, 90, 7).await.unwrap();
+        assert_eq!(stats.jobs_pruned, 1);
+        // Stale job + its inputs gone; fresh job intact.
+        assert!(!blob.exists(&layout::job_key("stale")).await.unwrap());
+        assert!(!blob.exists(&layout::job_inputs_key("stale")).await.unwrap());
+        assert!(blob.exists(&layout::job_key("fresh")).await.unwrap());
+        assert!(blob.exists(&layout::job_inputs_key("fresh")).await.unwrap());
+
+        // Retention 0 keeps everything.
+        let stats0 = prune(&blob, today, 90, 0).await.unwrap();
+        assert_eq!(stats0.jobs_pruned, 0);
     }
 }

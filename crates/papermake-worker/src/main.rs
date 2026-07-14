@@ -63,6 +63,7 @@ async fn main() {
 
     let interval = env_u64("WORKER_INTERVAL_SECONDS", 60);
     let analytics_retention_days = env_u32("ANALYTICS_RETENTION_DAYS", 30);
+    let job_retention_days = env_u32("JOB_RETENTION_DAYS", 7);
     let lease_secs = env_u64("WORKER_LEASE_SECONDS", 120);
     let max_attempts = env_u32("WORKER_MAX_ATTEMPTS", 3);
     info!(
@@ -115,11 +116,21 @@ async fn main() {
             Err(e) => error!("Aggregation failed: {}", e),
         }
 
-        // 3. Prune expired outputs + old analytics raw.
-        match retention::prune(&blob, now.date(), analytics_retention_days).await {
+        // 3. Prune expired outputs, old analytics raw, and stale batch jobs.
+        match retention::prune(
+            &blob,
+            now.date(),
+            analytics_retention_days,
+            job_retention_days,
+        )
+        .await
+        {
             Ok(stats) => info!(
-                "Pruned: {} renders, {} expiry files, {} raw files",
-                stats.renders_pruned, stats.expiry_files_consumed, stats.raw_files_deleted
+                "Pruned: {} renders, {} expiry files, {} raw files, {} jobs",
+                stats.renders_pruned,
+                stats.expiry_files_consumed,
+                stats.raw_files_deleted,
+                stats.jobs_pruned
             ),
             Err(e) => error!("Prune failed: {}", e),
         }
