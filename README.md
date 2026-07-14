@@ -290,3 +290,9 @@ cargo test --workspace -- --ignored
 ```
 
 Built with Rust 🦀 • Powered by [Typst](https://typst.app/) • Inspired by Docker registry & Git's content addressing
+
+## License & attribution
+
+Licensed under the **Apache License 2.0** (see [`LICENSE`](LICENSE)). This is a
+modified fork of [papermake](https://github.com/rkstgr/papermake) by Erik
+Steiger; see [`NOTICE`](NOTICE) for attribution.

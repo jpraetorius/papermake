@@ -1,0 +1,11 @@
+Papermake
+
+This product is a modified fork of the "papermake" project
+(https://github.com/rkstgr/papermake), originally created by Erik Steiger and
+licensed under the Apache License, Version 2.0.
+
+Original work: Copyright the papermake authors (Erik Steiger and contributors).
+Modifications: Copyright 2026 Joachim Praetorius.
+
+Files have been added, removed, and modified relative to the upstream project.
+See the LICENSE file for the full terms of the Apache License, Version 2.0.

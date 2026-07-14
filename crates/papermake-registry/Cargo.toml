@@ -1,19 +1,20 @@
 [package]
 name = "papermake-registry"
-version = "0.1.0"
+version = "0.8.0"
 edition = "2024"
 description = "Template registry and versioning system for papermake"
 license = "Apache-2.0"
-repository = "https://github.com/rkstgr/papermake"
+repository = "https://github.com/jpraetorius/papermake"
 documentation = "https://docs.rs/papermake-registry"
-homepage = "https://github.com/rkstgr/papermake"
+homepage = "https://github.com/jpraetorius/papermake"
 readme = "README.md"
 keywords = ["pdf", "typst", "templates", "registry", "versioning"]
 categories = ["template-engine"]
-authors = ["Erik Steiger"]
+# Original author retained for attribution (Apache-2.0); fork maintained by JPR.
+authors = ["Erik Steiger", "Joachim Praetorius"]
 
 [dependencies]
-papermake = { path = "../papermake", version = "0.1" }
+papermake = { path = "../papermake", version = "0.8" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 async-trait = "0.1"

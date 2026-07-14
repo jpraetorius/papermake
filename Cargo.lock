@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "papermake"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "flate2",
@@ -2870,7 +2870,7 @@ dependencies = [
 
 [[package]]
 name = "papermake-registry"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2891,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "papermake-server"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -2918,7 +2918,7 @@ dependencies = [
 
 [[package]]
 name = "papermake-worker"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "dotenv",
  "papermake",
