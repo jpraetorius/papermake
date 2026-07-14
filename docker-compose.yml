@@ -12,12 +12,14 @@ services:
       HOST: "0.0.0.0"
       PORT: "3000"
 
-      # S3 Storage configuration (RustFS)
-      S3_ENDPOINT_URL: "http://rustfs:9000"
+      # S3-compatible object storage
+      S3_ENDPOINT_URL: "http://object-store:9000"
       S3_REGION: "us-east-1"
       S3_BUCKET: "papermake-templates"
-      S3_ACCESS_KEY_ID: "minioadmin"
-      S3_SECRET_ACCESS_KEY: "minioadmin"
+      S3_ACCESS_KEY_ID: "papermake"
+      S3_SECRET_ACCESS_KEY: "papermake-secret"
+      S3_OP_TIMEOUT_SECONDS: "20"
+      S3_MAX_ATTEMPTS: "3"
 
       # Buffered analytics + retention
       PAPERMAKE_INSTANCE_ID: "server-1"
@@ -30,9 +32,10 @@ services:
       # Log level (raise to debug for per-render/step traces)
       RUST_LOG: "papermake_server=info,papermake_registry=info,tower_http=info"
     depends_on:
-      rustfs:
-        condition: service_healthy
+      object-store:
+        condition: service_started
     restart: unless-stopped
+    stop_grace_period: 75s
     networks:
       - papermake
     volumes:
@@ -55,20 +58,23 @@ services:
     image: papermake-worker:local
     environment:
       WORKER_ROLE: "render"
-      S3_ENDPOINT_URL: "http://rustfs:9000"
+      S3_ENDPOINT_URL: "http://object-store:9000"
       S3_REGION: "us-east-1"
       S3_BUCKET: "papermake-templates"
-      S3_ACCESS_KEY_ID: "minioadmin"
-      S3_SECRET_ACCESS_KEY: "minioadmin"
+      S3_ACCESS_KEY_ID: "papermake"
+      S3_SECRET_ACCESS_KEY: "papermake-secret"
+      S3_OP_TIMEOUT_SECONDS: "20"
+      S3_MAX_ATTEMPTS: "3"
       # WORKER_INTERVAL_SECONDS defaults to 5s for the render role (fast pickup).
       WORKER_LEASE_SECONDS: "120"
       WORKER_MAX_ATTEMPTS: "3"
       RENDER_RETENTION_DAYS: "30"
       RUST_LOG: "papermake_worker=info,papermake_registry=info"
     depends_on:
-      rustfs:
-        condition: service_healthy
+      object-store:
+        condition: service_started
     restart: unless-stopped
+    stop_grace_period: 75s
     networks:
       - papermake
     volumes:
@@ -84,55 +90,51 @@ services:
     container_name: papermake-maintenance
     environment:
       WORKER_ROLE: "maintenance"
-      S3_ENDPOINT_URL: "http://rustfs:9000"
+      S3_ENDPOINT_URL: "http://object-store:9000"
       S3_REGION: "us-east-1"
       S3_BUCKET: "papermake-templates"
-      S3_ACCESS_KEY_ID: "minioadmin"
-      S3_SECRET_ACCESS_KEY: "minioadmin"
+      S3_ACCESS_KEY_ID: "papermake"
+      S3_SECRET_ACCESS_KEY: "papermake-secret"
+      S3_OP_TIMEOUT_SECONDS: "20"
+      S3_MAX_ATTEMPTS: "3"
       PAPERMAKE_WORKER_ID: "maintenance-1"
       # WORKER_INTERVAL_SECONDS defaults to 30s for the maintenance role.
       ANALYTICS_RETENTION_DAYS: "30"
       JOB_RETENTION_DAYS: "7"
       RUST_LOG: "papermake_worker=info,papermake_registry=info"
     depends_on:
-      rustfs:
-        condition: service_healthy
+      object-store:
+        condition: service_started
       papermake-worker:
         condition: service_started
     restart: unless-stopped
+    stop_grace_period: 75s
     networks:
       - papermake
 
-  # RustFS - S3-compatible object storage (Apache-2.0, Rust, MinIO-compatible).
-  rustfs:
-    image: rustfs/rustfs:1.0.0-beta.8
-    container_name: papermake-rustfs
+  # S3-compatible object storage for local/dev.
+  object-store:
+    image: quay.io/minio/minio:latest
+    container_name: papermake-object-store
+    command: server /data --console-address ":9001"
     ports:
       - "9000:9000" # S3 API
       - "9001:9001" # Web console
     environment:
-      RUSTFS_VOLUMES: "/data"
-      RUSTFS_ADDRESS: "0.0.0.0:9000"
-      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
-      RUSTFS_CONSOLE_ENABLE: "true"
       # S3 credentials — must match the S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY above
-      RUSTFS_ACCESS_KEY: "minioadmin"
-      RUSTFS_SECRET_KEY: "minioadmin"
-      RUSTFS_OBS_LOGGER_LEVEL: "info"
+      MINIO_ROOT_USER: "papermake"
+      MINIO_ROOT_PASSWORD: "papermake-secret"
     volumes:
-      - rustfs_data:/data
+      - object_store_data:/data
     restart: unless-stopped
+    stop_grace_period: 120s
     networks:
       - papermake
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
-      interval: 5s
-      timeout: 10s
-      retries: 5
-      start_period: 10s
+    # No container healthcheck: the app processes wait for the S3 API and create
+    # the bucket on startup, which is more portable across slim object-store images.
 
 volumes:
-  rustfs_data:
+  object_store_data:
 
 networks:
   papermake:

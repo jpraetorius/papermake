@@ -40,7 +40,7 @@ pub trait BlobStorage: Send + Sync {
     /// List all keys with the given prefix
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError>;
 
-    /// Delete many keys, ignoring keys that are already absent (matches S3/MinIO
+    /// Delete many keys, ignoring keys that are already absent (matches S3-compatible
     /// `delete_objects`, which does not error on missing keys — keeps pruning
     /// idempotent, e.g. a failed render has no PDF blob to delete). The default
     /// deletes one at a time; batch-capable backends (up to 1000/call) should

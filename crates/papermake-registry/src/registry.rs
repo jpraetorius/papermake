@@ -2892,15 +2892,15 @@ Content: #data.content"#
         assert_eq!(template.full_name(), "john/invoice");
     }
 
-    // Integration test: requires a live S3 (RustFS) at localhost:9000.
-    // Run with `cargo test -- --ignored` after `docker compose up -d rustfs`.
+    // Integration test: requires a live S3-compatible backend at localhost:9000.
+    // Run with `cargo test -- --ignored` after `docker compose up -d object-store`.
     #[ignore = "requires a live S3 at localhost:9000 (see docker-compose.yml)"]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_registry_list_templates_no_namespace() {
         unsafe {
             std::env::set_var("S3_ENDPOINT_URL", "http://localhost:9000");
-            std::env::set_var("S3_ACCESS_KEY_ID", "minioadmin");
-            std::env::set_var("S3_SECRET_ACCESS_KEY", "minioadmin");
+            std::env::set_var("S3_ACCESS_KEY_ID", "papermake");
+            std::env::set_var("S3_SECRET_ACCESS_KEY", "papermake-secret");
             std::env::set_var("S3_BUCKET", "papermake-registry-test");
             std::env::set_var("S3_REGION", "us-east-1");
         }

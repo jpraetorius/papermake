@@ -9,7 +9,7 @@ Papermake needs two processes and an S3-compatible object store:
   - **maintenance** — aggregates analytics into `summary.json` and prunes
     expired outputs/jobs; run **one**.
   - **all** (default) — both in one process, for simple single-node/dev.
-- **S3** — RustFS (bundled for local/dev), or any S3-compatible service in
+- **S3** — the bundled S3-compatible object store, or any S3-compatible service in
   production.
 
 ## Docker Compose (recommended for local/dev)
@@ -18,7 +18,7 @@ Papermake needs two processes and an S3-compatible object store:
 docker compose up -d
 ```
 
-Brings up `papermake-server` (port 3000), `papermake-worker`, and `rustfs`
+Brings up `papermake-server` (port 3000), `papermake-worker`, and `object-store`
 (S3 API `:9000`, web console `:9001`). The server creates its bucket on
 startup. See [Getting started](getting-started.md).
 
@@ -33,19 +33,18 @@ docker compose down        # add -v to also delete stored data
 
 The images: server and worker are built from their `Dockerfile`s
 (`crates/papermake-server/Dockerfile`, `crates/papermake-worker/Dockerfile`,
-multi-stage Rust builds on Rust 1.97, distroless runtime); RustFS is pinned to a
-specific release rather than `:latest`. RustFS S3 credentials come from its
-`RUSTFS_ACCESS_KEY` / `RUSTFS_SECRET_KEY` env vars and must match the server's
+multi-stage Rust builds on Rust 1.97, distroless runtime). The object store's
+root credentials must match the server and worker
 `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`.
 
 ## Run from source
 
 ```bash
-# 1. Start just the object store
-docker compose up -d rustfs       # or: podman-compose up -d rustfs
+# 1. Start just the S3-compatible backend
+docker compose up -d object-store  # or: podman-compose up -d object-store
 
 # 2. Configure
-cp .env.example .env              # defaults target local RustFS
+cp .env.example .env              # defaults target the local object store
 
 # 3. Run the processes
 cargo run -r -p papermake-server
@@ -65,11 +64,13 @@ All configuration is via environment variables (see
 
 | Variable | Description |
 |---|---|
-| `S3_ENDPOINT_URL` | Endpoint, e.g. `http://rustfs:9000` |
+| `S3_ENDPOINT_URL` | Endpoint, e.g. `http://object-store:9000` |
 | `S3_REGION` | Region, e.g. `us-east-1` |
 | `S3_BUCKET` | Bucket name (created on startup if missing) |
 | `S3_ACCESS_KEY_ID` | Access key |
 | `S3_SECRET_ACCESS_KEY` | Secret key |
+| `S3_OP_TIMEOUT_SECONDS` | Per-attempt request deadline (default `20`). Without it a stalled backend hangs an op indefinitely. |
+| `S3_MAX_ATTEMPTS` | Max attempts per op (default `3`). Idempotent ops retry with backoff on transient errors (timeouts/5xx/`internalerror`); terminal errors (NotFound) don't. |
 
 ### Server
 

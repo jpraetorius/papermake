@@ -1,7 +1,7 @@
 # Drop ClickHouse & the SPA: buffered-S3 analytics + SSR UI
 
 > **Status:** design / not yet implemented.
-> **Base:** builds on the dependency-update branch (`chore/update-dependencies`) — assumes the upgraded APIs (minio 0.4 builders, typst 0.15, clickhouse 0.15, thiserror 2.0, redis 1.3). Implement on top of that.
+> **Base:** builds on the dependency-update branch (`chore/update-dependencies`) — assumes the upgraded APIs (S3 client builders, typst 0.15, clickhouse 0.15, thiserror 2.0, redis 1.3). Implement on top of that.
 
 ## Context
 
@@ -28,7 +28,7 @@ The render-analytics stack currently requires **two heavy moving parts** that ar
 - **TDD.** For each unit of work write the unit test(s) **first**, watch them fail, then implement until green. Each of the components below (`S3BufferedRenderStorage`, `aggregator`, `retention::prune`, `address` key helpers, `render_and_store` keying, retention resolution, SSR handlers) lands with its tests in the same step — tests are not a trailing phase.
 - **Small, green steps.** Prefer many small commits, each with the workspace building and `cargo test --workspace` passing.
 - **Gates on every change (non-negotiable):** `cargo fmt --all` and `cargo clippy --workspace --all-targets` must be clean before a change is considered done — not just at the end. Keep the repo `fmt`/`clippy`-clean throughout (as the dependency-update branch already is).
-- Offline-first tests use `MemoryStorage` as the `BlobStorage` backend so the whole suite runs without infra; the live-MinIO integration check is the final confirmation.
+- Offline-first tests use `MemoryStorage` as the `BlobStorage` backend so the whole suite runs without infra; the live S3-compatible backend integration check is the final confirmation.
 
 ---
 
@@ -69,7 +69,7 @@ Pure function over `BlobStorage` (testable offline with `MemoryStorage`):
 ### A4. Remove ClickHouse
 - Delete `render_storage/clickhouse.rs`; drop the `clickhouse` dep + `clickhouse` feature + `default = ["s3","clickhouse"]` in `crates/papermake-registry/Cargo.toml` (new default `["s3"]`).
 - Remove `clickhouse` re-exports from `lib.rs`.
-- `docker-compose.yml`: remove the `clickhouse` service + its env on the server; add a `papermake-worker` service (shares MinIO). Remove `./clickhouse-init` usage.
+- `docker-compose.yml`: remove the `clickhouse` service + its env on the server; add a `papermake-worker` service (shares S3-compatible object storage). Remove `./clickhouse-init` usage.
 
 ---
 
@@ -121,7 +121,7 @@ The flush task already buckets buffered records; have it **also** write an expir
 ### C3. `retention::prune(&blob)` (`crates/papermake-registry/src/render_storage/retention.rs`, run by the worker)
 - `list_keys("expiry/")` → select partitions where `dt <= today`.
 - Read those NDJSON files → the set of due `render_id`s → delete `renders/{id}/pdf` + `renders/{id}/data`, then delete the consumed `expiry/dt=<due>/...` files.
-- Prefer a batched delete: add `BlobStorage::delete_many(keys)` (S3/MinIO `delete_objects`, up to 1000/call) for throughput; fall back to `delete` in a loop otherwise.
+- Prefer a batched delete: add `BlobStorage::delete_many(keys)` (S3-compatible `delete_objects`, up to 1000/call) for throughput; fall back to `delete` in a loop otherwise.
 - **Also prune analytics raw**: delete `analytics/raw/dt=<old>/` older than `ANALYTICS_RETENTION_DAYS` (independent, usually short — the persisted `summary.json` keeps the rollups, so history survives even after raw is dropped).
 
 ### C4. Semantics / notes
@@ -131,7 +131,7 @@ The flush task already buckets buffered records; have it **also** write an expir
 ## Verification
 - **Unit (offline, `MemoryStorage` as blob backend):** `S3BufferedRenderStorage` store→flush→ raw-blob roundtrip; aggregator over synthetic raw NDJSON → assert `summary.json` totals/rollups (mirror existing `render_storage` tests); artifact keying (`render_and_store` writes `renders/{id}/meta.json|pdf|data`; `get_render_pdf/data` round-trip by id). **Failed-vs-missing:** a failed render writes `meta.json` (no pdf) → `get_render_pdf` yields `RenderFailed` (4xx); an unknown id → `RenderNotFound` (404); per-template `recent` list in `summary.json` backs `list_template_renders`. **Retention:** effective-retain precedence (render > template > global; `0` = keep forever → no index entry); expiry-index written under the right `expiry/dt=<expiry>/…`; `retention::prune` deletes only due-partition artifacts + index files and leaves not-yet-due ones intact.
 - **SSR handler tests:** pages return 200 and contain expected text (template names, metric labels).
-- **Integration (live MinIO via `podman-compose up -d minio`; there is no `docker` on this machine — see `docker-compose.yml`):** run server + worker; POST a render; confirm the PDF lands at `renders/{id}/pdf` and is fetchable by id immediately; confirm raw NDJSON under `analytics/raw/...` + an `expiry/dt=.../` entry; worker writes `analytics/agg/summary.json` and `GET /` shows the render. Retention: render with a past/short `retain_days`, run the worker prune, confirm `renders/{id}/*` is deleted while a longer-retained render survives.
+- **Integration (live S3-compatible backend via `podman-compose up -d object-store`; there is no `docker` on this machine — see `docker-compose.yml`):** run server + worker; POST a render; confirm the PDF lands at `renders/{id}/pdf` and is fetchable by id immediately; confirm raw NDJSON under `analytics/raw/...` + an `expiry/dt=.../` entry; worker writes `analytics/agg/summary.json` and `GET /` shows the render. Retention: render with a past/short `retain_days`, run the worker prune, confirm `renders/{id}/*` is deleted while a longer-retained render survives.
 - **Full gates:** `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets` (clean), `cargo fmt --all --check`.
 - Manual: open `/` and `/templates/{ref}` in a browser; edit + Test Render (htmx swaps in the PDF iframe, no reload); publish.
 
