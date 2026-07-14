@@ -76,7 +76,21 @@ impl ContentAddress {
         let actual_hash = Self::hash(content);
         actual_hash == expected_hash
     }
+
+    /// Content-addressed render id: a stable UUIDv5 over the template manifest
+    /// hash and the input-data hash. Identical `(template version, data)` renders
+    /// therefore share a render_id — making every render idempotent (re-rendering
+    /// overwrites the same `renders/{id}/…` keys) and safe to reprocess across
+    /// workers. Consistent with the content-addressed blob/manifest store.
+    pub fn content_render_id(manifest_hash: &str, data_hash: &str) -> String {
+        let name = format!("{manifest_hash}:{data_hash}");
+        uuid::Uuid::new_v5(&RENDER_ID_NAMESPACE, name.as_bytes()).to_string()
+    }
 }
+
+/// Fixed namespace for content-addressed render ids (a random, stable UUID).
+const RENDER_ID_NAMESPACE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x50fa2b1c_9e4d_4f8a_b3c6_d7e8f9a0b1c2);
 
 #[cfg(test)]
 mod tests {
@@ -93,6 +107,24 @@ mod tests {
         // Same content should produce same hash
         let hash2 = ContentAddress::hash(content);
         assert_eq!(hash, hash2);
+    }
+
+    #[test]
+    fn test_content_render_id_stable_and_input_sensitive() {
+        let a = ContentAddress::content_render_id("sha256:manifest", "sha256:data");
+        let b = ContentAddress::content_render_id("sha256:manifest", "sha256:data");
+        assert_eq!(a, b, "same inputs must yield the same render id");
+        // Valid UUID string.
+        assert!(uuid::Uuid::parse_str(&a).is_ok());
+        // Different data or manifest => different id.
+        assert_ne!(
+            a,
+            ContentAddress::content_render_id("sha256:manifest", "sha256:other")
+        );
+        assert_ne!(
+            a,
+            ContentAddress::content_render_id("sha256:other", "sha256:data")
+        );
     }
 
     #[test]

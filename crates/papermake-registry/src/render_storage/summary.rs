@@ -86,6 +86,25 @@ impl Summary {
 /// `recent_n` bounds both the global and per-template recent lists. `now`
 /// anchors the trailing-24h totals window (passed in for deterministic tests).
 pub fn compute_summary(records: &[RenderRecord], recent_n: usize, now: OffsetDateTime) -> Summary {
+    // Dedup by render_id, keeping the latest by timestamp. Idempotent re-renders
+    // (content-addressed ids) and batch retries append duplicate raw records for
+    // the same render_id; count each render once.
+    let deduped: Vec<RenderRecord> = {
+        let mut latest: HashMap<&str, &RenderRecord> = HashMap::new();
+        for r in records {
+            latest
+                .entry(r.render_id.as_str())
+                .and_modify(|cur| {
+                    if r.timestamp > cur.timestamp {
+                        *cur = r;
+                    }
+                })
+                .or_insert(r);
+        }
+        latest.into_values().cloned().collect()
+    };
+    let records: &[RenderRecord] = &deduped;
+
     // Volume per day: total renders and the failing subset.
     let mut vol: HashMap<time::Date, (u64, u64)> = HashMap::new();
     for r in records {
@@ -109,7 +128,9 @@ pub fn compute_summary(records: &[RenderRecord], recent_n: usize, now: OffsetDat
     let mut dur: HashMap<time::Date, Vec<u32>> = HashMap::new();
     for r in records {
         if r.success {
-            dur.entry(r.timestamp.date()).or_default().push(r.duration_ms);
+            dur.entry(r.timestamp.date())
+                .or_default()
+                .push(r.duration_ms);
         }
     }
     let mut duration_by_day: Vec<DurationPoint> = dur
@@ -238,7 +259,9 @@ mod tests {
 
     fn rec(name: &str, ts: OffsetDateTime, success: bool, duration_ms: u32) -> RenderRecord {
         RenderRecord {
-            render_id: format!("{}-{}", name, duration_ms),
+            // Unique per (name, duration, timestamp) so distinct test records
+            // don't accidentally dedup; the dedup test sets ids explicitly.
+            render_id: format!("{}-{}-{}", name, duration_ms, ts.unix_timestamp()),
             timestamp: ts,
             template_ref: format!("{}:latest", name),
             template_name: name.to_string(),
@@ -287,7 +310,10 @@ mod tests {
         assert_eq!(s.duration_by_day[0].p99_duration_ms, 300);
 
         // Latency histogram over successes [100,200,300]: <250 has 2, <500 has 1.
-        assert_eq!(s.duration_histogram.len(), DURATION_BUCKET_EDGES_MS.len() + 1);
+        assert_eq!(
+            s.duration_histogram.len(),
+            DURATION_BUCKET_EDGES_MS.len() + 1
+        );
         assert_eq!(s.duration_histogram[0].upper_ms, Some(100));
         assert_eq!(s.duration_histogram[0].count, 0);
         assert_eq!(s.duration_histogram[1].count, 2); // 100, 200
@@ -351,6 +377,28 @@ mod tests {
         assert_eq!(t.by_tag[0].renders, 2);
         assert_eq!(t.by_tag[1].tag, "latest");
         assert_eq!(t.by_tag[1].renders, 1);
+    }
+
+    #[test]
+    fn test_compute_summary_dedups_by_render_id() {
+        let now = datetime!(2026-07-09 12:00 UTC);
+        // Two raw records for ONE render_id (an earlier failed attempt and a later
+        // success) must count ONCE, keeping the latest.
+        let early = rec("invoice", datetime!(2026-07-09 10:00 UTC), false, 100);
+        let mut late = early.clone();
+        late.timestamp = datetime!(2026-07-09 11:00 UTC);
+        late.success = true;
+        late.error = None;
+        assert_eq!(early.render_id, late.render_id);
+        let other = rec("invoice", datetime!(2026-07-09 11:30 UTC), true, 200);
+
+        let s = compute_summary(&[early, late, other], 10, now);
+        // 2 distinct render_ids, not 3 raw records.
+        assert_eq!(s.totals.renders_24h, 2);
+        // Deduped record keeps the latest (success) => 100% success.
+        assert_eq!(s.totals.success_rate_24h, 1.0);
+        assert_eq!(s.recent.len(), 2);
+        assert_eq!(s.volume_by_day.iter().map(|v| v.renders).sum::<u64>(), 2);
     }
 
     #[test]
