@@ -8,6 +8,13 @@ Base URL in local dev: `http://localhost:3000`. All JSON API routes are under
 - List responses are paginated: `{ "data": [...], "pagination": { "limit", "offset", "total", "has_more" } }`.
 - Errors return `{ "error": "…", "status": <code> }`.
 
+## OpenAPI spec
+
+A generated OpenAPI 3.1 document is served at **`GET /api/openapi.json`** (kept
+in sync with the implementation). The server does not bundle a docs UI — point
+your own OpenAPI client at that URL (Scalar, Swagger UI, Redoc, or a code
+generator such as `openapi-generator`).
+
 ## Health
 
 ### `GET /health`
@@ -110,8 +117,10 @@ Request:
 - `data` (required) — injected into the template as `sys.inputs.data`.
 - `retain_days` (optional) — overrides the template/global retention for this
   render (`0` = keep forever). See [Analytics & retention](analytics-and-retention.md).
-- `pdf_standard` (optional) — `"1.7"` (default), `"a-2b"`, or `"a-3b"` for
-  PDF/A-conformant output.
+- `pdf_standard` (optional) — output PDF standard: `"1.7"` (default), `"2.0"`,
+  `"a-2a"`, `"a-2b"`, `"a-3a"`, `"a-3b"`, `"a-4"` (archival) or `"ua-1"`
+  (accessibility). Note: `ua-1` requires the template to set a document title —
+  see [Writing templates → PDF standards](templates.md#pdf-standards-archival--accessibility).
 
 Response:
 
@@ -155,6 +164,8 @@ Request:
 - `inputs[].data` (required) — payload injected as `sys.inputs.data`.
 - `inputs[].key` (optional) — caller-chosen label echoed back on the result item.
 - `retain_days` (optional) — retention applied to every render in the batch.
+- `pdf_standard` (optional) — output PDF standard applied to every render in the
+  batch; same values as the single render above.
 
 Response:
 

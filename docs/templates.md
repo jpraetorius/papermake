@@ -107,6 +107,38 @@ Prefer providing common corporate fonts via a mounted `FONTS_DIR` volume (or
 baked into a custom image) — see [Self-hosting → Fonts](self-hosting.md#fonts) —
 and bundle only template-specific typefaces.
 
+## PDF standards (archival / accessibility)
+
+By default renders produce plain **PDF 1.7**. A render request can ask for a
+stricter standard via the `pdf_standard` field (see
+[Rendering](api.md#rendering)). Supported values:
+
+| Value | Standard | Notes |
+|---|---|---|
+| `1.7` | PDF 1.7 | Default. |
+| `2.0` | PDF 2.0 | Newer base version. |
+| `a-2b`, `a-3b` | PDF/A-2b, PDF/A-3b | Archival. `a-3b` allows embedded files (basis for ZUGFeRD/Factur-X e-invoices). |
+| `a-2a`, `a-3a` | PDF/A-2a, PDF/A-3a | Archival **and** tagged/accessible. |
+| `a-4` | PDF/A-4 | Archival, based on PDF 2.0. |
+| `ua-1` | PDF/UA-1 | Universal accessibility. |
+
+### Authoring requirement: a document title
+
+> ⚠️ **PDF/UA-1 renders fail unless the template sets a document title.** Typst
+> aborts the export with `PDF/UA-1 error: missing document title`. Set one near
+> the top of `main.typ`:
+>
+> ```typst
+> #set document(title: [Invoice #data.number])
+> ```
+
+This applies to `ua-1` and, for meaningful conformance, to the tagged
+accessible archival levels (`a-2a`, `a-3a`). The plain and `b`-level archival
+profiles (`1.7`, `2.0`, `a-2b`, `a-3b`, `a-4`) do **not** require a title.
+
+Because a title usually depends on the input data, add it to any template you
+intend to render as PDF/UA — otherwise every such render will report a failure.
+
 ## Tags and versions
 
 - A tag is just a named pointer: `invoice:latest`, `invoice:v2`.
