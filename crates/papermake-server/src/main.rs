@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tower::ServiceBuilder;
 use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
-use tracing::{Span, debug, debug_span, error, info};
+use tracing::{Span, debug, debug_span, error, info, warn};
 
 mod config;
 mod error;
@@ -24,7 +24,7 @@ mod models;
 mod routes;
 
 use config::ServerConfig;
-use error::Result;
+use error::{ApiError, Result};
 
 use crate::models::RenderJob;
 
@@ -63,12 +63,19 @@ async fn main() -> Result<()> {
     papermake::preload_fonts();
     info!("Fonts preloaded");
 
-    let s3_storage = S3Storage::from_env().unwrap(); // TODO: improve error handling
+    let s3_storage = S3Storage::from_env()
+        .map_err(|e| ApiError::Config(format!("Invalid S3 configuration: {e}")))?;
 
-    // Ensure S3 bucket exists
-    if let Err(e) = s3_storage.ensure_bucket().await {
-        error!("Failed to ensure S3 bucket exists: {}", e);
-    }
+    // Ensure the bucket exists before serving. Compose can only wait for the
+    // object-store container to start, not for the S3 API to be ready, so the
+    // server owns the bounded readiness/create-bucket wait.
+    s3_storage
+        .wait_for_bucket(30, Duration::from_secs(2))
+        .await
+        .map_err(|e| {
+            error!("Giving up ensuring S3 bucket: {e}");
+            ApiError::Config(format!("S3 bucket is unavailable: {e}"))
+        })?;
 
     // Buffered-S3 render store: stages records in memory, flushes NDJSON to S3.
     // Shares the S3 backend with the registry (no separate DB).
@@ -89,14 +96,25 @@ async fn main() -> Result<()> {
             ),
     );
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     // Background flush loop against the same buffer render_and_store stages into.
     if let Some(rs) = registry.render_storage() {
         let interval = config.flush_interval_seconds;
+        let mut shutdown_rx = shutdown_rx.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(interval)).await;
-                if let Err(e) = rs.flush().await {
-                    error!("Analytics flush failed: {}", e);
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(interval)) => {
+                        if let Err(e) = rs.flush().await {
+                            error!("Analytics flush failed: {}", e);
+                        }
+                    }
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -123,14 +141,14 @@ async fn main() -> Result<()> {
     info!("🚀 Server listening on http://{}", addr);
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_tx))
         .await?;
 
     // Flush any staged records on shutdown so none are lost.
     if let Some(rs) = registry.render_storage() {
         info!("Flushing analytics buffer on shutdown");
         if let Err(e) = rs.flush().await {
-            error!("Final analytics flush failed: {}", e);
+            warn!("Final analytics flush failed during shutdown: {}", e);
         }
     }
 
@@ -138,8 +156,27 @@ async fn main() -> Result<()> {
 }
 
 /// Resolve when the process receives Ctrl-C / SIGTERM.
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<bool>) {
+    wait_for_shutdown_signal().await;
+    info!("Shutdown signal received");
+    let _ = shutdown_tx.send(true);
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Create the main application router

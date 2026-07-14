@@ -87,22 +87,20 @@ async fn main() {
 
     let role = Role::from_env();
 
-    let blob = S3Storage::from_env().expect("S3 configuration (S3_* env vars)");
-    // Wait for the bucket before doing anything: on a fresh backend the store may
-    // not be ready the instant the healthcheck passes, and polling/listing a
-    // missing bucket surfaces as an opaque "validation error". Retry with backoff
-    // (bounded) so we never enter the loop against a non-existent bucket.
-    for attempt in 1..=30u32 {
-        match blob.ensure_bucket().await {
-            Ok(()) => break,
-            Err(e) if attempt == 30 => {
-                error!("Giving up ensuring S3 bucket after {attempt} attempts: {e}");
-            }
-            Err(e) => {
-                warn!("S3 bucket not ready (attempt {attempt}): {e}; retrying in 2s");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
+    let blob = match S3Storage::from_env() {
+        Ok(blob) => blob,
+        Err(e) => {
+            error!("Invalid S3 configuration: {e}");
+            std::process::exit(1);
         }
+    };
+    // Wait for the bucket before doing anything: Compose can only wait for the
+    // object-store container to start, not for the S3 API to be ready. The
+    // worker owns the bounded readiness/create-bucket wait so polling/listing
+    // never starts against a non-existent bucket.
+    if let Err(e) = blob.wait_for_bucket(30, Duration::from_secs(2)).await {
+        error!("Giving up ensuring S3 bucket: {e}");
+        std::process::exit(1);
     }
 
     // Worker id must be UNIQUE per process: it's the shard-claim owner and the
@@ -147,12 +145,26 @@ async fn main() {
         worker_id, role, interval, lease_secs, max_attempts
     );
 
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
+
     loop {
+        if *shutdown_rx.borrow() {
+            break;
+        }
+
         // Render role: drain every claimable shard across all jobs (pending, plus
         // orphaned ones whose lease expired). Scale these workers to split a big
         // batch; each renders items to content-addressed keys (idempotent).
         if let Some(registry) = &registry {
             loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
                 match registry
                     .claim_next_shard(
                         &worker_id,
@@ -184,6 +196,9 @@ async fn main() {
                                 job_id, shard_index, e
                             );
                         }
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -192,6 +207,10 @@ async fn main() {
                     }
                 }
             }
+        }
+
+        if *shutdown_rx.borrow() {
+            break;
         }
 
         // Maintenance role: aggregate analytics + prune. Independent of render
@@ -206,8 +225,13 @@ async fn main() {
                 ),
                 Err(e) => error!("Aggregation failed: {}", e),
             }
-            match retention::prune(&blob, now.date(), analytics_retention_days, job_retention_days)
-                .await
+            match retention::prune(
+                &blob,
+                now.date(),
+                analytics_retention_days,
+                job_retention_days,
+            )
+            .await
             {
                 Ok(stats) => info!(
                     "Pruned: {} renders, {} expiry files, {} raw files, {} jobs",
@@ -220,6 +244,38 @@ async fn main() {
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(interval)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(interval)) => {}
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+
+    info!("Shutdown signal received; worker exiting");
+    if let Some(registry) = &registry
+        && let Some(rs) = registry.render_storage()
+        && let Err(e) = rs.flush().await
+    {
+        warn!("Final analytics flush failed during shutdown: {}", e);
+    }
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
