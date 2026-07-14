@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tower::ServiceBuilder;
 use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
-use tracing::{Span, error, info, info_span};
+use tracing::{Span, debug, debug_span, error, info};
 
 mod config;
 mod error;
@@ -169,7 +169,7 @@ fn create_router(state: AppState) -> Router {
                                 .and_then(|value| value.to_str().ok())
                                 .unwrap_or("-");
 
-                            info_span!(
+                            debug_span!(
                                 "http_request",
                                 request_id = %request_id,
                                 method = %request.method(),
@@ -183,7 +183,7 @@ fn create_router(state: AppState) -> Router {
                         })
                         .on_request(|request: &Request<_>, span: &Span| {
                             let _entered = span.enter();
-                            info!(
+                            debug!(
                                 method = %request.method(),
                                 uri = %request.uri(),
                                 "request started",
@@ -194,7 +194,7 @@ fn create_router(state: AppState) -> Router {
                             span.record("status", response.status().as_u16());
                             span.record("latency_ms", latency_ms);
                             let _entered = span.enter();
-                            info!(
+                            debug!(
                                 status = response.status().as_u16(),
                                 latency_ms, "request completed",
                             );

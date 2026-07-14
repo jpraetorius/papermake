@@ -27,8 +27,8 @@ services:
       # Items per batch shard (unit of work a worker claims).
       SHARD_SIZE: "500"
 
-      # Optional: Enable debug logging
-      RUST_LOG: "papermake_server=debug,papermake_registry=debug"
+      # Log level (raise to debug for per-render/step traces)
+      RUST_LOG: "papermake_server=info,papermake_registry=info,tower_http=info"
     depends_on:
       rustfs:
         condition: service_healthy

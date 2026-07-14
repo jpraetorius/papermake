@@ -499,7 +499,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         options: &RenderOptions,
     ) -> Result<Vec<u8>, RegistryError> {
         let started = std::time::Instant::now();
-        tracing::info!(
+        tracing::debug!(
             reference = %reference,
             "registry render started",
         );
@@ -579,7 +579,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let (file_system, fonts) = self.hydrate_file_system(reference, &manifest).await?;
 
         // Step 5: Render the template using papermake
-        tracing::info!(
+        tracing::debug!(
             reference = %reference,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "registry render invoking typst",
@@ -594,7 +594,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 options.clone(),
             )
             .await?;
-        tracing::info!(
+        tracing::debug!(
             reference = %reference,
             success = render_result.success,
             errors = render_result.errors.len(),
@@ -609,7 +609,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     "Rendering succeeded but no PDF was generated",
                 ))
             })?;
-            tracing::info!(
+            tracing::debug!(
                 reference = %reference,
                 pdf_size_bytes = pdf.len(),
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -789,7 +789,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let task_started = std::time::Instant::now();
-            tracing::info!(
+            tracing::debug!(
                 reference = %reference_for_task,
                 "typst blocking render started",
             );
@@ -804,7 +804,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
             match &result {
                 Ok(render_result) => {
-                    tracing::info!(
+                    tracing::debug!(
                         reference = %reference_for_task,
                         success = render_result.success,
                         errors = render_result.errors.len(),
@@ -900,7 +900,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let task_started = std::time::Instant::now();
-            tracing::info!(
+            tracing::debug!(
                 reference = %reference,
                 "cached typst blocking render started",
             );
@@ -914,7 +914,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
             match &result {
                 Ok(render_result) => {
-                    tracing::info!(
+                    tracing::debug!(
                         reference = %reference,
                         success = render_result.success,
                         errors = render_result.errors.len(),
@@ -1053,6 +1053,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             .put(&layout::job_key(&job.job_id), bytes)
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        tracing::info!(
+            job_id = %job.job_id,
+            reference = %reference,
+            total,
+            num_shards,
+            "batch job enqueued",
+        );
         Ok(job)
     }
 
@@ -1279,6 +1286,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         shard.lease_expires_at = None;
         shard.updated_at = time::OffsetDateTime::now_utc();
         self.put_shard(&shard).await?;
+        tracing::info!(
+            job_id = %meta.job_id,
+            shard = shard.index,
+            done,
+            failed,
+            "batch shard completed",
+        );
         Ok(())
     }
 
@@ -1853,7 +1867,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             // the reference so repeated identical failures dedupe too.
             Err(_) => ContentAddress::content_render_id(reference, &data_hash),
         };
-        tracing::info!(
+        tracing::debug!(
             reference = %reference,
             render_id = %render_id,
             retain_override = ?retain_override,
@@ -1974,7 +1988,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     );
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     reference = %reference,
                     render_id = %render_id,
                     pdf_hash = %pdf_hash,

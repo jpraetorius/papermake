@@ -94,7 +94,10 @@ impl S3Storage {
                         .map_err(|e| StorageError::Backend(format!("Invalid bucket name: {}", e)))?
                         .build();
                     match create_bucket_req.send().await {
-                        Ok(_) => Ok(()),
+                        Ok(_) => {
+                            tracing::info!(bucket = %self.bucket, "created S3 bucket");
+                            Ok(())
+                        }
                         Err(e) => Err(StorageError::Backend(format!(
                             "Failed to create bucket '{}': {}",
                             self.bucket, e
