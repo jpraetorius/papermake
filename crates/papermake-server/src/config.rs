@@ -35,6 +35,9 @@ pub struct ServerConfig {
 
     /// Global default output retention in days (`0` = keep forever).
     pub render_retention_days: u32,
+
+    /// Items per batch shard (the unit of work a worker claims).
+    pub shard_size: usize,
 }
 
 impl ServerConfig {
@@ -81,6 +84,10 @@ impl ServerConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .map_err(|_| ApiError::Config("Invalid RENDER_RETENTION_DAYS value".to_string()))?,
+            shard_size: std::env::var("SHARD_SIZE")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()
+                .map_err(|_| ApiError::Config("Invalid SHARD_SIZE value".to_string()))?,
         })
     }
 }
@@ -98,6 +105,7 @@ impl Default for ServerConfig {
             flush_interval_seconds: 30,
             flush_max_records: 1000,
             render_retention_days: 30,
+            shard_size: 500,
         }
     }
 }

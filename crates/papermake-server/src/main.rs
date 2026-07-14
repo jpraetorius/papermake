@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
     let registry = Arc::new(
         Registry::new(s3_storage, render_storage)
             .with_retention_days(config.render_retention_days)
+            .with_shard_size(config.shard_size)
             .with_render_limits(
                 config.max_concurrent_renders,
                 Duration::from_secs(config.render_timeout_seconds),
