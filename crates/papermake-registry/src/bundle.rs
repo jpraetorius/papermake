@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Metadata for a template containing descriptive information
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct TemplateMetadata {
     /// Human-readable name of the template
     pub name: String,
@@ -164,7 +164,7 @@ impl TemplateBundle {
 }
 
 /// Information about a template in the registry
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TemplateInfo {
     /// Template name
     pub name: String,

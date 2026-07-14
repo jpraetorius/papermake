@@ -1,5 +1,6 @@
 //! Common API types and utilities
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Standard pagination parameters
 #[derive(Debug, Deserialize)]
@@ -16,14 +17,20 @@ fn default_limit() -> u32 {
 }
 
 /// Standard pagination response
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PaginatedResponse<T> {
     pub data: Vec<T>,
     pub pagination: PaginationInfo,
 }
 
+// Concrete instantiations used as OpenAPI response bodies. utoipa derives a
+// schema for each concrete `PaginatedResponse<T>` these name.
+pub type PaginatedTemplates = PaginatedResponse<papermake_registry::TemplateInfo>;
+pub type PaginatedRenders =
+    PaginatedResponse<papermake_registry::render_storage::types::RenderRecord>;
+
 /// Pagination metadata
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PaginationInfo {
     pub limit: u32,
     pub offset: u32,
@@ -51,12 +58,22 @@ impl<T> PaginatedResponse<T> {
 }
 
 /// Standard API response wrapper
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiResponse<T> {
     pub data: T,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
+
+// Concrete `ApiResponse<T>` instantiations used as OpenAPI response bodies.
+pub type PublishApiResponse = ApiResponse<crate::routes::templates::PublishResponse>;
+pub type TagsApiResponse = ApiResponse<Vec<String>>;
+pub type TemplateMetadataApiResponse =
+    ApiResponse<crate::routes::templates::TemplateMetadataResponse>;
+pub type RenderApiResponse = ApiResponse<crate::routes::render::RenderResponse>;
+pub type BatchAcceptedApiResponse = ApiResponse<crate::routes::render::BatchAccepted>;
+pub type JobViewApiResponse = ApiResponse<papermake_registry::batch::JobView>;
+pub type JobItemsApiResponse = ApiResponse<Vec<papermake_registry::batch::BatchItem>>;
 
 impl<T> ApiResponse<T> {
     pub fn new(data: T) -> Self {

@@ -20,6 +20,7 @@ use papermake_registry::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use utoipa::ToSchema;
 
 /// Query parameters for publishing a template
 #[derive(Debug, Deserialize)]
@@ -34,7 +35,7 @@ fn default_tag() -> String {
 }
 
 /// Response after successfully publishing a template
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PublishResponse {
     /// Success message
     pub message: String,
@@ -45,18 +46,19 @@ pub struct PublishResponse {
 }
 
 /// Simplified request for publishing a template with JSON payload
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PublishSimpleRequest {
     /// Main template file content (UTF-8 string)
     pub main_typ: String,
     /// Optional JSON schema as object
+    #[schema(value_type = Option<Object>)]
     pub schema: Option<serde_json::Value>,
     /// Template metadata
     pub metadata: TemplateMetadata,
 }
 
 /// Template metadata response for API
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TemplateMetadataResponse {
     /// Template name
     pub name: String,
@@ -87,6 +89,16 @@ pub fn router() -> Router<AppState> {
 
 /// Get the entrypoint (`main.typ`) source for a template reference, for the
 /// editor. GET /api/templates/{reference}/source (text/plain)
+#[utoipa::path(
+    get,
+    path = "/api/templates/{reference}/source",
+    tag = "templates",
+    params(("reference" = String, Path, description = "Template reference")),
+    responses(
+        (status = 200, description = "Entrypoint source", content_type = "text/plain", body = String),
+        (status = 404, description = "Template not found"),
+    ),
+)]
 pub async fn get_template_source(
     State(state): State<AppState>,
     Path(reference): Path<String>,
@@ -105,6 +117,19 @@ pub async fn get_template_source(
 /// - limit: Maximum number of templates to return (default: 50)
 /// - offset: Number of templates to skip (default: 0)
 /// - search: Search term to filter templates by name
+#[utoipa::path(
+    get,
+    path = "/api/templates",
+    tag = "templates",
+    params(
+        ("limit" = Option<u32>, Query, description = "Max templates to return (default 50)"),
+        ("offset" = Option<u32>, Query, description = "Templates to skip (default 0)"),
+        ("search" = Option<String>, Query, description = "Filter by name"),
+    ),
+    responses(
+        (status = 200, description = "Paginated templates", body = crate::models::api::PaginatedTemplates),
+    ),
+)]
 pub async fn list_templates(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
@@ -155,6 +180,20 @@ pub async fn list_templates(
 /// - metadata: JSON metadata with name and author (required)
 /// - schema: Optional JSON schema file
 /// - files[]: Additional template files (optional, multiple)
+#[utoipa::path(
+    post,
+    path = "/api/templates/{name}/publish",
+    tag = "templates",
+    params(
+        ("name" = String, Path, description = "Template name"),
+        ("tag" = Option<String>, Query, description = "Tag to publish (default `latest`)"),
+    ),
+    request_body(content_type = "multipart/form-data", description = "Fields: main_typ (file), metadata (JSON), schema (file, optional), files[path] (optional, multiple)"),
+    responses(
+        (status = 200, description = "Template published", body = crate::models::api::PublishApiResponse),
+        (status = 400, description = "Missing/invalid fields"),
+    ),
+)]
 pub async fn publish_template(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -255,6 +294,20 @@ pub async fn publish_template(
 ///   "schema": { "optional": "json schema object" },
 ///   "metadata": { "name": "template name", "author": "author email" }
 /// }
+#[utoipa::path(
+    post,
+    path = "/api/templates/{name}/publish-simple",
+    tag = "templates",
+    params(
+        ("name" = String, Path, description = "Template name"),
+        ("tag" = Option<String>, Query, description = "Tag to publish (default `latest`)"),
+    ),
+    request_body = PublishSimpleRequest,
+    responses(
+        (status = 200, description = "Template published", body = crate::models::api::PublishApiResponse),
+        (status = 400, description = "Invalid payload"),
+    ),
+)]
 pub async fn publish_template_simple(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -298,6 +351,16 @@ pub async fn publish_template_simple(
 /// List all tags for a specific template
 ///
 /// GET /api/templates/{name}/tags
+#[utoipa::path(
+    get,
+    path = "/api/templates/{name}/tags",
+    tag = "templates",
+    params(("name" = String, Path, description = "Template name")),
+    responses(
+        (status = 200, description = "Available tags", body = crate::models::api::TagsApiResponse),
+        (status = 404, description = "Template not found"),
+    ),
+)]
 pub async fn list_template_tags(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -322,6 +385,17 @@ pub async fn list_template_tags(
 /// - name:tag
 /// - namespace/name
 /// - namespace/name:tag
+#[utoipa::path(
+    get,
+    path = "/api/templates/{reference}",
+    tag = "templates",
+    params(("reference" = String, Path, description = "Template reference (name, name:tag, namespace/name[:tag])")),
+    responses(
+        (status = 200, description = "Template metadata", body = crate::models::api::TemplateMetadataApiResponse),
+        (status = 400, description = "Invalid reference"),
+        (status = 404, description = "Template not found"),
+    ),
+)]
 pub async fn get_template_metadata(
     State(state): State<AppState>,
     Path(reference): Path<String>,

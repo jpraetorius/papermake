@@ -9,6 +9,7 @@ use papermake_registry::{PdfStandard, RegistryError, RenderOptions, batch::Batch
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{error, info};
+use utoipa::ToSchema;
 
 use crate::{
     AppState,
@@ -22,26 +23,45 @@ pub fn router() -> Router<AppState> {
         .route("/{reference}/batch", post(batch_render))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RenderRequest {
+    /// Arbitrary JSON injected into the template as `sys.inputs.data`.
+    #[schema(value_type = Object)]
     pub data: serde_json::Value,
     /// Per-render retention override in days (`0` = keep forever). Falls back to
     /// the template default, then the global default, when absent.
     #[serde(default)]
     pub retain_days: Option<u32>,
-    /// Optional PDF standard for the output (`"1.7"`, `"a-2b"`, `"a-3b"`).
-    /// Absent = plain PDF 1.7.
+    /// Optional PDF standard for the output. One of `"1.7"` (default), `"2.0"`,
+    /// `"a-2a"`, `"a-2b"`, `"a-3a"`, `"a-3b"`, `"a-4"`, `"ua-1"`. Absent = plain
+    /// PDF 1.7.
     #[serde(default)]
+    #[schema(value_type = Option<String>, example = "a-2b")]
     pub pdf_standard: Option<PdfStandard>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RenderResponse {
     pub render_id: String,
     pub pdf_hash: String,
     pub duration_ms: u32,
 }
 
+/// Render a template to PDF synchronously and store the result.
+#[utoipa::path(
+    post,
+    path = "/api/render/{reference}",
+    tag = "render",
+    params(("reference" = String, Path, description = "Template reference, e.g. `invoice:latest`")),
+    request_body = RenderRequest,
+    responses(
+        (status = 200, description = "Render succeeded", body = crate::models::api::RenderApiResponse),
+        (status = 404, description = "Template not found"),
+        (status = 408, description = "Render timed out"),
+        (status = 422, description = "Template failed to compile"),
+        (status = 500, description = "Server or storage error"),
+    ),
+)]
 #[axum::debug_handler]
 pub async fn render_template(
     State(state): State<AppState>,
@@ -104,9 +124,10 @@ pub async fn render_template(
     Ok(Json(ApiResponse::new(response)))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct BatchInputRequest {
     /// Data payload for this render.
+    #[schema(value_type = Object)]
     pub data: serde_json::Value,
     /// Optional caller-chosen key echoed back on the result item, so results
     /// map to your own ids without relying on order.
@@ -114,7 +135,7 @@ pub struct BatchInputRequest {
     pub key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct BatchRenderRequest {
     /// One item per render.
     pub inputs: Vec<BatchInputRequest>,
@@ -122,14 +143,15 @@ pub struct BatchRenderRequest {
     /// (`0` = keep forever). Falls back to template/global defaults when absent.
     #[serde(default)]
     pub retain_days: Option<u32>,
-    /// Optional PDF standard applied to every render in the batch (`"1.7"`,
-    /// `"2.0"`, `"a-2a"`, `"a-2b"`, `"a-3a"`, `"a-3b"`, `"a-4"`, `"ua-1"`).
-    /// Absent = plain PDF 1.7.
+    /// Optional PDF standard applied to every render in the batch. One of
+    /// `"1.7"` (default), `"2.0"`, `"a-2a"`, `"a-2b"`, `"a-3a"`, `"a-3b"`,
+    /// `"a-4"`, `"ua-1"`. Absent = plain PDF 1.7.
     #[serde(default)]
+    #[schema(value_type = Option<String>, example = "a-2b")]
     pub pdf_standard: Option<PdfStandard>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BatchAccepted {
     /// Poll the job at `GET /api/jobs/{job_id}`.
     pub job_id: String,
@@ -141,6 +163,17 @@ pub struct BatchAccepted {
 /// job is durably enqueued in S3; a worker claims and renders it, updating the
 /// persisted job document. Poll `GET /api/jobs/{job_id}` and fetch each PDF by
 /// `render_id`.
+#[utoipa::path(
+    post,
+    path = "/api/render/{reference}/batch",
+    tag = "render",
+    params(("reference" = String, Path, description = "Template reference, e.g. `invoice:latest`")),
+    request_body = BatchRenderRequest,
+    responses(
+        (status = 202, description = "Batch accepted; poll the job", body = crate::models::api::BatchAcceptedApiResponse),
+        (status = 500, description = "Failed to enqueue the job"),
+    ),
+)]
 #[axum::debug_handler]
 pub async fn batch_render(
     State(state): State<AppState>,

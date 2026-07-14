@@ -21,6 +21,7 @@ mod config;
 mod error;
 mod i18n;
 mod models;
+mod openapi;
 mod routes;
 
 use config::ServerConfig;
@@ -184,6 +185,8 @@ fn create_router(state: AppState) -> Router {
     Router::new()
         // Health check
         .route("/health", get(health_check))
+        // Machine-readable OpenAPI 3.1 document (generated from the code)
+        .route("/api/openapi.json", get(openapi_json))
         // API routes
         .nest("/api", api_routes())
         // Server-side-rendered UI + embedded assets (dashboard, detail, htmx, /assets)
@@ -265,7 +268,20 @@ fn api_routes() -> Router<AppState> {
         .nest("/analytics", routes::analytics::router())
 }
 
+/// Serve the generated OpenAPI 3.1 document. Point any OpenAPI client at it
+/// (Scalar, Swagger UI, Redoc, code generators, …) — we don't bundle a UI.
+async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
+    use utoipa::OpenApi;
+    Json(openapi::ApiDoc::openapi())
+}
+
 /// Health check endpoint
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "health",
+    responses((status = 200, description = "Service status, version and timestamp", body = Object)),
+)]
 async fn health_check() -> Result<Json<Value>> {
     Ok(Json(json!({
         "status": "healthy",

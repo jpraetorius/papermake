@@ -22,6 +22,16 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Handler for GET /api/renders - List recent renders with pagination
+#[utoipa::path(
+    get,
+    path = "/api/renders",
+    tag = "renders",
+    params(
+        ("limit" = Option<u32>, Query, description = "Max records to return (default 50)"),
+        ("offset" = Option<u32>, Query, description = "Records to skip (default 0)"),
+    ),
+    responses((status = 200, description = "Recent renders", body = crate::models::api::PaginatedRenders)),
+)]
 #[axum::debug_handler]
 pub async fn list_renders(
     State(state): State<AppState>,
@@ -61,6 +71,18 @@ pub async fn list_renders(
     Ok(Json(response))
 }
 
+/// Download a rendered PDF by render id.
+#[utoipa::path(
+    get,
+    path = "/api/renders/{render_id}/pdf",
+    tag = "renders",
+    params(("render_id" = String, Path, description = "Render id")),
+    responses(
+        (status = 200, description = "PDF document", content_type = "application/pdf", body = [u8]),
+        (status = 404, description = "Render not found"),
+        (status = 422, description = "Render failed; no PDF available"),
+    ),
+)]
 #[axum::debug_handler]
 pub async fn get_render_pdf(
     State(state): State<AppState>,

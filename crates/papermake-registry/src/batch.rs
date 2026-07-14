@@ -32,7 +32,7 @@ pub struct BatchInput {
 }
 
 /// Overall (derived) job state, aggregated from the shard descriptors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     /// No shard claimed yet.
@@ -60,7 +60,7 @@ pub enum ShardStatus {
 }
 
 /// Per-item state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemStatus {
     Pending,
@@ -70,7 +70,7 @@ pub enum ItemStatus {
 
 /// Result of one input in the batch (persisted in a shard's `results.json`).
 /// `render_id` is content-addressed; fetch its PDF at `renders/{render_id}/pdf`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BatchItem {
     pub index: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,7 +131,7 @@ pub struct Shard {
 }
 
 /// Aggregated, read-time view of a job (status + counts derived from shards).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct JobView {
     pub job_id: String,
     pub reference: String,

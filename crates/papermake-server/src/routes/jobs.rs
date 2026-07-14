@@ -30,6 +30,16 @@ fn map_job_err(job_id: &str) -> impl Fn(RegistryError) -> ApiError + '_ {
 
 /// GET /api/jobs/{job_id} — poll a batch job's aggregated status and counts
 /// (derived from its shard descriptors). Cheap regardless of batch size.
+#[utoipa::path(
+    get,
+    path = "/api/jobs/{job_id}",
+    tag = "jobs",
+    params(("job_id" = String, Path, description = "Batch job id")),
+    responses(
+        (status = 200, description = "Aggregated job view", body = crate::models::api::JobViewApiResponse),
+        (status = 404, description = "Job not found"),
+    ),
+)]
 #[axum::debug_handler]
 pub async fn get_job(
     State(state): State<AppState>,
@@ -59,6 +69,20 @@ fn default_limit() -> usize {
 /// mapping (ordered by input index). Only completed shards' items appear; poll
 /// until the job is `completed` for the full set. Paginated so large batches
 /// (100k+) don't return one giant document.
+#[utoipa::path(
+    get,
+    path = "/api/jobs/{job_id}/items",
+    tag = "jobs",
+    params(
+        ("job_id" = String, Path, description = "Batch job id"),
+        ("offset" = Option<usize>, Query, description = "Items to skip (default 0)"),
+        ("limit" = Option<usize>, Query, description = "Max items to return (default 1000)"),
+    ),
+    responses(
+        (status = 200, description = "Item → render_id page", body = crate::models::api::JobItemsApiResponse),
+        (status = 404, description = "Job not found"),
+    ),
+)]
 #[axum::debug_handler]
 pub async fn get_job_items(
     State(state): State<AppState>,

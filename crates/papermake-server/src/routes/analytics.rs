@@ -28,7 +28,14 @@ pub fn router() -> Router<AppState> {
 }
 
 /// GET /api/analytics/volume?days=30
-async fn volume(
+#[utoipa::path(
+    get,
+    path = "/api/analytics/volume",
+    tag = "analytics",
+    params(("days" = Option<u32>, Query, description = "Window in days (default 30)")),
+    responses((status = 200, description = "Render volume over time", body = AnalyticsResult)),
+)]
+pub async fn volume(
     State(state): State<AppState>,
     Query(q): Query<DaysQuery>,
 ) -> ApiResult<Json<AnalyticsResult>> {
@@ -40,7 +47,13 @@ async fn volume(
 }
 
 /// GET /api/analytics/templates
-async fn templates(State(state): State<AppState>) -> ApiResult<Json<AnalyticsResult>> {
+#[utoipa::path(
+    get,
+    path = "/api/analytics/templates",
+    tag = "analytics",
+    responses((status = 200, description = "Total renders per template", body = AnalyticsResult)),
+)]
+pub async fn templates(State(state): State<AppState>) -> ApiResult<Json<AnalyticsResult>> {
     let result = state
         .registry
         .get_render_analytics(AnalyticsQuery::TemplateStats)
@@ -49,7 +62,14 @@ async fn templates(State(state): State<AppState>) -> ApiResult<Json<AnalyticsRes
 }
 
 /// GET /api/analytics/performance?days=30
-async fn performance(
+#[utoipa::path(
+    get,
+    path = "/api/analytics/performance",
+    tag = "analytics",
+    params(("days" = Option<u32>, Query, description = "Window in days (default 30)")),
+    responses((status = 200, description = "Average render duration over time", body = AnalyticsResult)),
+)]
+pub async fn performance(
     State(state): State<AppState>,
     Query(q): Query<DaysQuery>,
 ) -> ApiResult<Json<AnalyticsResult>> {
