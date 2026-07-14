@@ -88,8 +88,21 @@ async fn main() {
     let role = Role::from_env();
 
     let blob = S3Storage::from_env().expect("S3 configuration (S3_* env vars)");
-    if let Err(e) = blob.ensure_bucket().await {
-        error!("Failed to ensure S3 bucket: {}", e);
+    // Wait for the bucket before doing anything: on a fresh backend the store may
+    // not be ready the instant the healthcheck passes, and polling/listing a
+    // missing bucket surfaces as an opaque "validation error". Retry with backoff
+    // (bounded) so we never enter the loop against a non-existent bucket.
+    for attempt in 1..=30u32 {
+        match blob.ensure_bucket().await {
+            Ok(()) => break,
+            Err(e) if attempt == 30 => {
+                error!("Giving up ensuring S3 bucket after {attempt} attempts: {e}");
+            }
+            Err(e) => {
+                warn!("S3 bucket not ready (attempt {attempt}): {e}; retrying in 2s");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
     }
 
     // Worker id must be UNIQUE per process: it's the shard-claim owner and the
