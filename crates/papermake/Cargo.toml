@@ -27,6 +27,9 @@ async-trait = "0.1"
 tokio = { version = "1.52", features = ["fs", "sync", "rt"], optional = true }
 # Typst
 typst = "0.15"
+# Typst's global memoization cache. Pinned to the same version Typst links so we
+# share (and can bound) the same cache — must be kept in lockstep with `typst`.
+comemo = "0.5"
 typst-kit = { version = "0.15", default-features = false, features = [
     "embedded-fonts",
     "scan-fonts",

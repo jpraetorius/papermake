@@ -254,6 +254,20 @@ pub fn render_template_with_fonts_and_options(
     Ok(compile_world(&world, &pdf_opts))
 }
 
+/// How much of Typst's global `comemo` memoization cache to retain after a
+/// render. The cache is process-global and every `typst::compile` grows it, so
+/// a long-running render worker accumulates it unboundedly (observed: multi-GB,
+/// still held at idle) unless we evict.
+///
+/// `evict(max_age)` does NOT clear the cache — it only drops entries not
+/// *touched* within the last `max_age` evict cycles. So the warm, reusable work
+/// (template parse, font loading, data-independent layout) is touched on every
+/// render and survives; only per-input memoized results — keyed on that item's
+/// data, useless to the next item — age out. This is how Typst's `watch` mode
+/// keeps a warm cache while staying bounded. Raise this to retain work that's
+/// only reused sporadically (a few renders apart) at the cost of more memory.
+const COMEMO_EVICT_MAX_AGE: usize = 16;
+
 /// Compile a prepared world to a `RenderResult` (PDF bytes or diagnostics).
 fn compile_world(world: &PapermakeWorld, pdf_opts: &PdfOptions) -> RenderResult {
     let compile_result = typst::compile(world);
@@ -306,6 +320,9 @@ fn compile_world(world: &PapermakeWorld, pdf_opts: &PdfOptions) -> RenderResult 
             }
         }
     }
+
+    // Bound Typst's global memoization cache (see COMEMO_EVICT_MAX_AGE).
+    comemo::evict(COMEMO_EVICT_MAX_AGE);
 
     RenderResult {
         pdf,
@@ -404,6 +421,9 @@ pub fn render_template_with_cache(
             }
         }
     }
+
+    // Bound Typst's global memoization cache (see COMEMO_EVICT_MAX_AGE).
+    comemo::evict(COMEMO_EVICT_MAX_AGE);
 
     Ok(RenderResult {
         pdf,
