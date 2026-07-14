@@ -83,7 +83,26 @@ impl ContentAddress {
     /// overwrites the same `renders/{id}/…` keys) and safe to reprocess across
     /// workers. Consistent with the content-addressed blob/manifest store.
     pub fn content_render_id(manifest_hash: &str, data_hash: &str) -> String {
-        let name = format!("{manifest_hash}:{data_hash}");
+        Self::content_render_id_with_options(manifest_hash, data_hash, "")
+    }
+
+    /// Content-addressed render id that also discriminates on the PDF export
+    /// options. `opts_tag` is a stable string describing the requested output
+    /// (e.g. `"a-2b"`); an **empty** tag reproduces [`content_render_id`]
+    /// byte-for-byte, so plain renders keep their historical ids. A non-empty
+    /// tag yields a distinct id, so e.g. a PDF/A-2b render of the same
+    /// `(template, data)` never collides with — or resume-skips onto — the plain
+    /// PDF output.
+    pub fn content_render_id_with_options(
+        manifest_hash: &str,
+        data_hash: &str,
+        opts_tag: &str,
+    ) -> String {
+        let name = if opts_tag.is_empty() {
+            format!("{manifest_hash}:{data_hash}")
+        } else {
+            format!("{manifest_hash}:{data_hash}:opt={opts_tag}")
+        };
         uuid::Uuid::new_v5(&RENDER_ID_NAMESPACE, name.as_bytes()).to_string()
     }
 }
@@ -124,6 +143,39 @@ mod tests {
         assert_ne!(
             a,
             ContentAddress::content_render_id("sha256:other", "sha256:data")
+        );
+    }
+
+    #[test]
+    fn test_content_render_id_discriminates_on_options() {
+        let plain = ContentAddress::content_render_id("sha256:manifest", "sha256:data");
+        // An empty options tag must reproduce the historical id byte-for-byte.
+        assert_eq!(
+            plain,
+            ContentAddress::content_render_id_with_options("sha256:manifest", "sha256:data", "")
+        );
+        // A non-empty tag (e.g. PDF/A) must yield a distinct id so it never
+        // collides with — or resume-skips onto — the plain render output.
+        let pdfa = ContentAddress::content_render_id_with_options(
+            "sha256:manifest",
+            "sha256:data",
+            "a-2b",
+        );
+        assert_ne!(plain, pdfa);
+        // Distinct standards map to distinct ids, and each is stable.
+        let pdfa3 = ContentAddress::content_render_id_with_options(
+            "sha256:manifest",
+            "sha256:data",
+            "a-3b",
+        );
+        assert_ne!(pdfa, pdfa3);
+        assert_eq!(
+            pdfa,
+            ContentAddress::content_render_id_with_options(
+                "sha256:manifest",
+                "sha256:data",
+                "a-2b"
+            )
         );
     }
 

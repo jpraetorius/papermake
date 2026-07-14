@@ -55,29 +55,70 @@ pub struct RenderResult {
 
 /// PDF standard the exported document should conform to.
 ///
-/// Enforced by Typst's PDF exporter. The PDF/A variants produce archivable
-/// output; `A3b` additionally allows arbitrary embedded files, the basis for
-/// hybrid e-invoice formats such as ZUGFeRD/Factur-X. Serde names match the
-/// Typst CLI (`1.7`, `a-2b`, `a-3b`).
+/// Enforced by Typst's PDF exporter. The `V*` variants only pin the base PDF
+/// version; the PDF/A variants produce archivable output (the `b`/`a` suffix is
+/// the conformance level — `b` = visual reproduction, `a` = additionally
+/// tagged/accessible), and `A3*` allows arbitrary embedded files, the basis for
+/// hybrid e-invoice formats such as ZUGFeRD/Factur-X. `Ua1` is the PDF/UA-1
+/// accessibility standard. Serde names match the Typst CLI (`1.7`, `2.0`,
+/// `a-2b`, `a-3b`, `ua-1`, …).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PdfStandard {
     /// PDF 1.7 (the default)
     #[serde(rename = "1.7")]
     V1_7,
-    /// PDF/A-2b
+    /// PDF 2.0
+    #[serde(rename = "2.0")]
+    V2_0,
+    /// PDF/A-2a (archival, tagged/accessible)
+    #[serde(rename = "a-2a")]
+    A2a,
+    /// PDF/A-2b (archival)
     #[serde(rename = "a-2b")]
     A2b,
-    /// PDF/A-3b
+    /// PDF/A-3a (archival, tagged/accessible, allows embedded files)
+    #[serde(rename = "a-3a")]
+    A3a,
+    /// PDF/A-3b (archival, allows embedded files)
     #[serde(rename = "a-3b")]
     A3b,
+    /// PDF/A-4 (archival, based on PDF 2.0)
+    #[serde(rename = "a-4")]
+    A4,
+    /// PDF/UA-1 (universal accessibility). Requires the template to set a
+    /// document title (`#set document(title: [...])`); otherwise export fails
+    /// with "PDF/UA-1 error: missing document title".
+    #[serde(rename = "ua-1")]
+    Ua1,
+}
+
+impl PdfStandard {
+    /// The canonical Typst-CLI name for this standard (matches the serde name).
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            PdfStandard::V1_7 => "1.7",
+            PdfStandard::V2_0 => "2.0",
+            PdfStandard::A2a => "a-2a",
+            PdfStandard::A2b => "a-2b",
+            PdfStandard::A3a => "a-3a",
+            PdfStandard::A3b => "a-3b",
+            PdfStandard::A4 => "a-4",
+            PdfStandard::Ua1 => "ua-1",
+        }
+    }
 }
 
 impl From<PdfStandard> for typst_pdf::PdfStandard {
     fn from(standard: PdfStandard) -> Self {
         match standard {
             PdfStandard::V1_7 => typst_pdf::PdfStandard::V_1_7,
+            PdfStandard::V2_0 => typst_pdf::PdfStandard::V_2_0,
+            PdfStandard::A2a => typst_pdf::PdfStandard::A_2a,
             PdfStandard::A2b => typst_pdf::PdfStandard::A_2b,
+            PdfStandard::A3a => typst_pdf::PdfStandard::A_3a,
             PdfStandard::A3b => typst_pdf::PdfStandard::A_3b,
+            PdfStandard::A4 => typst_pdf::PdfStandard::A_4,
+            PdfStandard::Ua1 => typst_pdf::PdfStandard::Ua_1,
         }
     }
 }
@@ -357,6 +398,29 @@ pub fn render_template_with_cache(
     data: serde_json::Value,
     world_cache: Option<&mut PapermakeWorld>,
 ) -> Result<RenderResult> {
+    render_template_with_cache_and_options(
+        main_typ,
+        file_system,
+        data,
+        world_cache,
+        &RenderOptions::default(),
+    )
+}
+
+/// Render a cached template with explicit PDF export options.
+///
+/// Behaves like [`render_template_with_cache`], but lets the caller control PDF
+/// export (e.g. request PDF/A-3b) on the warm-world path used by batch rendering.
+/// The requested standards affect only PDF export — the cached, data-independent
+/// compilation work is reused across renders exactly as before.
+pub fn render_template_with_cache_and_options(
+    main_typ: String,
+    file_system: Arc<dyn RenderFileSystem>,
+    data: serde_json::Value,
+    world_cache: Option<&mut PapermakeWorld>,
+    options: &RenderOptions,
+) -> Result<RenderResult> {
+    let pdf_opts = pdf_options(options)?;
     let data_str = serde_json::to_string(&data)?;
 
     let world = match world_cache {
@@ -371,65 +435,14 @@ pub fn render_template_with_cache(
         }
         None => {
             // Create a new world if no cache is provided
-            return render_template(main_typ, file_system, &data);
+            return render_template_with_options(main_typ, file_system, &data, options);
         }
     };
 
-    // Compile with the updated world
-    let compile_result = typst::compile(world as &dyn World);
-
-    let mut errors = Vec::new();
-    let mut pdf = None;
-    let mut success = false;
-
-    match compile_result.output {
-        Ok(document) => match typst_pdf::pdf(&document, &PdfOptions::default()) {
-            Ok(pdf_bytes) => {
-                pdf = Some(pdf_bytes);
-                success = true;
-            }
-            Err(pdf_error) => {
-                errors.push(RenderError {
-                    message: format!("PDF generation failed: {:?}", pdf_error),
-                    start: 0,
-                    end: 0,
-                    file: None,
-                });
-            }
-        },
-        Err(diagnostics) => {
-            for diagnostic in diagnostics {
-                let span = diagnostic.span;
-                let mut render_error = RenderError {
-                    message: diagnostic.message.to_string(),
-                    start: 0,
-                    end: 0,
-                    file: None,
-                };
-
-                if let Some(id) = span.id()
-                    && let Ok(_source) = world.source(id)
-                {
-                    render_error.file = Some(format!("{:?}", id));
-                    if let Some(range) = world.range(span) {
-                        render_error.start = range.start;
-                        render_error.end = range.end;
-                    }
-                }
-
-                errors.push(render_error);
-            }
-        }
-    }
-
-    // Bound Typst's global memoization cache (see COMEMO_EVICT_MAX_AGE).
-    comemo::evict(COMEMO_EVICT_MAX_AGE);
-
-    Ok(RenderResult {
-        pdf,
-        errors,
-        success,
-    })
+    // Compile the warm world and export with the requested options. Sharing
+    // `compile_world` keeps the export path (and comemo eviction) identical to
+    // the non-cached renders.
+    Ok(compile_world(world, &pdf_opts))
 }
 
 #[cfg(test)]
@@ -473,6 +486,59 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
         // typst-pdf writes pdfaid:part / pdfaid:conformance into the XMP metadata.
         assert!(contains(&pdf, b"pdfaid"));
+    }
+
+    #[test]
+    fn every_supported_standard_renders() {
+        // Each standard we expose must actually produce a PDF (guards against a
+        // typst-pdf variant that rejects our template). The accessibility
+        // profiles (PDF/UA-1, and the tagged PDF/A-*a levels for full
+        // conformance) require a document title, so the template sets one.
+        let template = "#set document(title: [Test])\nHello #data.name!".to_string();
+        for std in [
+            PdfStandard::V1_7,
+            PdfStandard::V2_0,
+            PdfStandard::A2a,
+            PdfStandard::A2b,
+            PdfStandard::A3a,
+            PdfStandard::A3b,
+            PdfStandard::A4,
+            PdfStandard::Ua1,
+        ] {
+            let result = render_template_with_options(
+                template.clone(),
+                Arc::new(InMemoryFileSystem::new()),
+                &serde_json::json!({ "name": "World" }),
+                &RenderOptions {
+                    pdf_standards: vec![std],
+                },
+            )
+            .unwrap();
+            assert!(
+                result.success,
+                "render for {} failed: {:?}",
+                std.as_str(),
+                result.errors
+            );
+            assert!(result.pdf.unwrap().starts_with(b"%PDF"));
+        }
+    }
+
+    #[test]
+    fn pdf_standard_as_str_matches_serde() {
+        for std in [
+            PdfStandard::V1_7,
+            PdfStandard::V2_0,
+            PdfStandard::A2a,
+            PdfStandard::A2b,
+            PdfStandard::A3a,
+            PdfStandard::A3b,
+            PdfStandard::A4,
+            PdfStandard::Ua1,
+        ] {
+            let serde_name = serde_json::to_string(&std).unwrap();
+            assert_eq!(serde_name, format!("\"{}\"", std.as_str()));
+        }
     }
 
     #[test]

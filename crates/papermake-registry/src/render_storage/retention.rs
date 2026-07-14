@@ -290,6 +290,7 @@ mod tests {
             reference: "invoice:latest".to_string(),
             total: 1,
             retain_days: None,
+            pdf_standards: Vec::new(),
             shard_size: 500,
             num_shards: 1,
             created_at: created.midnight().assume_utc(),

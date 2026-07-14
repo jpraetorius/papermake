@@ -44,6 +44,22 @@ struct BatchCtx {
     retain_days: u32,
     entrypoint_content: String,
     file_system: Arc<dyn papermake::RenderFileSystem>,
+    /// PDF export options applied to every item in the batch.
+    options: RenderOptions,
+}
+
+/// Stable, order-independent tag describing a render's PDF export options, used
+/// to discriminate content-addressed render ids. Empty for plain PDF 1.7 (so
+/// plain renders keep their historical ids); non-empty (e.g. `"a-2b"`) yields a
+/// distinct id so PDF/A output never collides with the plain render of the same
+/// `(template, data)`.
+fn render_options_tag(options: &RenderOptions) -> String {
+    if options.pdf_standards.is_empty() {
+        return String::new();
+    }
+    let mut names: Vec<&'static str> = options.pdf_standards.iter().map(|s| s.as_str()).collect();
+    names.sort_unstable();
+    names.join("+")
 }
 
 /// Default global output retention when neither the render nor the template
@@ -889,6 +905,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let reference = ctx.reference.clone();
         let entrypoint_content = ctx.entrypoint_content.clone();
         let file_system = ctx.file_system.clone();
+        let options = ctx.options.clone();
 
         tracing::debug!(
             reference = %reference,
@@ -905,11 +922,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 "cached typst blocking render started",
             );
 
-            let result = papermake::render_template_with_cache(
+            let result = papermake::render_template_with_cache_and_options(
                 entrypoint_content,
                 file_system,
                 data,
                 Some(&mut world),
+                &options,
             );
 
             match &result {
@@ -989,7 +1007,9 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         inputs: &[serde_json::Value],
         retain_override: Option<u32>,
     ) -> Result<Vec<String>, RegistryError> {
-        let (ctx, mut world) = self.prepare_batch(reference, retain_override).await?;
+        let (ctx, mut world) = self
+            .prepare_batch(reference, retain_override, RenderOptions::default())
+            .await?;
         let mut render_ids = Vec::with_capacity(inputs.len());
         for data in inputs {
             let (render_id, _success) = self.render_one(&ctx, &mut world, data).await?;
@@ -1007,6 +1027,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         reference: &str,
         inputs: &[BatchInput],
         retain_override: Option<u32>,
+        options: &RenderOptions,
     ) -> Result<BatchJob, RegistryError> {
         let job_id = uuid::Uuid::now_v7().to_string();
         let total = inputs.len();
@@ -1044,6 +1065,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             reference: reference.to_string(),
             total,
             retain_days: retain_override,
+            pdf_standards: options.pdf_standards.clone(),
             shard_size,
             num_shards,
             created_at: now,
@@ -1201,7 +1223,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         // Heartbeat/persist every N items to bound writes and keep the lease fresh.
         const FLUSH_EVERY: usize = 20;
 
-        let (ctx, mut world) = match self.prepare_batch(&meta.reference, meta.retain_days).await {
+        let options = RenderOptions {
+            pdf_standards: meta.pdf_standards.clone(),
+        };
+        let (ctx, mut world) = match self
+            .prepare_batch(&meta.reference, meta.retain_days, options)
+            .await
+        {
             Ok(prepared) => prepared,
             Err(e) => {
                 // Template couldn't be loaded — the whole shard fails.
@@ -1225,7 +1253,11 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             // output (resume) — matches what `render_one` would produce.
             let data_bytes = serde_json::to_vec(&input.data)?;
             let data_hash = ContentAddress::hash(&data_bytes);
-            let det_id = ContentAddress::content_render_id(&ctx.manifest_hash, &data_hash);
+            let det_id = ContentAddress::content_render_id_with_options(
+                &ctx.manifest_hash,
+                &data_hash,
+                &render_options_tag(&ctx.options),
+            );
 
             let (render_id, success) = if self
                 .storage
@@ -1392,6 +1424,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         &self,
         reference: &str,
         retain_override: Option<u32>,
+        options: RenderOptions,
     ) -> Result<(BatchCtx, papermake::PapermakeWorld), RegistryError> {
         let parsed_ref = Reference::parse(reference)?;
         let template_name = parsed_ref.name.clone();
@@ -1458,6 +1491,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 retain_days,
                 entrypoint_content,
                 file_system,
+                options,
             },
             world,
         ))
@@ -1473,9 +1507,14 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     ) -> Result<(String, bool), RegistryError> {
         let data_bytes = serde_json::to_vec(data)?;
         let data_hash = ContentAddress::hash(&data_bytes);
-        // Content-addressed id: identical (template version, data) => same id, so
-        // re-processing an item is idempotent (overwrites the same keys).
-        let render_id = ContentAddress::content_render_id(&ctx.manifest_hash, &data_hash);
+        // Content-addressed id: identical (template version, data, options) =>
+        // same id, so re-processing an item is idempotent (overwrites the same
+        // keys). The options tag keeps PDF/A output distinct from plain PDF.
+        let render_id = ContentAddress::content_render_id_with_options(
+            &ctx.manifest_hash,
+            &data_hash,
+            &render_options_tag(&ctx.options),
+        );
         self.storage
             .put(&ContentAddress::render_data_key(&render_id), data_bytes)
             .await
@@ -1861,11 +1900,16 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let data_bytes = serde_json::to_vec(data)?;
         let data_hash = ContentAddress::hash(&data_bytes);
         let manifest_res = self.resolve(reference).await;
+        let opts_tag = render_options_tag(options);
         let render_id = match &manifest_res {
-            Ok(manifest_hash) => ContentAddress::content_render_id(manifest_hash, &data_hash),
+            Ok(manifest_hash) => {
+                ContentAddress::content_render_id_with_options(manifest_hash, &data_hash, &opts_tag)
+            }
             // Resolution failed: still record a deterministic failure id keyed by
             // the reference so repeated identical failures dedupe too.
-            Err(_) => ContentAddress::content_render_id(reference, &data_hash),
+            Err(_) => {
+                ContentAddress::content_render_id_with_options(reference, &data_hash, &opts_tag)
+            }
         };
         tracing::debug!(
             reference = %reference,
@@ -3488,7 +3532,7 @@ Hello #data.name"#
 
         // Server enqueues: metadata + two pending shards; nothing claimed yet.
         let job = registry
-            .enqueue_batch_job("batch:latest", &inputs, None)
+            .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
             .await
             .unwrap();
         let job_id = job.job_id.clone();
@@ -3538,6 +3582,80 @@ Hello #data.name"#
     }
 
     #[tokio::test]
+    async fn test_batch_render_pdf_a_distinct_from_plain() {
+        use crate::batch::BatchInput;
+        use papermake::PdfStandard;
+
+        let storage = MemoryStorage::new();
+        let render_storage = crate::render_storage::MemoryRenderStorage::new();
+        let registry = Registry::new(storage, render_storage);
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+
+        let data = serde_json::json!({ "name": "A" });
+
+        // Pre-render the SAME data as a plain PDF via the sync path. Without the
+        // options-discriminated render id, the PDF/A batch below would resume-skip
+        // onto this plain output and never actually render PDF/A.
+        let plain = registry
+            .render_and_store("batch:latest", &data)
+            .await
+            .unwrap();
+        let plain_pdf = registry.get_render_pdf(&plain.render_id).await.unwrap();
+        assert!(
+            !contains(&plain_pdf, b"pdfaid"),
+            "sync render should be plain"
+        );
+
+        // Enqueue + run a PDF/A-3b batch over the same input.
+        let options = RenderOptions {
+            pdf_standards: vec![PdfStandard::A3b],
+        };
+        let inputs = vec![BatchInput {
+            data: data.clone(),
+            key: None,
+        }];
+        let job = registry
+            .enqueue_batch_job("batch:latest", &inputs, None, &options)
+            .await
+            .unwrap();
+        assert_eq!(job.pdf_standards, vec![PdfStandard::A3b]);
+
+        let now = time::OffsetDateTime::now_utc();
+        while let Some((meta, shard, sinputs)) =
+            registry.claim_next_shard("w", 120, 3, now).await.unwrap()
+        {
+            registry
+                .run_claimed_shard(meta, shard, sinputs, 120)
+                .await
+                .unwrap();
+        }
+
+        let items = registry.list_job_items(&job.job_id, 0, 10).await.unwrap();
+        assert_eq!(items.len(), 1);
+        let batch_id = items[0].render_id.as_ref().expect("render_id set");
+        // The PDF/A batch got a DISTINCT id from the plain sync render...
+        assert_ne!(
+            batch_id, &plain.render_id,
+            "PDF/A output must not collide with the plain render id"
+        );
+        // ...and actually produced PDF/A-conformant output.
+        let batch_pdf = registry.get_render_pdf(batch_id).await.unwrap();
+        assert!(batch_pdf.starts_with(b"%PDF"));
+        assert!(
+            contains(&batch_pdf, b"pdfaid"),
+            "batch output should declare PDF/A conformance"
+        );
+    }
+
+    /// Byte-substring search, for asserting on raw PDF bytes.
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[tokio::test]
     async fn test_batch_shard_orphan_reclaim_and_resume() {
         use crate::batch::{BatchInput, JobStatus};
 
@@ -3560,7 +3678,7 @@ Hello #data.name"#
             },
         ];
         let job = registry
-            .enqueue_batch_job("batch:latest", &inputs, None)
+            .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
             .await
             .unwrap();
         let job_id = job.job_id.clone();
@@ -3634,7 +3752,7 @@ Hello #data.name"#
             })
             .collect();
         let job = registry
-            .enqueue_batch_job("batch:latest", &inputs, None)
+            .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
             .await
             .unwrap();
         let job_id = job.job_id.clone();

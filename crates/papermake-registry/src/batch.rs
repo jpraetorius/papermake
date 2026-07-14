@@ -18,6 +18,7 @@
 //! Overall job status/counts are **derived** by aggregating the shard
 //! descriptors (no single contended document); PDFs are fetched per `render_id`.
 
+use papermake::PdfStandard;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -89,6 +90,10 @@ pub struct BatchJob {
     /// Per-batch retention override (days) captured at submit time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain_days: Option<u32>,
+    /// PDF export standards applied to every render in the batch (empty = plain
+    /// PDF 1.7). Captured at submit time so all shards render consistently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pdf_standards: Vec<PdfStandard>,
     pub shard_size: usize,
     pub num_shards: usize,
     #[serde(with = "time::serde::rfc3339")]

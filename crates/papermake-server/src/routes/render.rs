@@ -122,6 +122,11 @@ pub struct BatchRenderRequest {
     /// (`0` = keep forever). Falls back to template/global defaults when absent.
     #[serde(default)]
     pub retain_days: Option<u32>,
+    /// Optional PDF standard applied to every render in the batch (`"1.7"`,
+    /// `"2.0"`, `"a-2a"`, `"a-2b"`, `"a-3a"`, `"a-3b"`, `"a-4"`, `"ua-1"`).
+    /// Absent = plain PDF 1.7.
+    #[serde(default)]
+    pub pdf_standard: Option<PdfStandard>,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,6 +151,7 @@ pub async fn batch_render(
         reference = %reference,
         total = request.inputs.len(),
         retain_days = ?request.retain_days,
+        pdf_standard = ?request.pdf_standard,
         "batch render request accepted",
     );
 
@@ -158,11 +164,15 @@ pub async fn batch_render(
         })
         .collect();
 
+    let options = RenderOptions {
+        pdf_standards: request.pdf_standard.map(|s| vec![s]).unwrap_or_default(),
+    };
+
     // Enqueue only — a worker picks it up. Servers never render batches, so
     // scaling the API is safe.
     let job = state
         .registry
-        .enqueue_batch_job(&reference, &inputs, request.retain_days)
+        .enqueue_batch_job(&reference, &inputs, request.retain_days, &options)
         .await
         .map_err(|e| {
             error!(
