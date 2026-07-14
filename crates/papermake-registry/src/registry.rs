@@ -23,13 +23,13 @@ fn is_font_path(path: &str) -> bool {
 
 use crate::{
     address::ContentAddress,
-    batch::{BatchInput, BatchItem, BatchJob, ItemStatus, JobStatus},
+    batch::{BatchInput, BatchItem, BatchJob, ItemStatus, JobView, Shard, ShardStatus},
     bundle::{TemplateBundle, TemplateInfo},
     error::{RegistryError, StorageError},
     manifest::Manifest,
     reference::Reference,
     render_storage::{
-        AnalyticsQuery, AnalyticsResult, RenderRecord, RenderStorage, RenderStorageError,
+        AnalyticsQuery, AnalyticsResult, RenderRecord, RenderStorage, RenderStorageError, layout,
     },
     storage::BlobStorage,
 };
@@ -57,6 +57,9 @@ pub const DEFAULT_MAX_CONCURRENT_RENDERS: usize = 10;
 /// Default wall-clock timeout for a render, including queue wait.
 pub const DEFAULT_RENDER_TIMEOUT_SECONDS: u64 = 300;
 
+/// Default number of items per batch shard (the unit of work a worker claims).
+pub const DEFAULT_SHARD_SIZE: usize = 500;
+
 /// Core registry for template publishing and resolution
 pub struct Registry<S: BlobStorage, R: RenderStorage> {
     storage: Arc<S>,
@@ -67,6 +70,8 @@ pub struct Registry<S: BlobStorage, R: RenderStorage> {
     render_semaphore: Arc<Semaphore>,
     /// Wall-clock timeout for acquiring a render slot and waiting for Typst.
     render_timeout: Duration,
+    /// Items per shard when enqueuing a batch (the unit of work workers claim).
+    batch_shard_size: usize,
 }
 
 /// Result of a render operation with tracking
@@ -104,6 +109,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage> Registry<S, R> {
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
+            batch_shard_size: DEFAULT_SHARD_SIZE,
         }
     }
 }
@@ -118,6 +124,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
+            batch_shard_size: DEFAULT_SHARD_SIZE,
         }
     }
 
@@ -129,12 +136,20 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
+            batch_shard_size: DEFAULT_SHARD_SIZE,
         }
     }
 
     /// Set the global default output retention (days); `0` = keep forever.
     pub fn with_retention_days(mut self, days: u32) -> Self {
         self.default_retention_days = days;
+        self
+    }
+
+    /// Set the batch shard size (items per shard). Larger shards = fewer
+    /// descriptors but coarser parallelism/reclaim granularity.
+    pub fn with_shard_size(mut self, shard_size: usize) -> Self {
+        self.batch_shard_size = shard_size.max(1);
         self
     }
 
@@ -172,6 +187,7 @@ impl<S: BlobStorage + 'static> Registry<S, crate::render_storage::MemoryRenderSt
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
+            batch_shard_size: DEFAULT_SHARD_SIZE,
         }
     }
 }
@@ -982,9 +998,10 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         Ok(render_ids)
     }
 
-    /// Enqueue a batch job: persist its inputs and a `queued` job document, and
-    /// return the job (for its `job_id`). The server calls this; a worker picks
-    /// it up via [`Registry::claim_next_job`]. Does no rendering.
+    /// Enqueue a batch job: write immutable job metadata and split the inputs
+    /// into fixed-size shards, each with its own `inputs.json` and a `pending`
+    /// shard descriptor. Returns the job metadata (for its `job_id`). Workers
+    /// pick up shards via [`Registry::claim_next_shard`]. Does no rendering.
     pub async fn enqueue_batch_job(
         &self,
         reference: &str,
@@ -992,220 +1009,368 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         retain_override: Option<u32>,
     ) -> Result<BatchJob, RegistryError> {
         let job_id = uuid::Uuid::now_v7().to_string();
-
-        // Persist the inputs (the worker is a separate process).
-        let inputs_bytes = serde_json::to_vec(inputs)?;
-        self.storage
-            .put(
-                &crate::render_storage::layout::job_inputs_key(&job_id),
-                inputs_bytes,
-            )
-            .await
-            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
-
+        let total = inputs.len();
+        let shard_size = self.batch_shard_size.max(1);
+        let num_shards = total.div_ceil(shard_size);
         let now = time::OffsetDateTime::now_utc();
+
+        // Write each shard's inputs + a pending descriptor.
+        for k in 0..num_shards {
+            let start = k * shard_size;
+            let len = (total - start).min(shard_size);
+            let inputs_bytes = serde_json::to_vec(&inputs[start..start + len])?;
+            self.storage
+                .put(&layout::shard_inputs_key(&job_id, k), inputs_bytes)
+                .await
+                .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+            self.put_shard(&Shard {
+                job_id: job_id.clone(),
+                index: k,
+                start,
+                len,
+                status: ShardStatus::Pending,
+                owner: None,
+                lease_expires_at: None,
+                done: 0,
+                failed: 0,
+                attempts: 0,
+                updated_at: now,
+            })
+            .await?;
+        }
+
         let job = BatchJob {
             job_id,
             reference: reference.to_string(),
-            status: JobStatus::Queued,
-            total: inputs.len(),
-            done: 0,
-            failed: 0,
+            total,
             retain_days: retain_override,
-            owner: None,
-            lease_expires_at: None,
-            attempts: 0,
+            shard_size,
+            num_shards,
             created_at: now,
-            updated_at: now,
-            items: inputs
-                .iter()
-                .enumerate()
-                .map(|(index, input)| BatchItem {
-                    index,
-                    key: input.key.clone(),
-                    render_id: None,
-                    status: ItemStatus::Pending,
-                })
-                .collect(),
         };
-        self.put_job(&job).await?;
+        let bytes = serde_json::to_vec(&job)?;
+        self.storage
+            .put(&layout::job_key(&job.job_id), bytes)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
         Ok(job)
     }
 
-    /// Claim the next processable batch job for `worker_id`, or `None`.
+    /// Claim the next processable **shard** (across all jobs) for `worker_id`,
+    /// or `None`. A shard is claimable when `Pending`, or `Running` with an
+    /// expired lease (its owner is gone). Claiming bumps `attempts`, sets owner +
+    /// a fresh lease, persists, then re-reads to confirm ownership. Shards are
+    /// tried in a per-worker pseudo-random order so workers spread out.
     ///
-    /// A job is claimable when it is `Queued`, or `Running` with an **expired
-    /// lease** (its previous owner is gone). Claiming bumps `attempts`, sets
-    /// owner + a fresh lease (`now + lease_ttl_secs`), and persists. A job that
-    /// has already been attempted `max_attempts` times is marked `Failed` and
-    /// skipped (poison-job guard). Also returns the job's inputs.
-    ///
-    /// Safe because only one worker is active at a time (no atomic claim on the
-    /// backend); the lease is what makes a dead worker's job reclaimable.
-    pub async fn claim_next_job(
+    /// No compare-and-set is needed: a lost claim race is harmless because render
+    /// output is content-addressed (idempotent). Returns the job metadata, the
+    /// claimed shard, and that shard's inputs.
+    pub async fn claim_next_shard(
         &self,
         worker_id: &str,
         lease_ttl_secs: u64,
         max_attempts: u32,
         now: time::OffsetDateTime,
-    ) -> Result<Option<(BatchJob, Vec<BatchInput>)>, RegistryError> {
+    ) -> Result<Option<(BatchJob, Shard, Vec<BatchInput>)>, RegistryError> {
         let keys = self
             .storage
-            .list_keys(crate::render_storage::layout::JOBS_PREFIX)
+            .list_keys(layout::JOBS_PREFIX)
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
-        for key in keys {
-            if !key.ends_with("/job.json") {
-                continue;
-            }
+        // Spread workers across shards: order candidates by a per-worker hash.
+        let mut shard_keys: Vec<String> = keys
+            .into_iter()
+            .filter(|k| k.ends_with("/shard.json"))
+            .collect();
+        shard_keys.sort_by_key(|k| Self::spread_hash(worker_id, k));
+
+        for key in shard_keys {
             let Ok(bytes) = self.storage.get(&key).await else {
                 continue;
             };
-            let Ok(mut job) = serde_json::from_slice::<BatchJob>(&bytes) else {
+            let Ok(mut shard) = serde_json::from_slice::<Shard>(&bytes) else {
                 continue;
             };
 
-            let claimable = match job.status {
-                JobStatus::Queued => true,
-                JobStatus::Running => job.lease_expires_at.is_none_or(|exp| exp < now),
-                JobStatus::Completed | JobStatus::Failed => false,
+            let claimable = match shard.status {
+                ShardStatus::Pending => true,
+                ShardStatus::Running => shard.lease_expires_at.is_none_or(|exp| exp < now),
+                ShardStatus::Done | ShardStatus::Failed => false,
             };
             if !claimable {
                 continue;
             }
 
-            // Poison-job guard: give up after too many attempts.
-            if job.attempts >= max_attempts {
-                job.status = JobStatus::Failed;
-                job.owner = None;
-                job.lease_expires_at = None;
-                job.updated_at = now;
-                self.put_job(&job).await?;
+            // Poison guard: give up on a shard after too many claims.
+            if shard.attempts >= max_attempts {
+                shard.status = ShardStatus::Failed;
+                shard.owner = None;
+                shard.lease_expires_at = None;
+                shard.updated_at = now;
+                let _ = self.put_shard(&shard).await;
                 continue;
             }
 
-            job.status = JobStatus::Running;
-            job.owner = Some(worker_id.to_string());
-            job.lease_expires_at = Some(now + time::Duration::seconds(lease_ttl_secs as i64));
-            job.attempts += 1;
-            job.updated_at = now;
-            self.put_job(&job).await?;
+            // Optimistic claim, then read-back to confirm we still own it.
+            shard.status = ShardStatus::Running;
+            shard.owner = Some(worker_id.to_string());
+            shard.lease_expires_at = Some(now + time::Duration::seconds(lease_ttl_secs as i64));
+            shard.attempts += 1;
+            shard.updated_at = now;
+            self.put_shard(&shard).await?;
+            if let Ok(rb) = self.storage.get(&key).await
+                && let Ok(current) = serde_json::from_slice::<Shard>(&rb)
+                && current.owner.as_deref() != Some(worker_id)
+            {
+                // A later write landed after ours — that worker owns it now.
+                continue;
+            }
 
-            let inputs = self.load_job_inputs(&job.job_id).await?;
-            return Ok(Some((job, inputs)));
+            let meta = self.get_job_meta(&shard.job_id).await?;
+            let inputs = self.load_shard_inputs(&shard.job_id, shard.index).await?;
+            return Ok(Some((meta, shard, inputs)));
         }
         Ok(None)
     }
 
-    /// Run a claimed job to completion, **resuming** where a previous attempt
-    /// left off (items that already have a `render_id` are skipped). The
-    /// persisted document is updated as it goes (with lease heartbeats) and a
-    /// final `Completed` document is written, so a client polling afterwards
-    /// gets the full result.
-    pub async fn run_claimed_job(
+    /// Persist a shard descriptor.
+    async fn put_shard(&self, shard: &Shard) -> Result<(), RegistryError> {
+        let bytes = serde_json::to_vec(shard)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))?;
+        self.storage
+            .put(&layout::shard_key(&shard.job_id, shard.index), bytes)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))
+    }
+
+    /// Read a job's immutable metadata document.
+    async fn get_job_meta(&self, job_id: &str) -> Result<BatchJob, RegistryError> {
+        let bytes = self
+            .storage
+            .get(&layout::job_key(job_id))
+            .await
+            .map_err(|e| Self::map_blob_not_found(e, job_id))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))
+    }
+
+    /// Load one shard's slice of the batch inputs.
+    async fn load_shard_inputs(
         &self,
-        mut job: BatchJob,
+        job_id: &str,
+        shard_index: usize,
+    ) -> Result<Vec<BatchInput>, RegistryError> {
+        let bytes = self
+            .storage
+            .get(&layout::shard_inputs_key(job_id, shard_index))
+            .await
+            .map_err(|e| Self::map_blob_not_found(e, job_id))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))
+    }
+
+    /// Stable per-(worker, key) hash used to spread workers across shards.
+    fn spread_hash(worker_id: &str, key: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        worker_id.hash(&mut h);
+        key.hash(&mut h);
+        h.finish()
+    }
+
+    /// Run a claimed shard to completion, **resuming** items whose (content-
+    /// addressed) output already exists. Renders each item with a warm world,
+    /// heartbeats the lease, then writes the shard's `results.json` and marks it
+    /// `done`. Safe to run concurrently with another worker on the same shard:
+    /// identical outputs, deduped analytics.
+    pub async fn run_claimed_shard(
+        &self,
+        meta: BatchJob,
+        mut shard: Shard,
         inputs: Vec<BatchInput>,
         lease_ttl_secs: u64,
     ) -> Result<(), RegistryError> {
         // Heartbeat/persist every N items to bound writes and keep the lease fresh.
         const FLUSH_EVERY: usize = 20;
 
-        let (ctx, mut world) = match self.prepare_batch(&job.reference, job.retain_days).await {
+        let (ctx, mut world) = match self.prepare_batch(&meta.reference, meta.retain_days).await {
             Ok(prepared) => prepared,
             Err(e) => {
-                // The template couldn't be loaded at all — the whole job fails.
-                for item in &mut job.items {
-                    if item.render_id.is_none() {
-                        item.status = ItemStatus::Failed;
-                    }
-                }
-                job.failed = job.items.iter().filter(|i| i.render_id.is_none()).count();
-                job.status = JobStatus::Failed;
-                job.owner = None;
-                job.lease_expires_at = None;
-                job.updated_at = time::OffsetDateTime::now_utc();
-                self.put_job(&job).await?;
+                // Template couldn't be loaded — the whole shard fails.
+                shard.done = 0;
+                shard.failed = shard.len;
+                shard.status = ShardStatus::Failed;
+                shard.owner = None;
+                shard.lease_expires_at = None;
+                shard.updated_at = time::OffsetDateTime::now_utc();
+                self.put_shard(&shard).await?;
                 return Err(e);
             }
         };
 
-        for (i, input) in inputs.iter().enumerate() {
-            // Resume: skip items already rendered by a previous attempt.
-            if job.items[i].render_id.is_some() {
-                continue;
-            }
+        let mut items: Vec<BatchItem> = Vec::with_capacity(inputs.len());
+        let mut done = 0usize;
+        let mut failed = 0usize;
+        for (j, input) in inputs.iter().enumerate() {
+            let global_index = shard.start + j;
+            // Compute the item's content-addressed id to check for an existing
+            // output (resume) — matches what `render_one` would produce.
+            let data_bytes = serde_json::to_vec(&input.data)?;
+            let data_hash = ContentAddress::hash(&data_bytes);
+            let det_id = ContentAddress::content_render_id(&ctx.manifest_hash, &data_hash);
 
-            let (item_status, is_failure) =
-                match self.render_one(&ctx, &mut world, &input.data).await {
-                    Ok((render_id, success)) => {
-                        job.items[i].render_id = Some(render_id);
-                        if success {
-                            (ItemStatus::Success, false)
-                        } else {
-                            (ItemStatus::Failed, true)
-                        }
-                    }
-                    // Storage error persisting this item — count it failed, keep going.
-                    Err(_) => (ItemStatus::Failed, true),
-                };
-            job.items[i].status = item_status;
-            if is_failure {
-                job.failed += 1;
+            let (render_id, success) = if self
+                .storage
+                .exists(&ContentAddress::render_meta_key(&det_id))
+                .await
+                .unwrap_or(false)
+            {
+                // Already processed by a prior attempt: reuse its outcome.
+                let ok = self.read_meta_success(&det_id).await.unwrap_or(false);
+                (det_id, ok)
             } else {
-                job.done += 1;
-            }
+                match self.render_one(&ctx, &mut world, &input.data).await {
+                    Ok((rid, ok)) => (rid, ok),
+                    // Storage error persisting this item — count it failed, keep going.
+                    Err(_) => (det_id, false),
+                }
+            };
 
-            let processed = job.done + job.failed;
-            if processed.is_multiple_of(FLUSH_EVERY) {
-                job.lease_expires_at = Some(
-                    time::OffsetDateTime::now_utc()
-                        + time::Duration::seconds(lease_ttl_secs as i64),
-                );
-                job.updated_at = time::OffsetDateTime::now_utc();
-                let _ = self.put_job(&job).await;
+            if success {
+                done += 1;
+            } else {
+                failed += 1;
+            }
+            items.push(BatchItem {
+                index: global_index,
+                key: input.key.clone(),
+                render_id: Some(render_id),
+                status: if success {
+                    ItemStatus::Success
+                } else {
+                    ItemStatus::Failed
+                },
+            });
+
+            if (done + failed).is_multiple_of(FLUSH_EVERY) {
+                let now = time::OffsetDateTime::now_utc();
+                shard.done = done;
+                shard.failed = failed;
+                shard.lease_expires_at = Some(now + time::Duration::seconds(lease_ttl_secs as i64));
+                shard.updated_at = now;
+                let _ = self.put_shard(&shard).await;
             }
         }
 
-        job.status = JobStatus::Completed;
-        job.owner = None;
-        job.lease_expires_at = None;
-        job.updated_at = time::OffsetDateTime::now_utc();
-        self.put_job(&job).await?;
+        // Persist per-item results, then mark the shard done.
+        let results_bytes = serde_json::to_vec(&items)?;
+        self.storage
+            .put(
+                &layout::shard_results_key(&meta.job_id, shard.index),
+                results_bytes,
+            )
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        shard.done = done;
+        shard.failed = failed;
+        shard.status = ShardStatus::Done;
+        shard.owner = None;
+        shard.lease_expires_at = None;
+        shard.updated_at = time::OffsetDateTime::now_utc();
+        self.put_shard(&shard).await?;
         Ok(())
     }
 
-    /// Load a batch job's persisted inputs.
-    async fn load_job_inputs(&self, job_id: &str) -> Result<Vec<BatchInput>, RegistryError> {
+    /// Read a render's success flag from its persisted `meta.json`.
+    async fn read_meta_success(&self, render_id: &str) -> Result<bool, RegistryError> {
         let bytes = self
             .storage
-            .get(&crate::render_storage::layout::job_inputs_key(job_id))
+            .get(&ContentAddress::render_meta_key(render_id))
             .await
-            .map_err(|e| Self::map_blob_not_found(e, job_id))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))
-    }
-
-    /// Fetch a persisted batch job document (for polling). Not-found → error.
-    pub async fn get_batch_job(&self, job_id: &str) -> Result<BatchJob, RegistryError> {
-        let bytes = self
-            .storage
-            .get(&crate::render_storage::layout::job_key(job_id))
-            .await
-            .map_err(|e| Self::map_blob_not_found(e, job_id))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))
-    }
-
-    /// Persist a batch job document.
-    async fn put_job(&self, job: &BatchJob) -> Result<(), RegistryError> {
-        let bytes = serde_json::to_vec(job)
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        let rec: RenderRecord = serde_json::from_slice(&bytes)
             .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))?;
-        self.storage
-            .put(&crate::render_storage::layout::job_key(&job.job_id), bytes)
+        Ok(rec.success)
+    }
+
+    /// Aggregated, read-time view of a batch job (status + counts derived from
+    /// its shard descriptors). Not-found → error.
+    pub async fn get_batch_job(&self, job_id: &str) -> Result<JobView, RegistryError> {
+        let meta = self.get_job_meta(job_id).await?;
+        let shards = self.list_job_shards(job_id).await?;
+        Ok(JobView::aggregate(&meta, &shards))
+    }
+
+    /// List a job's shard descriptors, ordered by shard index.
+    async fn list_job_shards(&self, job_id: &str) -> Result<Vec<Shard>, RegistryError> {
+        let prefix = format!("{}shards/", layout::job_prefix(job_id));
+        let keys = self
+            .storage
+            .list_keys(&prefix)
             .await
-            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        let mut shards = Vec::new();
+        for key in keys.iter().filter(|k| k.ends_with("/shard.json")) {
+            if let Ok(bytes) = self.storage.get(key).await
+                && let Ok(shard) = serde_json::from_slice::<Shard>(&bytes)
+            {
+                shards.push(shard);
+            }
+        }
+        shards.sort_by_key(|s| s.index);
+        Ok(shards)
+    }
+
+    /// Page of the job's item→render_id results, ordered by global item index.
+    /// Only items in completed shards appear (others are simply not present yet).
+    pub async fn list_job_items(
+        &self,
+        job_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<BatchItem>, RegistryError> {
+        let meta = self.get_job_meta(job_id).await?;
+        if limit == 0 || offset >= meta.total {
+            return Ok(Vec::new());
+        }
+        let end = (offset + limit).min(meta.total);
+        let shard_size = meta.shard_size.max(1);
+        let mut out = Vec::new();
+        for k in (offset / shard_size)..=((end - 1) / shard_size) {
+            for it in self.load_shard_results(job_id, k).await? {
+                if it.index >= offset && it.index < end {
+                    out.push(it);
+                }
+            }
+        }
+        out.sort_by_key(|i| i.index);
+        Ok(out)
+    }
+
+    /// Load a shard's persisted per-item results (`results.json`), if present.
+    pub async fn load_shard_results(
+        &self,
+        job_id: &str,
+        shard_index: usize,
+    ) -> Result<Vec<BatchItem>, RegistryError> {
+        let key = layout::shard_results_key(job_id, shard_index);
+        // Absent until the shard completes — treat as no results yet.
+        if !self
+            .storage
+            .exists(&key)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?
+        {
+            return Ok(Vec::new());
+        }
+        let bytes = self
+            .storage
+            .get(&key)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))
     }
 
     /// Resolve + load a template and build one warm world, reused for a batch.
@@ -1292,10 +1457,11 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         world: &mut papermake::PapermakeWorld,
         data: &serde_json::Value,
     ) -> Result<(String, bool), RegistryError> {
-        let render_id = uuid::Uuid::now_v7().to_string();
-
         let data_bytes = serde_json::to_vec(data)?;
         let data_hash = ContentAddress::hash(&data_bytes);
+        // Content-addressed id: identical (template version, data) => same id, so
+        // re-processing an item is idempotent (overwrites the same keys).
+        let render_id = ContentAddress::content_render_id(&ctx.manifest_hash, &data_hash);
         self.storage
             .put(&ContentAddress::render_data_key(&render_id), data_bytes)
             .await
@@ -1674,11 +1840,19 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let template_name = parsed_ref.name.clone();
         let template_tag = parsed_ref.tag.unwrap_or_else(|| "latest".to_string());
 
-        // Step 2: Generate the render_id up front. All artifacts for this render
-        // (input data, metadata, PDF) are keyed by render_id under `renders/{id}/`
-        // so by-id lookups are a direct blob read (no record consulted, immediate
-        // even before the analytics record is flushed).
-        let render_id = uuid::Uuid::now_v7().to_string();
+        // Step 2: Serialize the input and resolve the template up front, so the
+        // render_id can be content-addressed (a UUIDv5 over the manifest + data
+        // hashes). Identical (template version, data) renders share an id and are
+        // idempotent; artifacts remain keyed by render_id under `renders/{id}/`.
+        let data_bytes = serde_json::to_vec(data)?;
+        let data_hash = ContentAddress::hash(&data_bytes);
+        let manifest_res = self.resolve(reference).await;
+        let render_id = match &manifest_res {
+            Ok(manifest_hash) => ContentAddress::content_render_id(manifest_hash, &data_hash),
+            // Resolution failed: still record a deterministic failure id keyed by
+            // the reference so repeated identical failures dedupe too.
+            Err(_) => ContentAddress::content_render_id(reference, &data_hash),
+        };
         tracing::info!(
             reference = %reference,
             render_id = %render_id,
@@ -1687,10 +1861,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         );
 
         // Step 3: Store the input data at `renders/{id}/data` (kept for both
-        // success and failure so a failed input is inspectable). data_hash is
-        // retained on the record as integrity metadata only.
-        let data_bytes = serde_json::to_vec(data)?;
-        let data_hash = ContentAddress::hash(&data_bytes);
+        // success and failure so a failed input is inspectable).
         tracing::debug!(
             reference = %reference,
             render_id = %render_id,
@@ -1711,15 +1882,15 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         // Step 4: Measure total operation time including resolution.
         let start_time = std::time::Instant::now();
 
-        // Step 5: Try to resolve and render - catch all failures so that even a
-        // failed resolution is recorded as a failure render below.
+        // Step 5: Render - a failed resolution (captured above) is recorded as a
+        // failure render below.
         tracing::debug!(
             reference = %reference,
             render_id = %render_id,
             "registry render_and_store resolving and rendering",
         );
         let result: Result<(String, Vec<u8>), RegistryError> = async {
-            let manifest_hash = self.resolve(reference).await?;
+            let manifest_hash = manifest_res?;
             let pdf_bytes = self.render_with_options(reference, data, options).await?;
             Ok((manifest_hash, pdf_bytes))
         }
@@ -3163,8 +3334,9 @@ Content: #data.content"#
             .await
             .unwrap();
 
-        // Different render IDs but same content hashes (due to deduplication)
-        assert_ne!(result1.render_id, result2.render_id);
+        // Content-addressed: identical (template version, data) => SAME render_id
+        // (idempotent dedupe), and identical content hashes.
+        assert_eq!(result1.render_id, result2.render_id);
         assert_eq!(result1.pdf_hash, result2.pdf_hash);
 
         // Verify both renders can retrieve the same PDF content
@@ -3278,11 +3450,12 @@ Hello #data.name"#
 
     #[tokio::test]
     async fn test_batch_job_enqueue_claim_run() {
-        use crate::batch::{BatchInput, ItemStatus, JobStatus};
+        use crate::batch::{BatchInput, ItemStatus, JobStatus, ShardStatus};
 
         let storage = MemoryStorage::new();
         let render_storage = crate::render_storage::MemoryRenderStorage::new();
-        let registry = Registry::new(storage, render_storage);
+        // shard_size 1 => two shards for two inputs, exercising multi-shard drain.
+        let registry = Registry::new(storage, render_storage).with_shard_size(1);
         registry
             .publish(create_test_bundle(), "batch", "latest")
             .await
@@ -3299,7 +3472,7 @@ Hello #data.name"#
             },
         ];
 
-        // Server enqueues: job is queued with pending items, inputs persisted.
+        // Server enqueues: metadata + two pending shards; nothing claimed yet.
         let job = registry
             .enqueue_batch_job("batch:latest", &inputs, None)
             .await
@@ -3308,43 +3481,41 @@ Hello #data.name"#
         let queued = registry.get_batch_job(&job_id).await.unwrap();
         assert_eq!(queued.status, JobStatus::Queued);
         assert_eq!(queued.total, 2);
-        assert!(queued.items.iter().all(|i| i.status == ItemStatus::Pending));
+        assert_eq!(queued.num_shards, 2);
+        assert_eq!(queued.done, 0);
 
-        // Worker claims it (running, owned, leased) with the persisted inputs.
+        // One worker drains both shards (like the worker loop).
         let now = time::OffsetDateTime::now_utc();
-        let (claimed, claimed_inputs) = registry
-            .claim_next_job("worker-1", 120, 3, now)
+        let mut shards_run = 0;
+        while let Some((meta, shard, sinputs)) = registry
+            .claim_next_shard("worker-1", 120, 3, now)
             .await
             .unwrap()
-            .expect("a job should be claimable");
-        assert_eq!(claimed.job_id, job_id);
-        assert_eq!(claimed.status, JobStatus::Running);
-        assert_eq!(claimed.owner.as_deref(), Some("worker-1"));
-        assert_eq!(claimed.attempts, 1);
-        assert_eq!(claimed_inputs.len(), 2);
-        // Nothing else is claimable now (single running job with a fresh lease).
-        assert!(
+        {
+            assert_eq!(shard.status, ShardStatus::Running);
+            assert_eq!(shard.owner.as_deref(), Some("worker-1"));
+            assert_eq!(shard.attempts, 1);
+            assert_eq!(sinputs.len(), 1);
             registry
-                .claim_next_job("worker-1", 120, 3, now)
+                .run_claimed_shard(meta, shard, sinputs, 120)
                 .await
-                .unwrap()
-                .is_none()
-        );
+                .unwrap();
+            shards_run += 1;
+        }
+        assert_eq!(shards_run, 2);
 
-        // Worker runs it to completion.
-        registry
-            .run_claimed_job(claimed, claimed_inputs, 120)
-            .await
-            .unwrap();
-
-        // Polling AFTER completion returns the full, persisted result.
+        // Aggregated status is derived from the shards.
         let done = registry.get_batch_job(&job_id).await.unwrap();
         assert_eq!(done.status, JobStatus::Completed);
         assert_eq!(done.done, 2);
         assert_eq!(done.failed, 0);
-        assert_eq!(done.owner, None);
-        assert_eq!(done.items[0].key.as_deref(), Some("cust-a"));
-        for item in &done.items {
+
+        // Item→render_id map, paginated, ordered by index.
+        let items = registry.list_job_items(&job_id, 0, 10).await.unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].index, 0);
+        assert_eq!(items[0].key.as_deref(), Some("cust-a"));
+        for item in &items {
             assert_eq!(item.status, ItemStatus::Success);
             let render_id = item.render_id.as_ref().expect("render_id set");
             let pdf = registry.get_render_pdf(render_id).await.unwrap();
@@ -3353,12 +3524,12 @@ Hello #data.name"#
     }
 
     #[tokio::test]
-    async fn test_batch_job_orphan_reclaim_resumes() {
+    async fn test_batch_shard_orphan_reclaim_and_resume() {
         use crate::batch::{BatchInput, JobStatus};
 
         let storage = MemoryStorage::new();
         let render_storage = crate::render_storage::MemoryRenderStorage::new();
-        let registry = Registry::new(storage, render_storage);
+        let registry = Registry::new(storage, render_storage); // default shard_size => 1 shard
         registry
             .publish(create_test_bundle(), "batch", "latest")
             .await
@@ -3380,42 +3551,115 @@ Hello #data.name"#
             .unwrap();
         let job_id = job.job_id.clone();
 
-        // Worker A claims but "dies" before running (lease will expire).
+        // Pre-render item A directly: the shard should later *resume* (skip) it
+        // since its content-addressed output already exists.
+        let pre = registry
+            .render_and_store("batch:latest", &serde_json::json!({ "name": "A" }))
+            .await
+            .unwrap();
+
+        // Worker A claims the shard but "dies" before running (lease will expire).
         let t0 = time::OffsetDateTime::now_utc();
-        let (claimed_a, _) = registry
-            .claim_next_job("worker-a", 60, 3, t0)
+        let (_meta_a, shard_a, _) = registry
+            .claim_next_shard("worker-a", 60, 3, t0)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(claimed_a.attempts, 1);
+        assert_eq!(shard_a.attempts, 1);
 
-        // Before the lease expires, the job is NOT claimable by anyone else.
+        // Before the lease expires, the shard is NOT claimable by anyone else.
         let t_soon = t0 + time::Duration::seconds(10);
         assert!(
             registry
-                .claim_next_job("worker-b", 60, 3, t_soon)
+                .claim_next_shard("worker-b", 60, 3, t_soon)
                 .await
                 .unwrap()
                 .is_none()
         );
 
-        // After the lease expires, worker B reclaims and runs it to completion.
+        // After expiry, worker B reclaims (attempts=2) and runs to completion.
         let t_late = t0 + time::Duration::seconds(120);
-        let (claimed_b, inputs_b) = registry
-            .claim_next_job("worker-b", 60, 3, t_late)
+        let (meta_b, shard_b, inputs_b) = registry
+            .claim_next_shard("worker-b", 60, 3, t_late)
             .await
             .unwrap()
             .expect("expired lease is reclaimable");
-        assert_eq!(claimed_b.owner.as_deref(), Some("worker-b"));
-        assert_eq!(claimed_b.attempts, 2);
+        assert_eq!(shard_b.owner.as_deref(), Some("worker-b"));
+        assert_eq!(shard_b.attempts, 2);
         registry
-            .run_claimed_job(claimed_b, inputs_b, 60)
+            .run_claimed_shard(meta_b, shard_b, inputs_b, 60)
             .await
             .unwrap();
 
         let done = registry.get_batch_job(&job_id).await.unwrap();
         assert_eq!(done.status, JobStatus::Completed);
         assert_eq!(done.done, 2);
+        // Item A reused the pre-existing content-addressed render (idempotent).
+        let items = registry.list_job_items(&job_id, 0, 10).await.unwrap();
+        assert_eq!(items[0].render_id.as_deref(), Some(pre.render_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_batch_shards_concurrent_workers() {
+        use crate::batch::{BatchInput, ItemStatus, JobStatus};
+        use std::sync::Arc;
+
+        let storage = MemoryStorage::new();
+        let render_storage = crate::render_storage::MemoryRenderStorage::new();
+        let registry = Arc::new(Registry::new(storage, render_storage).with_shard_size(2));
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+
+        // 7 items over shard_size 2 => 4 shards, drained by 3 concurrent workers.
+        let inputs: Vec<BatchInput> = (0..7)
+            .map(|i| BatchInput {
+                data: serde_json::json!({ "name": format!("c{i}") }),
+                key: Some(format!("k{i}")),
+            })
+            .collect();
+        let job = registry
+            .enqueue_batch_job("batch:latest", &inputs, None)
+            .await
+            .unwrap();
+        let job_id = job.job_id.clone();
+
+        let mut handles = Vec::new();
+        for w in 0..3 {
+            let reg = registry.clone();
+            let wid = format!("worker-{w}");
+            handles.push(tokio::spawn(async move {
+                let now = time::OffsetDateTime::now_utc();
+                while let Some((meta, shard, sinputs)) =
+                    reg.claim_next_shard(&wid, 120, 3, now).await.unwrap()
+                {
+                    reg.run_claimed_shard(meta, shard, sinputs, 120)
+                        .await
+                        .unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let done = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(done.status, JobStatus::Completed);
+        assert_eq!(done.done, 7);
+        assert_eq!(done.failed, 0);
+
+        // Every item rendered exactly once (indices 0..7 all present).
+        let items = registry.list_job_items(&job_id, 0, 100).await.unwrap();
+        assert_eq!(items.len(), 7);
+        assert!(
+            items
+                .iter()
+                .all(|i| i.status == ItemStatus::Success && i.render_id.is_some())
+        );
+        let mut idxs: Vec<usize> = items.iter().map(|i| i.index).collect();
+        idxs.sort();
+        assert_eq!(idxs, (0..7).collect::<Vec<_>>());
     }
 
     #[tokio::test]

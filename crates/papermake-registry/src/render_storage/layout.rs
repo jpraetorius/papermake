@@ -22,14 +22,47 @@ pub const EXPIRY_PREFIX: &str = "expiry/";
 /// Prefix for batch-job documents.
 pub const JOBS_PREFIX: &str = "jobs/";
 
-/// Key for a batch job's document (the polled status).
+/// Key for a batch job's immutable metadata document.
 pub fn job_key(job_id: &str) -> String {
     format!("{}{}/job.json", JOBS_PREFIX, job_id)
 }
 
-/// Key for a batch job's persisted inputs (read by the worker).
-pub fn job_inputs_key(job_id: &str) -> String {
-    format!("{}{}/inputs.json", JOBS_PREFIX, job_id)
+/// Prefix under which a job's shard subtree lives (metadata + inputs + results).
+pub fn job_prefix(job_id: &str) -> String {
+    format!("{}{}/", JOBS_PREFIX, job_id)
+}
+
+/// Key for a shard's descriptor (status/owner/lease/counts).
+pub fn shard_key(job_id: &str, shard_index: usize) -> String {
+    format!(
+        "{}{}/shards/{}/shard.json",
+        JOBS_PREFIX, job_id, shard_index
+    )
+}
+
+/// Key for a shard's slice of the batch inputs.
+pub fn shard_inputs_key(job_id: &str, shard_index: usize) -> String {
+    format!(
+        "{}{}/shards/{}/inputs.json",
+        JOBS_PREFIX, job_id, shard_index
+    )
+}
+
+/// Key for a shard's per-item results (written when the shard completes).
+pub fn shard_results_key(job_id: &str, shard_index: usize) -> String {
+    format!(
+        "{}{}/shards/{}/results.json",
+        JOBS_PREFIX, job_id, shard_index
+    )
+}
+
+/// Parse a shard-descriptor key back into `(job_id, shard_index)`.
+/// Matches `jobs/<job_id>/shards/<index>/shard.json`.
+pub fn parse_shard_key(key: &str) -> Option<(String, usize)> {
+    let rest = key.strip_prefix(JOBS_PREFIX)?.strip_suffix("/shard.json")?;
+    let (job_id, tail) = rest.split_once("/shards/")?;
+    let index: usize = tail.parse().ok()?;
+    Some((job_id.to_string(), index))
 }
 
 /// Format a date as `YYYY-MM-DD` (stable, independent of the `time` Display impl).

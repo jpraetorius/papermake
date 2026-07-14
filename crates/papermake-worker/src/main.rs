@@ -1,14 +1,18 @@
 //! Papermake worker.
 //!
-//! A single background process (run **one** replica) that each cycle:
-//! 1. claims and renders queued/orphaned **batch jobs** (reusing a warm world),
+//! A background process — **run one or more** — that each cycle:
+//! 1. claims and renders queued/orphaned **batch shards** (reusing a warm world),
 //! 2. aggregates raw analytics NDJSON in S3 into `summary.json`,
-//! 3. prunes expired outputs and old analytics raw.
+//! 3. prunes expired outputs, old analytics raw, and stale jobs.
 //!
-//! Batch jobs are claimed with an owner + lease; because only one worker is
-//! active, a job a dead worker was on becomes reclaimable once its lease expires
-//! and is **resumed** (already-rendered items are skipped). No always-on
-//! database — S3 is the shared collation point.
+//! Shards are claimed with an owner + lease, so many workers split one big batch
+//! and a dead worker's shard is reclaimed (resuming only items whose output is
+//! missing) once its lease expires. No compare-and-set is needed: render output
+//! is content-addressed and thus idempotent, so a rare double-claim only wastes
+//! CPU. No always-on database — S3 is the shared collation point.
+//!
+//! Note: aggregation/pruning are safe to run from multiple workers (idempotent),
+//! but redundant; that's fine at small worker counts.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,11 +76,13 @@ async fn main() {
     );
 
     loop {
-        // 1. Drain claimable batch jobs (queued, plus orphaned ones whose lease
-        //    has expired). One warm world per job; resumes partial work.
+        // 1. Drain claimable batch *shards* across all jobs (pending, plus
+        //    orphaned ones whose lease expired). Many workers run this loop
+        //    concurrently, so one big batch is split across them. One warm world
+        //    per shard; resumes items whose output already exists.
         loop {
             match registry
-                .claim_next_job(
+                .claim_next_shard(
                     &worker_id,
                     lease_secs,
                     max_attempts,
@@ -84,22 +90,32 @@ async fn main() {
                 )
                 .await
             {
-                Ok(Some((job, inputs))) => {
-                    let job_id = job.job_id.clone();
-                    info!("Rendering batch job {} ({} inputs)", job_id, job.total);
-                    if let Err(e) = registry.run_claimed_job(job, inputs, lease_secs).await {
-                        error!("Batch job {} failed: {}", job_id, e);
+                Ok(Some((meta, shard, inputs))) => {
+                    let job_id = meta.job_id.clone();
+                    let (shard_index, shard_len) = (shard.index, shard.len);
+                    info!(
+                        "Rendering shard {} of job {} ({} items)",
+                        shard_index, job_id, shard_len
+                    );
+                    if let Err(e) = registry
+                        .run_claimed_shard(meta, shard, inputs, lease_secs)
+                        .await
+                    {
+                        error!("Job {} shard {} failed: {}", job_id, shard_index, e);
                     }
-                    // Persist analytics records staged during the job.
+                    // Persist analytics records staged during the shard.
                     if let Some(rs) = registry.render_storage()
                         && let Err(e) = rs.flush().await
                     {
-                        error!("Analytics flush after job {} failed: {}", job_id, e);
+                        error!(
+                            "Analytics flush after job {} shard {} failed: {}",
+                            job_id, shard_index, e
+                        );
                     }
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    error!("Claiming batch job failed: {}", e);
+                    error!("Claiming batch shard failed: {}", e);
                     break;
                 }
             }

@@ -126,10 +126,10 @@ pub async fn prune<B: BlobStorage + ?Sized>(
         .map_err(|e| RenderStorageError::Query(e.to_string()))?;
     stats.raw_files_deleted = old_raw.len();
 
-    // 3. Batch-job pruning — one status doc (+ inputs) accrues per submission and
-    //    nothing else removes it. Drop jobs last touched before the cutoff
-    //    (terminal or long-abandoned); a live job heartbeats its lease so its
-    //    `updated_at` stays recent. `0` = keep forever.
+    // 3. Batch-job pruning — a job's metadata + shard subtree (descriptors,
+    //    inputs, results) accrues per submission and nothing else removes it.
+    //    Drop whole jobs created before the cutoff (short-lived by design; a job
+    //    older than the window is done or abandoned). `0` = keep forever.
     if job_retention_days > 0 {
         let job_cutoff = today - Duration::days(job_retention_days as i64);
         let job_keys = blob
@@ -143,10 +143,14 @@ pub async fn prune<B: BlobStorage + ?Sized>(
                 .await
                 .map_err(|e| RenderStorageError::Query(e.to_string()))?;
             if let Ok(job) = serde_json::from_slice::<BatchJob>(&bytes)
-                && job.updated_at.date() < job_cutoff
+                && job.created_at.date() < job_cutoff
             {
-                stale.push(layout::job_key(&job.job_id));
-                stale.push(layout::job_inputs_key(&job.job_id));
+                // Delete the entire jobs/{id}/ subtree.
+                let subtree = blob
+                    .list_keys(&layout::job_prefix(&job.job_id))
+                    .await
+                    .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+                stale.extend(subtree);
                 stats.jobs_pruned += 1;
             }
         }
@@ -277,43 +281,50 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_stale_jobs() {
-        use crate::batch::{BatchJob, JobStatus};
+        use crate::batch::BatchJob;
         let blob = MemoryStorage::new();
         let today = date!(2026 - 07 - 09);
 
-        let mk = |id: &str, updated: Date| BatchJob {
+        let mk = |id: &str, created: Date| BatchJob {
             job_id: id.to_string(),
             reference: "invoice:latest".to_string(),
-            status: JobStatus::Completed,
-            total: 0,
-            done: 0,
-            failed: 0,
+            total: 1,
             retain_days: None,
-            owner: None,
-            lease_expires_at: None,
-            attempts: 1,
-            created_at: updated.midnight().assume_utc(),
-            updated_at: updated.midnight().assume_utc(),
-            items: vec![],
+            shard_size: 500,
+            num_shards: 1,
+            created_at: created.midnight().assume_utc(),
         };
 
-        // Stale (10 days old) + fresh (today); job retention 7 days.
+        // Stale (10 days old) + fresh (today); job retention 7 days. Write each
+        // job's metadata plus a representative file in its shard subtree.
         for j in [mk("stale", date!(2026 - 06 - 29)), mk("fresh", today)] {
             blob.put(&layout::job_key(&j.job_id), serde_json::to_vec(&j).unwrap())
                 .await
                 .unwrap();
-            blob.put(&layout::job_inputs_key(&j.job_id), b"[]".to_vec())
+            blob.put(&layout::shard_inputs_key(&j.job_id, 0), b"[]".to_vec())
+                .await
+                .unwrap();
+            blob.put(&layout::shard_key(&j.job_id, 0), b"{}".to_vec())
                 .await
                 .unwrap();
         }
 
         let stats = prune(&blob, today, 90, 7).await.unwrap();
         assert_eq!(stats.jobs_pruned, 1);
-        // Stale job + its inputs gone; fresh job intact.
-        assert!(!blob.exists(&layout::job_key("stale")).await.unwrap());
-        assert!(!blob.exists(&layout::job_inputs_key("stale")).await.unwrap());
-        assert!(blob.exists(&layout::job_key("fresh")).await.unwrap());
-        assert!(blob.exists(&layout::job_inputs_key("fresh")).await.unwrap());
+        // Stale job's whole subtree gone; fresh job intact.
+        assert!(
+            blob.list_keys(&layout::job_prefix("stale"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !blob
+                .list_keys(&layout::job_prefix("fresh"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // Retention 0 keeps everything.
         let stats0 = prune(&blob, today, 90, 0).await.unwrap();
