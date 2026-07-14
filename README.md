@@ -1,8 +1,16 @@
-# 📄 Papermake
+<p align="center">
+  <img src="crates/papermake-server/assets/logo.svg" alt="Papermake" width="128" height="128">
+</p>
+
+# Papermake
 
 **Content-addressable template registry with server-side rendering for [Typst](https://typst.app/) documents.**
 
 Turn your Typst templates into APIs. Publish once, render anywhere — no local Typst install, no database to operate.
+
+<p align="center">
+  <img src="docs/webapp.png" alt="Papermake web dashboard" width="860">
+</p>
 
 ```bash
 # 1. Bring up the stack
