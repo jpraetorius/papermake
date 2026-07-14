@@ -92,7 +92,7 @@ All configuration is via environment variables (see
 | Variable | Default | Description |
 |---|---|---|
 | `WORKER_ROLE` | `all` | `render` (poll + render shards; scale these), `maintenance` (aggregate + prune; run one), or `all` (both) |
-| `WORKER_INTERVAL_SECONDS` | `60` | `render`: idle shard-poll cadence. `maintenance`: aggregate + prune cadence |
+| `WORKER_INTERVAL_SECONDS` | render `5`, maintenance `30`, all `10` | `render`: idle shard-poll cadence. `maintenance`: aggregate + prune cadence |
 | `ANALYTICS_RETENTION_DAYS` | `30` | [maintenance] How long to keep raw analytics NDJSON |
 | `JOB_RETENTION_DAYS` | `7` | [maintenance] How long to keep batch-job docs (`0` = keep forever) |
 | `WORKER_LEASE_SECONDS` | `120` | [render] Shard lease; a dead worker's shard is reclaimable after this |

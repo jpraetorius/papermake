@@ -102,7 +102,16 @@ async fn main() {
         .or_else(|| std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()))
         .unwrap_or_else(|| format!("worker-{}", std::process::id()));
 
-    let interval = env_u64("WORKER_INTERVAL_SECONDS", 60);
+    // Poll/act cadence, defaulted by role (env overrides): render polls fast to
+    // pick up new jobs quickly; maintenance aggregates/prunes on a slower beat.
+    let interval = env_u64(
+        "WORKER_INTERVAL_SECONDS",
+        match role {
+            Role::Render => 5,
+            Role::Maintenance => 30,
+            Role::All => 10,
+        },
+    );
     let analytics_retention_days = env_u32("ANALYTICS_RETENTION_DAYS", 30);
     let job_retention_days = env_u32("JOB_RETENTION_DAYS", 7);
     let lease_secs = env_u64("WORKER_LEASE_SECONDS", 120);
