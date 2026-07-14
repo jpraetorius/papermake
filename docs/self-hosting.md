@@ -3,10 +3,12 @@
 Papermake needs two processes and an S3-compatible object store:
 
 - **`papermake-server`** — the HTTP API + web UI. Run one or more.
-- **`papermake-worker`** — renders batch shards, aggregates analytics, and
-  prunes expired outputs/jobs. Run **one or more**: workers split large batches
-  by claiming shards independently. No atomic claim is needed because render
-  output is content-addressed/idempotent (see [Scaling](#scaling)).
+- **`papermake-worker`** — the same binary in one of two roles (`WORKER_ROLE`):
+  - **render** — polls for batch shards and renders them; **scale these** to
+    split large batches (see [Scaling](#scaling)).
+  - **maintenance** — aggregates analytics into `summary.json` and prunes
+    expired outputs/jobs; run **one**.
+  - **all** (default) — both in one process, for simple single-node/dev.
 - **S3** — RustFS (bundled for local/dev), or any S3-compatible service in
   production.
 
@@ -89,13 +91,14 @@ All configuration is via environment variables (see
 
 | Variable | Default | Description |
 |---|---|---|
-| `WORKER_INTERVAL_SECONDS` | `60` | Drain-jobs + aggregate + prune cadence |
-| `ANALYTICS_RETENTION_DAYS` | `30` | How long to keep raw analytics NDJSON |
-| `JOB_RETENTION_DAYS` | `7` | How long to keep batch-job status docs after last update (`0` = keep forever) |
-| `WORKER_LEASE_SECONDS` | `120` | Batch-job lease; a dead worker's job is reclaimable after this |
-| `WORKER_MAX_ATTEMPTS` | `3` | Give up on a job (mark `failed`) after this many claims |
-| `PAPERMAKE_WORKER_ID` | `worker` | Job owner id (falls back to `PAPERMAKE_INSTANCE_ID`) |
-| `RENDER_RETENTION_DAYS` | `30` | Retention for batch-rendered outputs |
+| `WORKER_ROLE` | `all` | `render` (poll + render shards; scale these), `maintenance` (aggregate + prune; run one), or `all` (both) |
+| `WORKER_INTERVAL_SECONDS` | `60` | `render`: idle shard-poll cadence. `maintenance`: aggregate + prune cadence |
+| `ANALYTICS_RETENTION_DAYS` | `30` | [maintenance] How long to keep raw analytics NDJSON |
+| `JOB_RETENTION_DAYS` | `7` | [maintenance] How long to keep batch-job docs (`0` = keep forever) |
+| `WORKER_LEASE_SECONDS` | `120` | [render] Shard lease; a dead worker's shard is reclaimable after this |
+| `WORKER_MAX_ATTEMPTS` | `3` | [render] Give up on a shard (mark `failed`) after this many claims |
+| `PAPERMAKE_WORKER_ID` | hostname, then PID | Unique per process (shard-claim owner + analytics instance); scaled replicas auto-differ |
+| `RENDER_RETENTION_DAYS` | `30` | [render] Retention for batch-rendered outputs |
 | `FONTS_DIR` | `/fonts` in Docker; unset otherwise | Same as the server — the worker renders batch jobs, so it needs the same fonts |
 
 ## Fonts
@@ -121,17 +124,21 @@ supports TTF/OTF/TTC only (no WOFF/WOFF2).
 - **Servers scale horizontally.** Each buffers its own records and flushes to
   S3 under an instance-scoped key prefix, so instances never collide. Give each
   a distinct `PAPERMAKE_INSTANCE_ID`.
-- **Workers scale horizontally too.** A batch is split into `SHARD_SIZE`-item
-  shards; each worker claims shards independently (with an owner + lease), so
-  more workers means a big batch finishes faster
-  (`docker compose up -d --scale papermake-worker=N`). No atomic claim is
-  needed: render output is content-addressed, so if two workers ever briefly
-  claim the same shard the duplicate work is harmless (identical outputs,
-  deduped analytics). A dead worker's shard is reclaimed after its lease expires
-  and resumes only the items whose output doesn't yet exist. Give each worker a
-  distinct `PAPERMAKE_WORKER_ID`.
-  - Aggregation (`summary.json`) and pruning also run each worker cycle; with
-    several workers they're redundant but idempotent (harmless at small counts).
+- **Render workers scale horizontally.** A batch is split into `SHARD_SIZE`-item
+  shards; each render worker claims shards independently (owner + lease), so more
+  workers finish a big batch faster
+  (`podman compose up -d --scale papermake-worker=N`). No atomic claim is needed:
+  render output is content-addressed, so if two workers ever briefly claim the
+  same shard the duplicate work is harmless (identical outputs, deduped
+  analytics). A dead worker's shard is reclaimed after its lease expires and
+  resumes only the items whose output doesn't yet exist. Each replica needs a
+  distinct `PAPERMAKE_WORKER_ID` — leave it unset and it defaults to the
+  container hostname, so scaled replicas differ automatically.
+- **Run one maintenance worker.** Aggregation (`summary.json`) and pruning run on
+  their own cadence there, independent of render load — so stats stay fresh even
+  while render workers are saturated with a large batch. It's idempotent, so a
+  brief second instance during a rolling restart is harmless, but you normally
+  want exactly one.
 - Analytics are eventually consistent across servers/workers; artifact retrieval
   by `render_id` is immediate everywhere. See
   [Analytics & retention](analytics-and-retention.md).

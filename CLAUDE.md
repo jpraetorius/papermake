@@ -283,7 +283,7 @@ let pdf_bytes = registry.render(
 - Server/worker S3: `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 - Server rendering: `MAX_CONCURRENT_RENDERS`, `RENDER_TIMEOUT_SECONDS`, `SHARD_SIZE`, `FONTS_DIR` (optional).
 - Server buffered analytics/retention: `PAPERMAKE_INSTANCE_ID`, `FLUSH_INTERVAL_SECONDS`, `FLUSH_MAX_RECORDS`, `RENDER_RETENTION_DAYS`.
-- Worker: `WORKER_INTERVAL_SECONDS`, `ANALYTICS_RETENTION_DAYS`, `JOB_RETENTION_DAYS`, `WORKER_LEASE_SECONDS`, `WORKER_MAX_ATTEMPTS`, `PAPERMAKE_WORKER_ID`, `RENDER_RETENTION_DAYS`.
+- Worker: `WORKER_ROLE` (`render` | `maintenance` | `all`), `WORKER_INTERVAL_SECONDS`, `ANALYTICS_RETENTION_DAYS`, `JOB_RETENTION_DAYS`, `WORKER_LEASE_SECONDS`, `WORKER_MAX_ATTEMPTS`, `PAPERMAKE_WORKER_ID`, `RENDER_RETENTION_DAYS`.
 
 ## Phase 1: Basic HTTP Server
 - [x] Set up Axum server with basic routing
@@ -333,7 +333,7 @@ let pdf_bytes = registry.render(
 **Dependencies:**
 - `papermake-registry` crate (completed phases 1-4)
 - S3-compatible storage (RustFS for dev)
-- `papermake-worker` (batch-shard runner + aggregator + pruner; run one or more — shards are claimed independently, render output is content-addressed/idempotent)
+- `papermake-worker` — one binary, `WORKER_ROLE`: **render** (poll + render shards; scale for big jobs) and **maintenance** (aggregate `summary.json` + prune; run one), or **all** (both; dev). Shards are claimed independently; render output is content-addressed/idempotent so no atomic claim is needed.
 
 ## HTTP API Endpoints
 
