@@ -3,10 +3,10 @@
 Papermake needs two processes and an S3-compatible object store:
 
 - **`papermake-server`** — the HTTP API + web UI. Run one or more.
-- **`papermake-worker`** — runs batch-render jobs, aggregates analytics, and
-  prunes expired outputs. Run exactly **one**: batch jobs are claimed with a
-  lease and, since RustFS has no atomic claim, correctness relies on a single
-  active worker (see [Scaling](#scaling)).
+- **`papermake-worker`** — renders batch shards, aggregates analytics, and
+  prunes expired outputs/jobs. Run **one or more**: workers split large batches
+  by claiming shards independently. No atomic claim is needed because render
+  output is content-addressed/idempotent (see [Scaling](#scaling)).
 - **S3** — RustFS (bundled for local/dev), or any S3-compatible service in
   production.
 
@@ -77,6 +77,7 @@ All configuration is via environment variables (see
 | `PORT` | `3000` | Bind port |
 | `MAX_CONCURRENT_RENDERS` | `10` | Maximum CPU-bound Typst renders running at once per server |
 | `RENDER_TIMEOUT_SECONDS` | `300` | Render timeout, including queue wait for a render slot |
+| `SHARD_SIZE` | `500` | Items per batch shard (unit of work a worker claims) |
 | `PAPERMAKE_INSTANCE_ID` | random uuid | Stable id used in flushed S3 keys |
 | `FLUSH_INTERVAL_SECONDS` | `30` | Analytics flush interval |
 | `FLUSH_MAX_RECORDS` | `1000` | Buffer size that triggers an eager flush |
@@ -120,14 +121,19 @@ supports TTF/OTF/TTC only (no WOFF/WOFF2).
 - **Servers scale horizontally.** Each buffers its own records and flushes to
   S3 under an instance-scoped key prefix, so instances never collide. Give each
   a distinct `PAPERMAKE_INSTANCE_ID`.
-- **Run a single worker.** It produces one consistent `summary.json`, and —
-  critically — it's the only process that claims batch jobs. Because RustFS has
-  no atomic conditional write, safe claiming relies on there being one active
-  worker; running several could double-process a job. Use a single replica
-  (`Recreate` strategy / StatefulSet). If the worker restarts mid-job, the next
-  instance reclaims it after the lease expires and resumes the remaining items.
-- Analytics are eventually consistent across servers; artifact retrieval by
-  `render_id` is immediate everywhere. See
+- **Workers scale horizontally too.** A batch is split into `SHARD_SIZE`-item
+  shards; each worker claims shards independently (with an owner + lease), so
+  more workers means a big batch finishes faster
+  (`docker compose up -d --scale papermake-worker=N`). No atomic claim is
+  needed: render output is content-addressed, so if two workers ever briefly
+  claim the same shard the duplicate work is harmless (identical outputs,
+  deduped analytics). A dead worker's shard is reclaimed after its lease expires
+  and resumes only the items whose output doesn't yet exist. Give each worker a
+  distinct `PAPERMAKE_WORKER_ID`.
+  - Aggregation (`summary.json`) and pruning also run each worker cycle; with
+    several workers they're redundant but idempotent (harmless at small counts).
+- Analytics are eventually consistent across servers/workers; artifact retrieval
+  by `render_id` is immediate everywhere. See
   [Analytics & retention](analytics-and-retention.md).
 
 ## S3 storage layout
@@ -145,7 +151,12 @@ supports TTF/OTF/TTC only (no WOFF/WOFF2).
 │   ├── raw/dt=<date>/<instance>/*.ndjson   # buffered render records
 │   └── agg/summary.json                    # the aggregate the API reads
 ├── expiry/dt=<expiry-date>/<instance>/*.ndjson   # retention index
-└── jobs/<job_id>/{job.json, inputs.json}   # batch-job status + inputs
+└── jobs/<job_id>/
+    ├── job.json                    # immutable batch metadata (total, shards)
+    └── shards/<k>/
+        ├── shard.json              # shard status/owner/lease/counts
+        ├── inputs.json             # this shard's slice of the inputs
+        └── results.json            # per-item render_ids (written when done)
 ```
 
 Templates, manifests, and assets are content-addressed (deduplicated). Rendered

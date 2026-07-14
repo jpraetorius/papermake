@@ -281,7 +281,7 @@ let pdf_bytes = registry.render(
 
 ### Environment variables
 - Server/worker S3: `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
-- Server rendering: `MAX_CONCURRENT_RENDERS`, `RENDER_TIMEOUT_SECONDS`, `FONTS_DIR` (optional).
+- Server rendering: `MAX_CONCURRENT_RENDERS`, `RENDER_TIMEOUT_SECONDS`, `SHARD_SIZE`, `FONTS_DIR` (optional).
 - Server buffered analytics/retention: `PAPERMAKE_INSTANCE_ID`, `FLUSH_INTERVAL_SECONDS`, `FLUSH_MAX_RECORDS`, `RENDER_RETENTION_DAYS`.
 - Worker: `WORKER_INTERVAL_SECONDS`, `ANALYTICS_RETENTION_DAYS`, `JOB_RETENTION_DAYS`, `WORKER_LEASE_SECONDS`, `WORKER_MAX_ATTEMPTS`, `PAPERMAKE_WORKER_ID`, `RENDER_RETENTION_DAYS`.
 
@@ -333,7 +333,7 @@ let pdf_bytes = registry.render(
 **Dependencies:**
 - `papermake-registry` crate (completed phases 1-4)
 - S3-compatible storage (RustFS for dev)
-- `papermake-worker` (batch-job runner + aggregator + pruner; run exactly one)
+- `papermake-worker` (batch-shard runner + aggregator + pruner; run one or more — shards are claimed independently, render output is content-addressed/idempotent)
 
 ## HTTP API Endpoints
 
@@ -361,9 +361,10 @@ let pdf_bytes = registry.render(
 │   └── /{reference}/source (GET) - Entrypoint source (text/plain)
 ├── render/
 │   ├── /{reference} (POST) - Render template to PDF (optional retain_days)
-│   └── /{reference}/batch (POST) - Async batch: warm world over many inputs → 202 { job_id }
+│   └── /{reference}/batch (POST) - Async batch: sharded across workers → 202 { job_id }
 ├── jobs/
-│   └── /{job_id} (GET) - Poll a batch job (persisted in S3; items map inputs → render_ids)
+│   ├── /{job_id} (GET) - Poll a batch job's aggregated status/counts (derived from shards)
+│   └── /{job_id}/items (GET) - Paginated item → render_id map (offset/limit)
 ├── renders/
 │   ├── / (GET) - List recent renders
 │   └── /{render_id}/pdf (GET) - Download rendered PDF

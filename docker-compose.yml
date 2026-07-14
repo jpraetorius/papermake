@@ -24,6 +24,8 @@ services:
       FLUSH_INTERVAL_SECONDS: "30"
       FLUSH_MAX_RECORDS: "1000"
       RENDER_RETENTION_DAYS: "30"
+      # Items per batch shard (unit of work a worker claims).
+      SHARD_SIZE: "500"
 
       # Optional: Enable debug logging
       RUST_LOG: "papermake_server=debug,papermake_registry=debug"
@@ -41,9 +43,12 @@ services:
     # No container healthcheck: the distroless runtime image has no shell/curl.
     # Probe from the host instead: curl -f http://localhost:3000/health
 
-  # Papermake Worker - runs batch-render jobs, aggregates analytics into
-  # summary.json, and prunes expired outputs. Run exactly ONE: batch jobs are
-  # claimed with a lease, and single-active is required (no atomic claim on S3).
+  # Papermake Worker - renders batch shards, aggregates analytics into
+  # summary.json, and prunes expired outputs/jobs. Scale it to split large
+  # batches: `docker compose up -d --scale papermake-worker=3`. Multiple workers
+  # are safe — shards are claimed with a lease and render output is content-
+  # addressed (idempotent), so no atomic claim is needed. Give each a distinct
+  # PAPERMAKE_WORKER_ID (drop container_name when scaling).
   papermake-worker:
     build:
       context: .

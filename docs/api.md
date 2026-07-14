@@ -110,12 +110,20 @@ Request:
 - `data` (required) — injected into the template as `sys.inputs.data`.
 - `retain_days` (optional) — overrides the template/global retention for this
   render (`0` = keep forever). See [Analytics & retention](analytics-and-retention.md).
+- `pdf_standard` (optional) — `"1.7"` (default), `"a-2b"`, or `"a-3b"` for
+  PDF/A-conformant output.
 
 Response:
 
 ```json
 { "data": { "render_id": "0192…", "pdf_hash": "sha256:…", "duration_ms": 42 } }
 ```
+
+The `render_id` is **content-addressed** — derived from the template version and
+the input data — so rendering the same data against the same template version
+again returns the **same** `render_id` and reuses the existing output. Identical
+renders are idempotent: one stored output, one history/analytics entry (not one
+per call).
 
 Rendering is CPU-bound and runs under a concurrency limit
 (`MAX_CONCURRENT_RENDERS`) with a deadline (`RENDER_TIMEOUT_SECONDS`, which
@@ -126,10 +134,11 @@ includes time spent waiting for a free render slot). Errors:
 
 ### `POST /api/render/{reference}/batch`
 Submit an **async batch**: render one template against many inputs. Returns
-`202 Accepted` with a `job_id` immediately; the job is durably enqueued in S3
-and the **worker** claims and renders it (one warm Typst world — fonts + layout
-memoization stay hot, imports fetched once). Poll the job and fetch each PDF by
-`render_id`.
+`202 Accepted` with a `job_id` immediately; the job is durably enqueued in S3,
+split into `SHARD_SIZE`-item **shards**, and **workers** claim shards to render
+them (each with a warm Typst world — fonts + layout memoization hot, imports
+fetched once). Run multiple workers to split a large batch across them. Poll the
+job for progress and fetch each PDF by `render_id`.
 
 Request:
 
@@ -154,31 +163,38 @@ Response:
 ```
 
 ### `GET /api/jobs/{job_id}`
-Poll a batch job. The job document is persisted in S3, so this returns the full
-result whether the job is still running **or already finished**. Map each result
-back to its input by `index` (position) or by your `key`; fetch its PDF at
-`GET /api/renders/{render_id}/pdf` (you can pull completed items before the whole
-job finishes).
+Poll a batch job's **aggregated** status and counts, derived from its shard
+descriptors — cheap regardless of batch size.
 
 ```json
 { "data": {
   "job_id": "0192…", "reference": "invoice:latest",
   "status": "running",            // queued | running | completed | failed
-  "total": 2, "done": 1, "failed": 0,
-  "items": [
-    { "index": 0, "key": "cust-a", "render_id": "0192a…", "status": "success" },
-    { "index": 1, "render_id": null, "status": "pending" }
-  ]
+  "total": 100000, "done": 42500, "failed": 3,
+  "num_shards": 200, "shards_terminal": 85
 }}
 ```
 
-> The worker claims a job with an owner + lease and heartbeats it while
-> rendering. If that worker dies mid-run, the lease expires and the (single
-> active) worker reclaims the job on its next cycle and **resumes** the
-> remaining items — already-rendered items keep their `render_id`, so no work is
-> repeated and nothing gets stuck in `running`. A job that repeatedly crashes
-> the worker is marked `failed` after a few attempts. Because state lives in S3,
-> a client that only polls after completion still gets every `render_id`.
+### `GET /api/jobs/{job_id}/items?offset=0&limit=1000`
+A page of the item→`render_id` mapping, ordered by input `index`. Map each item
+back by `index` (position) or by your `key`; fetch its PDF at
+`GET /api/renders/{render_id}/pdf`. Only items in **completed shards** appear,
+so poll until `status` is `completed` for the full set. Paginated so a 100k-item
+batch never returns one giant document.
+
+```json
+{ "data": [
+  { "index": 0, "key": "cust-a", "render_id": "0192a…", "status": "success" },
+  { "index": 1, "render_id": "0192b…", "status": "failed" }
+] }
+```
+
+> Workers claim shards with an owner + lease and heartbeat while rendering. If a
+> worker dies mid-shard, the lease expires and another worker reclaims it,
+> **resuming** only items whose (content-addressed) output doesn't yet exist —
+> so no work is repeated and nothing gets stuck. A shard that repeatedly crashes
+> a worker is marked failed after a few attempts. No compare-and-set is needed:
+> identical renders are idempotent, so a rare double-claim just wastes CPU.
 
 ## Renders & history
 
