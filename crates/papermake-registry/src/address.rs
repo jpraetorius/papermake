@@ -88,9 +88,10 @@ impl ContentAddress {
 
     /// Content-addressed render id that also discriminates on the PDF export
     /// options. `opts_tag` is a stable string describing the requested output
-    /// (e.g. `"a-2b"`); an **empty** tag reproduces [`content_render_id`]
-    /// byte-for-byte, so plain renders keep their historical ids. A non-empty
-    /// tag yields a distinct id, so e.g. a PDF/A-2b render of the same
+    /// (e.g. `"a-2b"`); an **empty** tag reproduces
+    /// [`ContentAddress::content_render_id`] byte-for-byte, so plain renders
+    /// keep their historical ids. A non-empty tag yields a distinct id, so e.g.
+    /// a PDF/A-2b render of the same
     /// `(template, data)` never collides with — or resume-skips onto — the plain
     /// PDF output.
     pub fn content_render_id_with_options(

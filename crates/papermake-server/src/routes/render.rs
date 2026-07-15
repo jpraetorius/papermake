@@ -5,7 +5,10 @@ use axum::{
     routing::post,
 };
 
-use papermake_registry::{PdfStandard, RegistryError, RenderOptions, batch::BatchInput};
+use papermake_registry::{
+    PdfStandard, RegistryError, RenderOptions, batch::BatchInput,
+    render_storage::types::RenderStorageError,
+};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{error, info};
@@ -110,6 +113,10 @@ pub async fn render_template(
             );
             return Err(match e {
                 RegistryError::RenderTimeout { .. } => ApiError::Timeout,
+                RegistryError::Template(_) => ApiError::template_not_found(&reference),
+                RegistryError::RenderStorage(RenderStorageError::NotFound(_)) => {
+                    ApiError::render_not_found(&reference)
+                }
                 other => ApiError::RenderFailed(other.to_string()),
             });
         }
@@ -222,4 +229,105 @@ pub async fn batch_render(
         total: job.total,
     };
     Ok((StatusCode::ACCEPTED, Json(ApiResponse::new(accepted))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header::CONTENT_TYPE},
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn render_template_returns_render_metadata_for_published_template() {
+        let registry = test_support::registry();
+        registry
+            .publish(test_support::bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        let app = router().with_state(test_support::state(registry));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/invoice:latest")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"data":{"name":"Alice"},"retain_days":0,"pdf_standard":"1.7"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test_support::response_json(response).await;
+        assert!(body["data"]["render_id"].as_str().unwrap().len() > 10);
+        assert!(
+            body["data"]["pdf_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(body["data"]["duration_ms"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn render_template_reports_missing_template_as_not_found() {
+        let app = router().with_state(test_support::state(test_support::registry()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/missing:latest")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"data":{"name":"Alice"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = test_support::response_json(response).await;
+        assert_eq!(body["status"].as_u64(), Some(404));
+    }
+
+    #[tokio::test]
+    async fn batch_render_enqueues_job_and_returns_poll_url() {
+        let registry = test_support::registry();
+        registry
+            .publish(test_support::bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        let app = router().with_state(test_support::state(registry));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/invoice:latest/batch")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        r#"{"inputs":[{"key":"cust-1","data":{"name":"Alice"}}],"retain_days":0}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = test_support::response_json(response).await;
+        let job_id = body["data"]["job_id"].as_str().unwrap();
+        assert!(!job_id.is_empty());
+        assert_eq!(body["data"]["total"].as_u64(), Some(1));
+        assert_eq!(
+            body["data"]["status_url"].as_str(),
+            Some(format!("/api/jobs/{job_id}").as_str())
+        );
+    }
 }

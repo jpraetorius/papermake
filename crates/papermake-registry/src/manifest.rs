@@ -11,7 +11,7 @@ pub struct Manifest {
     pub entrypoint: String,
 
     /// Map of file paths to their content hashes
-    /// main.typ -> sha256:<hash>
+    /// `main.typ -> sha256:<hash>`
     pub files: BTreeMap<String, String>,
 
     /// Template metadata
@@ -225,6 +225,18 @@ mod tests {
         assert_eq!(manifest.files.len(), 2);
         assert!(manifest.has_file("main.typ"));
         assert!(manifest.has_file("schema.json"));
+    }
+
+    #[test]
+    fn test_manifest_file_paths_are_file_map_keys() {
+        let metadata = create_test_metadata();
+        let files = create_test_files();
+        let manifest = Manifest::new(files, metadata).unwrap();
+
+        let mut paths = manifest.file_paths();
+        paths.sort();
+
+        assert_eq!(paths, vec!["main.typ", "schema.json"]);
     }
 
     #[test]

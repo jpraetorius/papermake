@@ -250,6 +250,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_instance_id_reports_explicit_or_generated_id() {
+        let explicit = S3BufferedRenderStorage::new(
+            Arc::new(MemoryStorage::new()),
+            Some("inst-1".to_string()),
+            1000,
+        );
+        assert_eq!(explicit.instance_id(), "inst-1");
+
+        let generated = S3BufferedRenderStorage::new(Arc::new(MemoryStorage::new()), None, 1000);
+        assert!(!generated.instance_id().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_store_then_flush_roundtrip() {
         let blob = Arc::new(MemoryStorage::new());
         let store = S3BufferedRenderStorage::new(blob.clone(), Some("inst-1".to_string()), 1000);

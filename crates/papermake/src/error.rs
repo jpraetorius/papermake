@@ -276,7 +276,7 @@ impl From<std::io::Error> for PapermakeError {
 impl From<serde_json::Error> for PapermakeError {
     fn from(error: serde_json::Error) -> Self {
         let reason = error.to_string();
-        if error.is_syntax() || error.is_data() {
+        if error.is_syntax() || error.is_data() || error.is_eof() {
             PapermakeError::Data(DataError::Deserialization { reason })
         } else {
             PapermakeError::Data(DataError::Serialization { reason })
@@ -422,5 +422,156 @@ impl PapermakeError {
             }
             _ => vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use typst::diag::FileError;
+    use typst::diag::SourceDiagnostic;
+    use typst::syntax::Span;
+
+    use super::*;
+
+    #[test]
+    fn diagnostic_info_displays_message_with_optional_source_location() {
+        let without_location = DiagnosticInfo {
+            message: "invalid expression".to_string(),
+            severity: DiagnosticSeverity::Error,
+            location: None,
+            hints: vec![],
+        };
+        let with_location = DiagnosticInfo {
+            message: "invalid expression".to_string(),
+            severity: DiagnosticSeverity::Error,
+            location: Some(SourceLocation {
+                file: "main.typ".to_string(),
+                line: 3,
+                column: 7,
+                range: Some((10, 12)),
+            }),
+            hints: vec![],
+        };
+
+        assert_eq!(without_location.to_string(), "invalid expression");
+        assert_eq!(with_location.to_string(), "main.typ:3: invalid expression");
+    }
+
+    #[test]
+    fn diagnostic_severity_displays_lowercase_wire_values() {
+        assert_eq!(DiagnosticSeverity::Error.to_string(), "error");
+        assert_eq!(DiagnosticSeverity::Warning.to_string(), "warning");
+        assert_eq!(DiagnosticSeverity::Info.to_string(), "info");
+    }
+
+    #[test]
+    fn io_errors_are_classified_by_domain() {
+        let not_found = PapermakeError::from(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let permission_denied =
+            PapermakeError::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let other = PapermakeError::from(std::io::Error::other("disk unavailable"));
+
+        assert!(matches!(
+            not_found,
+            PapermakeError::FileSystem(FileSystemError::NotFound { .. })
+        ));
+        assert!(matches!(
+            permission_denied,
+            PapermakeError::FileSystem(FileSystemError::PermissionDenied { .. })
+        ));
+        assert!(matches!(
+            other,
+            PapermakeError::FileSystem(FileSystemError::ReadError { .. })
+        ));
+    }
+
+    #[test]
+    fn typst_file_errors_are_classified_by_domain() {
+        let not_found = PapermakeError::from(FileError::NotFound("asset.svg".into()));
+        let access_denied = PapermakeError::from(FileError::AccessDenied);
+        let invalid_utf8 = PapermakeError::from(FileError::InvalidUtf8);
+
+        assert!(matches!(
+            not_found,
+            PapermakeError::FileSystem(FileSystemError::NotFound { .. })
+        ));
+        assert!(matches!(
+            access_denied,
+            PapermakeError::FileSystem(FileSystemError::PermissionDenied { .. })
+        ));
+        assert!(matches!(
+            invalid_utf8,
+            PapermakeError::FileSystem(FileSystemError::InvalidUtf8 { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_json_is_classified_as_data_deserialization() {
+        let serde_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let error = PapermakeError::from(serde_error);
+
+        assert!(matches!(
+            error,
+            PapermakeError::Data(DataError::Deserialization { .. })
+        ));
+    }
+
+    #[test]
+    fn user_messages_suggestions_and_recoverability_follow_error_class() {
+        let missing_template = PapermakeError::Template(TemplateError::NotFound {
+            path: "invoice.typ".to_string(),
+        });
+        let bad_json = PapermakeError::Data(DataError::Deserialization {
+            reason: "expected object".to_string(),
+        });
+        let config = PapermakeError::Config(ConfigError::InvalidConfig {
+            setting: "FONTS_DIR".to_string(),
+            reason: "does not exist".to_string(),
+        });
+
+        assert!(!missing_template.is_recoverable());
+        assert!(!missing_template.suggestions().is_empty());
+        assert!(missing_template.user_message().contains("invoice.typ"));
+
+        assert!(bad_json.is_recoverable());
+        assert!(!bad_json.suggestions().is_empty());
+
+        assert!(!config.is_recoverable());
+        assert!(config.suggestions().is_empty());
+    }
+
+    #[test]
+    fn typst_diagnostics_convert_to_public_compilation_error() {
+        let diagnostic =
+            SourceDiagnostic::error(Span::detached(), "unknown variable").with_hint("define it");
+
+        let info = convert_typst_diagnostic(diagnostic.clone());
+        assert_eq!(info.message, "unknown variable");
+        assert_eq!(info.severity, DiagnosticSeverity::Error);
+        assert!(info.location.is_none());
+        assert_eq!(info.hints, vec!["define it"]);
+
+        let error = compilation_error_from_diagnostics(vec![diagnostic]);
+        match error {
+            PapermakeError::Compilation(CompilationError::TypstError {
+                error_count,
+                diagnostics,
+            }) => {
+                assert_eq!(error_count, 1);
+                assert_eq!(diagnostics[0].message, "unknown variable");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn template_missing_file_reports_template_domain() {
+        let error = template_missing_file("header.typ");
+
+        assert!(matches!(
+            error,
+            PapermakeError::Template(TemplateError::MissingFile { .. })
+        ));
+        assert!(error.user_message().contains("header.typ"));
     }
 }

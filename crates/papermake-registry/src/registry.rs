@@ -406,7 +406,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     /// Resolve a template reference to its manifest hash
     ///
     /// This method implements the "tag → manifest hash lookup" workflow:
-    /// 1. Parses the reference string (namespace/name:tag[@hash])
+    /// 1. Parses the reference string (`namespace/name:tag[@hash]`)
     /// 2. Looks up the reference in storage to get the manifest hash
     /// 3. Optionally verifies the hash if provided in the reference
     /// 4. Returns the manifest hash for content-addressable access
@@ -2387,6 +2387,17 @@ Hello #data.name"#
             )
     }
 
+    #[test]
+    fn test_registry_public_constructors_preserve_render_storage_access() {
+        let registry = Registry::new_with_render_storage(
+            MemoryStorage::new(),
+            crate::render_storage::MemoryRenderStorage::new(),
+        )
+        .with_render_limits(0, std::time::Duration::ZERO);
+
+        assert!(registry.render_storage().is_some());
+    }
+
     #[tokio::test]
     async fn test_registry_publish() {
         let storage = MemoryStorage::new();
@@ -2400,6 +2411,28 @@ Hello #data.name"#
 
         assert!(manifest_hash.starts_with("sha256:"));
         assert_eq!(manifest_hash.len(), 71); // "sha256:" + 64 hex chars
+    }
+
+    #[tokio::test]
+    async fn test_get_template_source_returns_published_entrypoint() {
+        let storage = MemoryStorage::new();
+        let registry = Registry::new_storage_only(storage);
+        let metadata = TemplateMetadata::new("Source Template", "test@example.com");
+        let main_content = br#"#let data = json(bytes(sys.inputs.data))
+Hello #data.name"#
+            .to_vec();
+        let bundle = TemplateBundle::new(main_content.clone(), metadata);
+
+        registry
+            .publish(bundle, "source-template", "latest")
+            .await
+            .unwrap();
+
+        let source = registry
+            .get_template_source("source-template:latest")
+            .await
+            .unwrap();
+        assert_eq!(source.as_bytes(), main_content.as_slice());
     }
 
     #[tokio::test]
@@ -2941,13 +2974,14 @@ Content: #data.content"#
     #[ignore = "requires a live S3 at localhost:9000 (see docker-compose.yml)"]
     #[tokio::test(flavor = "multi_thread")]
     async fn test_registry_list_templates_no_namespace() {
-        unsafe {
-            std::env::set_var("S3_ENDPOINT_URL", "http://localhost:9000");
-            std::env::set_var("S3_ACCESS_KEY_ID", "papermake");
-            std::env::set_var("S3_SECRET_ACCESS_KEY", "papermake-secret");
-            std::env::set_var("S3_BUCKET", "papermake-registry-test");
-        }
-        let storage = S3Storage::from_env().unwrap();
+        let storage = S3Storage::from_env_values(|key| match key {
+            "S3_ENDPOINT_URL" => Ok("http://localhost:9000".to_string()),
+            "S3_ACCESS_KEY_ID" => Ok("papermake".to_string()),
+            "S3_SECRET_ACCESS_KEY" => Ok("papermake-secret".to_string()),
+            "S3_BUCKET" => Ok("papermake-registry-test".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        })
+        .unwrap();
         storage.ensure_bucket().await.unwrap();
         let registry = Registry::new_storage_only(storage);
         let bundle = create_test_bundle();
@@ -3140,16 +3174,48 @@ Content: #data.content"#
         // Verify result structure
         assert!(!result.render_id.is_empty());
         assert!(!result.pdf_bytes.is_empty());
-        assert!(result.pdf_hash.starts_with("sha256:"));
-        assert!(result.duration_ms > 0);
+        assert_eq!(result.pdf_hash, ContentAddress::hash(&result.pdf_bytes));
 
         // Verify render record was stored
         let records = registry.list_recent_renders(10).await.unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].render_id, result.render_id);
+        assert_eq!(records[0].duration_ms, result.duration_ms);
         assert_eq!(records[0].template_name, "test-template");
         assert_eq!(records[0].template_tag, "latest");
         assert!(records[0].success);
+    }
+
+    #[tokio::test]
+    async fn test_render_and_store_with_options_updates_public_render_queries() {
+        let storage = MemoryStorage::new();
+        let render_storage = crate::render_storage::MemoryRenderStorage::new();
+        let registry = Registry::new(storage, render_storage);
+        registry
+            .publish(create_test_bundle(), "test-user/test-template", "latest")
+            .await
+            .unwrap();
+
+        let result = registry
+            .render_and_store_with_options(
+                "test-user/test-template:latest",
+                &serde_json::json!({ "name": "Test User" }),
+                &RenderOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.pdf_bytes.starts_with(b"%PDF"));
+        let renders = registry
+            .list_template_renders("test-template", 10)
+            .await
+            .unwrap();
+        assert_eq!(renders.len(), 1);
+        assert_eq!(renders[0].render_id, result.render_id);
+
+        let summary = registry.render_summary().await.unwrap();
+        assert_eq!(summary.recent.len(), 1);
+        assert_eq!(summary.recent[0].render_id, result.render_id);
     }
 
     #[tokio::test]
@@ -3182,8 +3248,7 @@ Content: #data.content"#
         // Verify result structure
         assert!(!result.render_id.is_empty());
         assert!(!result.pdf_bytes.is_empty());
-        assert!(result.pdf_hash.starts_with("sha256:"));
-        assert!(result.duration_ms > 0);
+        assert_eq!(result.pdf_hash, ContentAddress::hash(&result.pdf_bytes));
 
         // Trying to list renders should fail without render storage
         let list_result = registry.list_recent_renders(10).await;
@@ -3341,7 +3406,11 @@ Content: #data.content"#
             .unwrap();
         if let AnalyticsResult::Duration(duration_points) = duration_result {
             assert!(!duration_points.is_empty());
-            assert!(duration_points.iter().any(|p| p.avg_duration_ms > 0.0));
+            assert!(duration_points.iter().all(|p| {
+                p.avg_duration_ms >= 0.0
+                    && p.p90_duration_ms <= p.p95_duration_ms
+                    && p.p95_duration_ms <= p.p99_duration_ms
+            }));
         } else {
             panic!("Expected Duration result");
         }

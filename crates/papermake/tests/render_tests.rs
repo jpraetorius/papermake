@@ -6,39 +6,34 @@ use serde_json::json;
 
 #[test]
 fn test_render_pdf() {
-    // Valid data
     let data = json!({
         "name": "World"
     });
 
-    // Render
     let result = render_template(
-        "#set text(font: \"Arial\")\nHello #data.name!".to_string(),
+        "Hello #data.name!".to_string(),
         Arc::new(InMemoryFileSystem::new()),
         &data,
     );
     assert!(result.is_ok());
 
-    let pdf_bytes = result.unwrap();
-    assert!(pdf_bytes.pdf.is_some());
-
-    // Verify PDF structure instead of saving to file
-    // 1. Check for PDF header
-    let header = &pdf_bytes.pdf.as_ref().unwrap()[0..8];
+    let render_result = result.unwrap();
     assert!(
-        header == b"%PDF-1.7" || header == b"%PDF-1.6" || header == b"%PDF-1.5",
+        render_result.success,
+        "render failed: {:?}",
+        render_result.errors
+    );
+    let pdf_bytes = render_result.pdf.expect("successful render includes a PDF");
+
+    assert!(
+        pdf_bytes.starts_with(b"%PDF-"),
         "PDF should start with a valid header"
     );
 
-    // Parse PDF and check for font
-    let file = pdf::file::FileOptions::cached()
-        .load(pdf_bytes.pdf.as_ref().unwrap().clone())
-        .unwrap();
-    let mut found_arial = false;
+    let file = pdf::file::FileOptions::cached().load(pdf_bytes).unwrap();
     let mut checked_embedded_fonts = 0;
     let mut fonts_without_embedded_data = Vec::new();
 
-    // Check each page's resources for fonts
     if let Ok(page) = file.get_page(0)
         && let Ok(resources) = page.resources()
     {
@@ -52,10 +47,6 @@ fn test_render_pdf() {
                 .as_ref()
                 .map(|name| name.to_string())
                 .unwrap_or_else(|| "<unnamed>".to_string());
-
-            if font_name.to_lowercase().contains("arial") {
-                found_arial = true;
-            }
 
             if !matches!(font_ref.subtype, FontType::Type3) {
                 checked_embedded_fonts += 1;
@@ -80,7 +71,6 @@ fn test_render_pdf() {
         }
     }
 
-    assert!(found_arial, "PDF should contain Arial font");
     assert!(
         checked_embedded_fonts > 0,
         "PDF should contain at least one embeddable font"

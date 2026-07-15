@@ -145,6 +145,12 @@ mod tests {
     }
 
     #[test]
+    fn test_raw_date_prefix() {
+        let d = Date::from_calendar_date(2026, Month::July, 9).unwrap();
+        assert_eq!(raw_date_prefix(d), "analytics/raw/dt=2026-07-09/");
+    }
+
+    #[test]
     fn test_expiry_key_and_prefix() {
         let d = Date::from_calendar_date(2026, Month::August, 1).unwrap();
         assert_eq!(
@@ -163,5 +169,15 @@ mod tests {
         );
         assert_eq!(parse_dt("expiry/dt=2026-07-09/x.ndjson"), Some(d));
         assert_eq!(parse_dt("no-date-here"), None);
+    }
+
+    #[test]
+    fn test_parse_shard_key() {
+        assert_eq!(
+            parse_shard_key("jobs/job-1/shards/7/shard.json"),
+            Some(("job-1".to_string(), 7))
+        );
+        assert_eq!(parse_shard_key("jobs/job-1/shards/nope/shard.json"), None);
+        assert_eq!(parse_shard_key("jobs/job-1/shards/7/results.json"), None);
     }
 }

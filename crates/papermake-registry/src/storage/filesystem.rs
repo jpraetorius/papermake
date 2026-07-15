@@ -99,3 +99,93 @@ impl<S: BlobStorage + 'static> RenderFileSystem for RegistryFileSystem<S> {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use papermake::RenderFileSystem;
+
+    use super::*;
+    use crate::bundle::TemplateMetadata;
+    use crate::storage::blob_storage::MemoryStorage;
+
+    fn manifest_for(files: &[(&str, &[u8])]) -> Manifest {
+        let hashes = files
+            .iter()
+            .map(|(path, contents)| (path.to_string(), ContentAddress::hash(contents)))
+            .collect::<BTreeMap<_, _>>();
+
+        Manifest::new(
+            hashes,
+            TemplateMetadata::new("Test Template", "test@example.com"),
+        )
+        .unwrap()
+    }
+
+    async fn populated_file_system(files: &[(&str, &[u8])]) -> RegistryFileSystem<MemoryStorage> {
+        let storage = Arc::new(MemoryStorage::new());
+        let manifest = manifest_for(files);
+
+        for (path, contents) in files {
+            let hash = manifest.get_file_hash(path).unwrap();
+            storage
+                .put(&ContentAddress::blob_key(hash), contents.to_vec())
+                .await
+                .unwrap();
+        }
+
+        RegistryFileSystem::new(storage, manifest).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_file_reads_manifest_addressed_blob() {
+        let fs =
+            populated_file_system(&[("main.typ", b"= Main"), ("asset.txt", b"asset contents")])
+                .await;
+
+        assert_eq!(fs.get_file("asset.txt").unwrap(), b"asset contents");
+        assert_eq!(fs.get_file("/asset.txt").unwrap(), b"asset contents");
+    }
+
+    #[tokio::test]
+    async fn get_file_reports_not_found_when_manifest_has_no_path() {
+        let fs = populated_file_system(&[("main.typ", b"= Main")]).await;
+
+        assert!(matches!(
+            fs.get_file("missing.txt"),
+            Err(FileError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_file_reports_not_found_when_addressed_blob_is_missing() {
+        let storage = Arc::new(MemoryStorage::new());
+        let manifest = manifest_for(&[("main.typ", b"= Main"), ("asset.txt", b"asset")]);
+        let main_hash = manifest.get_file_hash("main.typ").unwrap();
+        storage
+            .put(&ContentAddress::blob_key(main_hash), b"= Main".to_vec())
+            .await
+            .unwrap();
+        let fs = RegistryFileSystem::new(storage, manifest).unwrap();
+
+        assert!(matches!(
+            fs.get_file("asset.txt"),
+            Err(FileError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn new_requires_an_active_tokio_runtime() {
+        let storage = Arc::new(MemoryStorage::new());
+        let manifest = manifest_for(&[("main.typ", b"= Main")]);
+
+        let result = RegistryFileSystem::new(storage, manifest);
+
+        assert!(matches!(
+            result,
+            Err(RegistryError::Storage(StorageError::Configuration { .. }))
+        ));
+    }
+}

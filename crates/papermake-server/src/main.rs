@@ -3,6 +3,7 @@
 //! Provides REST API endpoints for template management, PDF rendering,
 //! and analytics for the Papermake PDF generation system.
 
+use async_trait::async_trait;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -10,7 +11,14 @@ use axum::{
     response::Json,
     routing::get,
 };
-use papermake_registry::{Registry, S3BufferedRenderStorage, S3Storage};
+use papermake_registry::{
+    AnalyticsQuery, AnalyticsResult, BlobStorage, Registry, RegistryError, RenderOptions,
+    RenderRecord, RenderStorage, S3BufferedRenderStorage, S3Storage, TemplateInfo,
+    batch::{BatchInput, BatchItem, BatchJob, JobView},
+    bundle::TemplateBundle,
+    registry::{DeleteSummary, RenderResult as RegistryRenderResult},
+    render_storage::summary::Summary,
+};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 use tower::ServiceBuilder;
@@ -31,11 +39,178 @@ use crate::models::RenderJob;
 
 /// Render storage backing the server: the buffered-S3 store over S3 blobs.
 pub type ServerRenderStorage = S3BufferedRenderStorage<S3Storage>;
+type RegistryApiResult<T> = std::result::Result<T, RegistryError>;
+
+#[async_trait]
+pub trait ServerRegistry: Send + Sync {
+    async fn list_templates(&self) -> RegistryApiResult<Vec<TemplateInfo>>;
+
+    async fn publish(
+        &self,
+        bundle: TemplateBundle,
+        namespace: &str,
+        tag: &str,
+    ) -> RegistryApiResult<String>;
+
+    async fn resolve(&self, reference: &str) -> RegistryApiResult<String>;
+
+    async fn get_template_source(&self, reference: &str) -> RegistryApiResult<String>;
+
+    async fn render_summary(&self) -> RegistryApiResult<Summary>;
+
+    async fn list_template_renders(
+        &self,
+        template_name: &str,
+        limit: u32,
+    ) -> RegistryApiResult<Vec<RenderRecord>>;
+
+    async fn render_and_store(
+        &self,
+        reference: &str,
+        data: &Value,
+    ) -> RegistryApiResult<RegistryRenderResult>;
+
+    async fn render_and_store_with(
+        &self,
+        reference: &str,
+        data: &Value,
+        retain_override: Option<u32>,
+        options: &RenderOptions,
+    ) -> RegistryApiResult<RegistryRenderResult>;
+
+    async fn delete_version(&self, name: &str, tag: &str) -> RegistryApiResult<DeleteSummary>;
+
+    async fn get_render_analytics(
+        &self,
+        query: AnalyticsQuery,
+    ) -> RegistryApiResult<AnalyticsResult>;
+
+    async fn list_recent_renders(&self, limit: u32) -> RegistryApiResult<Vec<RenderRecord>>;
+
+    async fn get_render_pdf(&self, render_id: &str) -> RegistryApiResult<Vec<u8>>;
+
+    async fn enqueue_batch_job(
+        &self,
+        reference: &str,
+        inputs: &[BatchInput],
+        retain_days: Option<u32>,
+        options: &RenderOptions,
+    ) -> RegistryApiResult<BatchJob>;
+
+    async fn get_batch_job(&self, job_id: &str) -> RegistryApiResult<JobView>;
+
+    async fn list_job_items(
+        &self,
+        job_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> RegistryApiResult<Vec<BatchItem>>;
+}
+
+#[async_trait]
+impl<S, R> ServerRegistry for Registry<S, R>
+where
+    S: BlobStorage + 'static,
+    R: RenderStorage + 'static,
+{
+    async fn list_templates(&self) -> RegistryApiResult<Vec<TemplateInfo>> {
+        Registry::list_templates(self).await
+    }
+
+    async fn publish(
+        &self,
+        bundle: TemplateBundle,
+        namespace: &str,
+        tag: &str,
+    ) -> RegistryApiResult<String> {
+        Registry::publish(self, bundle, namespace, tag).await
+    }
+
+    async fn resolve(&self, reference: &str) -> RegistryApiResult<String> {
+        Registry::resolve(self, reference).await
+    }
+
+    async fn get_template_source(&self, reference: &str) -> RegistryApiResult<String> {
+        Registry::get_template_source(self, reference).await
+    }
+
+    async fn render_summary(&self) -> RegistryApiResult<Summary> {
+        Registry::render_summary(self).await
+    }
+
+    async fn list_template_renders(
+        &self,
+        template_name: &str,
+        limit: u32,
+    ) -> RegistryApiResult<Vec<RenderRecord>> {
+        Registry::list_template_renders(self, template_name, limit).await
+    }
+
+    async fn render_and_store(
+        &self,
+        reference: &str,
+        data: &Value,
+    ) -> RegistryApiResult<RegistryRenderResult> {
+        Registry::render_and_store(self, reference, data).await
+    }
+
+    async fn render_and_store_with(
+        &self,
+        reference: &str,
+        data: &Value,
+        retain_override: Option<u32>,
+        options: &RenderOptions,
+    ) -> RegistryApiResult<RegistryRenderResult> {
+        Registry::render_and_store_with(self, reference, data, retain_override, options).await
+    }
+
+    async fn delete_version(&self, name: &str, tag: &str) -> RegistryApiResult<DeleteSummary> {
+        Registry::delete_version(self, name, tag).await
+    }
+
+    async fn get_render_analytics(
+        &self,
+        query: AnalyticsQuery,
+    ) -> RegistryApiResult<AnalyticsResult> {
+        Registry::get_render_analytics(self, query).await
+    }
+
+    async fn list_recent_renders(&self, limit: u32) -> RegistryApiResult<Vec<RenderRecord>> {
+        Registry::list_recent_renders(self, limit).await
+    }
+
+    async fn get_render_pdf(&self, render_id: &str) -> RegistryApiResult<Vec<u8>> {
+        Registry::get_render_pdf(self, render_id).await
+    }
+
+    async fn enqueue_batch_job(
+        &self,
+        reference: &str,
+        inputs: &[BatchInput],
+        retain_days: Option<u32>,
+        options: &RenderOptions,
+    ) -> RegistryApiResult<BatchJob> {
+        Registry::enqueue_batch_job(self, reference, inputs, retain_days, options).await
+    }
+
+    async fn get_batch_job(&self, job_id: &str) -> RegistryApiResult<JobView> {
+        Registry::get_batch_job(self, job_id).await
+    }
+
+    async fn list_job_items(
+        &self,
+        job_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> RegistryApiResult<Vec<BatchItem>> {
+        Registry::list_job_items(self, job_id, offset, limit).await
+    }
+}
 
 /// Main application state
 #[derive(Clone)]
 pub struct AppState {
-    pub registry: Arc<Registry<S3Storage, ServerRenderStorage>>,
+    pub registry: Arc<dyn ServerRegistry>,
     pub config: ServerConfig,
     pub job_sender: tokio::sync::mpsc::UnboundedSender<RenderJob>,
 }
@@ -295,4 +470,46 @@ async fn health_check() -> Result<Json<Value>> {
         "version": env!("CARGO_PKG_VERSION"),
         "timestamp": time::OffsetDateTime::now_utc()
     })))
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use axum::body::{Body, Bytes, to_bytes};
+    use papermake_registry::{
+        render_storage::MemoryRenderStorage, storage::blob_storage::MemoryStorage,
+    };
+
+    pub(crate) type TestRegistry = Registry<MemoryStorage, MemoryRenderStorage>;
+
+    pub(crate) fn registry() -> TestRegistry {
+        Registry::new(MemoryStorage::new(), MemoryRenderStorage::new())
+    }
+
+    pub(crate) fn state(registry: TestRegistry) -> AppState {
+        let (job_sender, _job_receiver) = tokio::sync::mpsc::unbounded_channel();
+        AppState {
+            registry: Arc::new(registry),
+            config: ServerConfig::default(),
+            job_sender,
+        }
+    }
+
+    pub(crate) fn bundle() -> TemplateBundle {
+        TemplateBundle::new(
+            br#"#let data = json(bytes(sys.inputs.data))
+= Test
+Hello #data.name"#
+                .to_vec(),
+            papermake_registry::bundle::TemplateMetadata::new("Test", "test@example.com"),
+        )
+    }
+
+    pub(crate) async fn response_bytes(response: Response<Body>) -> Bytes {
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    }
+
+    pub(crate) async fn response_json(response: Response<Body>) -> Value {
+        serde_json::from_slice(&response_bytes(response).await).unwrap()
+    }
 }

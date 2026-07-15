@@ -112,6 +112,8 @@ what Papermake does, a short quick start, and documentation links.
   examples in the same chunk.
 - When changing public API behavior, update `docs/reference/api.md` and the
   OpenAPI definitions/tests in `crates/papermake-server/src/openapi.rs`.
-- cover changes with tests, ideally TDD style, where the test is written first 
-  and the implementation turns it green to avoid coupling tests to implementation
+- Cover changes and new functionality with tests, especially public/exported
+  functions where breakage affects downstream users.
+- Prefer TDD style where practical: write the test first, then make the
+  implementation turn it green, to avoid coupling tests to implementation
   details.

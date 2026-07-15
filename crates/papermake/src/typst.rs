@@ -351,6 +351,12 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn font_helpers_are_safe_for_startup_and_malformed_template_font_data() {
+        preload_fonts();
+        assert!(load_font_faces(b"not a font").is_empty());
+    }
+
     #[tokio::test]
     async fn test_simple_template_rendering() {
         let template = r#"
@@ -420,14 +426,27 @@ mod tests {
     #[test]
     fn test_typst_world_creation() {
         let world = PapermakeWorld::new("Hello".to_string(), "{}".to_string());
-        assert!(format!("{:?}", world).contains("TypstWorld"));
+        let source = typst::World::source(&world, typst::World::main(&world)).unwrap();
+        assert!(
+            source
+                .text()
+                .starts_with("#let data = json(bytes(sys.inputs.data))")
+        );
+        assert!(source.text().contains("Hello"));
     }
 
     #[test]
     fn test_typst_world_with_file_system() {
-        let fs = Arc::new(InMemoryFileSystem::new());
-        let world = PapermakeWorld::with_file_system("Hello".to_string(), "{}".to_string(), fs);
-        assert!(format!("{:?}", world).contains("has_file_system: true"));
+        let mut fs = InMemoryFileSystem::new();
+        fs.add_file("/asset.txt", b"asset".to_vec());
+        let world =
+            PapermakeWorld::with_file_system("Hello".to_string(), "{}".to_string(), Arc::new(fs));
+        let file_id = FileId::new(typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Project,
+            typst::syntax::VirtualPath::new("/asset.txt").unwrap(),
+        ));
+        let bytes = typst::World::file(&world, file_id).unwrap();
+        assert_eq!(bytes.as_slice(), b"asset");
     }
 
     #[test]

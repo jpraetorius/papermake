@@ -462,3 +462,176 @@ impl From<std::io::Error> for StorageError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_error_constructors_preserve_the_error_domain() {
+        assert!(matches!(
+            StorageError::not_found("templates/main.typ"),
+            StorageError::NotFound { key } if key == "templates/main.typ"
+        ));
+        assert!(matches!(
+            StorageError::access_denied("secret"),
+            StorageError::AccessDenied { key } if key == "secret"
+        ));
+        assert!(matches!(
+            StorageError::network("offline"),
+            StorageError::Network { message } if message == "offline"
+        ));
+        assert!(matches!(
+            StorageError::backend("failed"),
+            StorageError::Backend { message } if message == "failed"
+        ));
+        assert!(matches!(
+            StorageError::configuration("missing bucket"),
+            StorageError::Configuration { message } if message == "missing bucket"
+        ));
+        assert!(matches!(
+            StorageError::timeout(5),
+            StorageError::Timeout { seconds: 5 }
+        ));
+        assert!(matches!(
+            StorageError::limit_exceeded("too large"),
+            StorageError::LimitExceeded { message } if message == "too large"
+        ));
+    }
+
+    #[test]
+    fn template_error_constructors_preserve_the_error_domain() {
+        assert!(matches!(
+            TemplateError::not_found("invoice:latest"),
+            TemplateError::NotFound { reference } if reference == "invoice:latest"
+        ));
+        assert!(matches!(
+            TemplateError::invalid("bad manifest"),
+            TemplateError::Invalid { message } if message == "bad manifest"
+        ));
+        assert!(matches!(
+            TemplateError::missing_file("main.typ"),
+            TemplateError::MissingFile { filename } if filename == "main.typ"
+        ));
+        assert!(matches!(
+            TemplateError::invalid_metadata("name", "empty"),
+            TemplateError::InvalidMetadata { field, message } if field == "name" && message == "empty"
+        ));
+        assert!(matches!(
+            TemplateError::conversion_failed("tar failed"),
+            TemplateError::ConversionFailed { message } if message == "tar failed"
+        ));
+        assert!(matches!(
+            TemplateError::already_exists("invoice:v1"),
+            TemplateError::AlreadyExists { reference } if reference == "invoice:v1"
+        ));
+        assert!(matches!(
+            TemplateError::too_large(12, 10),
+            TemplateError::TooLarge {
+                size: 12,
+                limit: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn reference_error_constructors_preserve_the_error_domain() {
+        assert!(matches!(
+            ReferenceError::invalid_format("bad", "missing name"),
+            ReferenceError::InvalidFormat { reference, reason } if reference == "bad" && reason == "missing name"
+        ));
+        assert!(matches!(
+            ReferenceError::invalid_namespace("bad namespace", "spaces"),
+            ReferenceError::InvalidNamespace { namespace, reason } if namespace == "bad namespace" && reason == "spaces"
+        ));
+        assert!(matches!(
+            ReferenceError::invalid_tag("bad tag", "spaces"),
+            ReferenceError::InvalidTag { tag, reason } if tag == "bad tag" && reason == "spaces"
+        ));
+        assert!(matches!(
+            ReferenceError::invalid_hash("sha256:bad"),
+            ReferenceError::InvalidHash { hash } if hash == "sha256:bad"
+        ));
+        assert!(matches!(
+            ReferenceError::hash_mismatch("latest", "sha256:a", "sha256:b"),
+            ReferenceError::HashMismatch { tag, expected, actual }
+                if tag == "latest" && expected == "sha256:a" && actual == "sha256:b"
+        ));
+        assert!(matches!(
+            ReferenceError::resolution_failed("invoice"),
+            ReferenceError::ResolutionFailed { reference } if reference == "invoice"
+        ));
+        assert!(matches!(
+            ReferenceError::ambiguous("invoice", "multiple namespaces"),
+            ReferenceError::Ambiguous { reference, reason }
+                if reference == "invoice" && reason == "multiple namespaces"
+        ));
+    }
+
+    #[test]
+    fn content_addressing_error_constructors_preserve_the_error_domain() {
+        assert!(matches!(
+            ContentAddressingError::hash_failed("unavailable"),
+            ContentAddressingError::HashFailed { message } if message == "unavailable"
+        ));
+        assert!(matches!(
+            ContentAddressingError::integrity_check_failed("sha256:a", "sha256:b"),
+            ContentAddressingError::IntegrityCheckFailed { expected, actual }
+                if expected == "sha256:a" && actual == "sha256:b"
+        ));
+        assert!(matches!(
+            ContentAddressingError::invalid_hash_format("bad"),
+            ContentAddressingError::InvalidHashFormat { hash } if hash == "bad"
+        ));
+        assert!(matches!(
+            ContentAddressingError::manifest_error("invalid"),
+            ContentAddressingError::ManifestError { message } if message == "invalid"
+        ));
+        assert!(matches!(
+            ContentAddressingError::circular_dependency("main.typ"),
+            ContentAddressingError::CircularDependency { path } if path == "main.typ"
+        ));
+    }
+
+    #[test]
+    fn cache_error_constructors_preserve_the_error_domain() {
+        assert!(matches!(
+            CacheError::initialization_failed("unavailable"),
+            CacheError::InitializationFailed { message } if message == "unavailable"
+        ));
+        assert!(matches!(CacheError::poisoned(), CacheError::Poisoned));
+        assert!(matches!(
+            CacheError::eviction_failed("locked"),
+            CacheError::EvictionFailed { message } if message == "locked"
+        ));
+        assert!(matches!(
+            CacheError::invalidation_failed(vec!["a".to_string(), "b".to_string()]),
+            CacheError::InvalidationFailed { refs } if refs == vec!["a", "b"]
+        ));
+        assert!(matches!(
+            CacheError::consistency_error("stale"),
+            CacheError::ConsistencyError { message } if message == "stale"
+        ));
+    }
+
+    #[test]
+    fn external_error_conversions_preserve_actionable_domains() {
+        let not_found = StorageError::from(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let permission_denied =
+            StorageError::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let timed_out = StorageError::from(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        let other = StorageError::from(std::io::Error::other("disk unavailable"));
+        let utf8 = TemplateError::from(String::from_utf8(vec![0xff]).unwrap_err());
+        let poisoned = CacheError::from(std::sync::PoisonError::new(()));
+
+        assert!(matches!(not_found, StorageError::NotFound { .. }));
+        assert!(matches!(
+            permission_denied,
+            StorageError::AccessDenied { .. }
+        ));
+        assert!(matches!(timed_out, StorageError::Timeout { .. }));
+        assert!(matches!(other, StorageError::Backend { .. }));
+        assert!(matches!(utf8, TemplateError::Invalid { .. }));
+        assert!(matches!(poisoned, CacheError::Poisoned));
+    }
+}

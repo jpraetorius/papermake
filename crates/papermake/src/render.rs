@@ -464,12 +464,17 @@ mod tests {
         .unwrap()
     }
 
+    fn assert_successful_pdf(result: RenderResult) -> Vec<u8> {
+        assert!(result.success, "render failed: {:?}", result.errors);
+        let pdf = result.pdf.expect("successful render has PDF bytes");
+        assert!(pdf.starts_with(b"%PDF"));
+        pdf
+    }
+
     #[test]
     fn default_render_is_plain_pdf() {
         let result = render_with(&RenderOptions::default());
-        assert!(result.success, "render failed: {:?}", result.errors);
-        let pdf = result.pdf.unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        let pdf = assert_successful_pdf(result);
         // No PDF/A conformance metadata without a requested standard.
         assert!(!contains(&pdf, b"pdfaid"));
     }
@@ -477,15 +482,44 @@ mod tests {
     #[test]
     fn pdf_a3b_render_declares_conformance() {
         let result = render_with(&RenderOptions::pdf_a3b());
-        assert!(
-            result.success,
-            "PDF/A-3b render failed: {:?}",
-            result.errors
-        );
-        let pdf = result.pdf.unwrap();
-        assert!(pdf.starts_with(b"%PDF"));
+        let pdf = assert_successful_pdf(result);
         // typst-pdf writes pdfaid:part / pdfaid:conformance into the XMP metadata.
         assert!(contains(&pdf, b"pdfaid"));
+    }
+
+    #[test]
+    fn render_with_fonts_accepts_no_template_bundled_fonts() {
+        let result = render_template_with_fonts(
+            "Hello #data.name!".to_string(),
+            Arc::new(InMemoryFileSystem::new()),
+            &serde_json::json!({ "name": "World" }),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_successful_pdf(result);
+    }
+
+    #[test]
+    fn render_with_cache_reuses_supplied_world() {
+        let fs = Arc::new(InMemoryFileSystem::new());
+        let initial_data = serde_json::to_string(&serde_json::json!({ "name": "Initial" }))
+            .expect("test data serializes");
+        let mut world = PapermakeWorld::with_file_system(
+            "Hello #data.name!".to_string(),
+            initial_data,
+            fs.clone(),
+        );
+
+        let result = render_template_with_cache(
+            "ignored when cache is supplied".to_string(),
+            fs,
+            serde_json::json!({ "name": "Updated" }),
+            Some(&mut world),
+        )
+        .unwrap();
+
+        assert_successful_pdf(result);
     }
 
     #[test]

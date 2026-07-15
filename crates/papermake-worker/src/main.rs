@@ -37,7 +37,12 @@ enum Role {
 
 impl Role {
     fn from_env() -> Self {
-        match std::env::var("WORKER_ROLE")
+        let value = std::env::var("WORKER_ROLE").ok();
+        Self::from_value(value.as_deref())
+    }
+
+    fn from_value(value: Option<&str>) -> Self {
+        match value
             .unwrap_or_default()
             .trim()
             .to_ascii_lowercase()
@@ -62,18 +67,30 @@ impl Role {
     }
 }
 
+fn default_interval_seconds(role: Role) -> u64 {
+    match role {
+        Role::Render => 5,
+        Role::Maintenance => 30,
+        Role::All => 10,
+    }
+}
+
 fn env_u64(key: &str, default: u64) -> u64 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    let value = std::env::var(key).ok();
+    env_u64_value(value.as_deref(), default)
+}
+
+fn env_u64_value(value: Option<&str>, default: u64) -> u64 {
+    value.and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    let value = std::env::var(key).ok();
+    env_u32_value(value.as_deref(), default)
+}
+
+fn env_u32_value(value: Option<&str>, default: u32) -> u32 {
+    value.and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 #[tokio::main]
@@ -115,14 +132,7 @@ async fn main() {
 
     // Poll/act cadence, defaulted by role (env overrides): render polls fast to
     // pick up new jobs quickly; maintenance aggregates/prunes on a slower beat.
-    let interval = env_u64(
-        "WORKER_INTERVAL_SECONDS",
-        match role {
-            Role::Render => 5,
-            Role::Maintenance => 30,
-            Role::All => 10,
-        },
-    );
+    let interval = env_u64("WORKER_INTERVAL_SECONDS", default_interval_seconds(role));
     let analytics_retention_days = env_u32("ANALYTICS_RETENTION_DAYS", 30);
     let job_retention_days = env_u32("JOB_RETENTION_DAYS", 7);
     let lease_secs = env_u64("WORKER_LEASE_SECONDS", 120);
@@ -277,5 +287,64 @@ async fn wait_for_shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_parsing_accepts_documented_aliases() {
+        for value in [Some("render"), Some("renderer"), Some(" RENDER ")] {
+            assert_eq!(Role::from_value(value), Role::Render);
+        }
+
+        for value in [Some("maintenance"), Some("maint"), Some(" MAINT ")] {
+            assert_eq!(Role::from_value(value), Role::Maintenance);
+        }
+
+        for value in [None, Some(""), Some("all"), Some("both"), Some(" BOTH ")] {
+            assert_eq!(Role::from_value(value), Role::All);
+        }
+    }
+
+    #[test]
+    fn unknown_roles_default_to_all_responsibilities() {
+        let role = Role::from_value(Some("unknown"));
+
+        assert_eq!(role, Role::All);
+        assert!(role.renders());
+        assert!(role.maintains());
+    }
+
+    #[test]
+    fn roles_advertise_their_responsibilities() {
+        assert!(Role::Render.renders());
+        assert!(!Role::Render.maintains());
+
+        assert!(!Role::Maintenance.renders());
+        assert!(Role::Maintenance.maintains());
+
+        assert!(Role::All.renders());
+        assert!(Role::All.maintains());
+    }
+
+    #[test]
+    fn role_defaults_use_render_fast_maintenance_slow_and_all_between() {
+        assert_eq!(default_interval_seconds(Role::Render), 5);
+        assert_eq!(default_interval_seconds(Role::Maintenance), 30);
+        assert_eq!(default_interval_seconds(Role::All), 10);
+    }
+
+    #[test]
+    fn numeric_env_helpers_accept_valid_values_and_fall_back_otherwise() {
+        assert_eq!(env_u64_value(Some("12"), 5), 12);
+        assert_eq!(env_u64_value(Some("not-a-number"), 5), 5);
+        assert_eq!(env_u64_value(None, 5), 5);
+
+        assert_eq!(env_u32_value(Some("7"), 3), 7);
+        assert_eq!(env_u32_value(Some("-1"), 3), 3);
+        assert_eq!(env_u32_value(None, 3), 3);
     }
 }

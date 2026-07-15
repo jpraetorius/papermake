@@ -142,3 +142,82 @@ impl ApiError {
         Self::Validation(msg.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::to_bytes, response::IntoResponse};
+    use serde_json::Value;
+
+    use super::*;
+
+    async fn response_json(error: ApiError) -> (StatusCode, Value) {
+        let response = error.into_response();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = serde_json::from_slice(&bytes).unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn not_found_errors_are_reported_as_not_found() {
+        let (status, body) = response_json(ApiError::template_not_found("invoice")).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body["status"].as_u64(),
+            Some(u64::from(StatusCode::NOT_FOUND.as_u16()))
+        );
+        assert!(body["error"].as_str().unwrap().contains("invoice"));
+    }
+
+    #[tokio::test]
+    async fn request_errors_are_reported_as_bad_request() {
+        for error in [
+            ApiError::bad_request("missing field"),
+            ApiError::validation("invalid field"),
+        ] {
+            let (status, body) = response_json(error).await;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body["status"].as_u64(),
+                Some(u64::from(StatusCode::BAD_REQUEST.as_u16()))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn internal_configuration_details_are_redacted() {
+        let (status, body) = response_json(ApiError::Config("secret token".to_string())).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body["status"].as_u64(),
+            Some(u64::from(StatusCode::INTERNAL_SERVER_ERROR.as_u16()))
+        );
+        assert_eq!(body["error"], "Configuration error");
+    }
+
+    #[tokio::test]
+    async fn generic_internal_errors_are_redacted() {
+        let (status, body) = response_json(ApiError::internal("database password")).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body["status"].as_u64(),
+            Some(u64::from(StatusCode::INTERNAL_SERVER_ERROR.as_u16()))
+        );
+        assert_eq!(body["error"], "Internal server error");
+    }
+
+    #[tokio::test]
+    async fn timeout_errors_have_timeout_status() {
+        let (status, body) = response_json(ApiError::Timeout).await;
+
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(
+            body["status"].as_u64(),
+            Some(u64::from(StatusCode::REQUEST_TIMEOUT.as_u16()))
+        );
+    }
+}

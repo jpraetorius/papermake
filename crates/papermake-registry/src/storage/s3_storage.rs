@@ -57,19 +57,25 @@ impl S3Storage {
     /// - S3_ENDPOINT_URL (for S3-compatible services)
     /// - S3_BUCKET
     pub fn from_env() -> Result<Self, StorageError> {
-        let bucket = std::env::var("S3_BUCKET").map_err(|_| {
+        Self::from_env_values(|key| std::env::var(key))
+    }
+
+    pub(crate) fn from_env_values(
+        mut env: impl FnMut(&str) -> Result<String, std::env::VarError>,
+    ) -> Result<Self, StorageError> {
+        let bucket = env("S3_BUCKET").map_err(|_| {
             StorageError::Backend("S3_BUCKET environment variable not set".to_string())
         })?;
 
-        let access_key = std::env::var("S3_ACCESS_KEY_ID").map_err(|_| {
+        let access_key = env("S3_ACCESS_KEY_ID").map_err(|_| {
             StorageError::Backend("S3_ACCESS_KEY_ID environment variable not set".to_string())
         })?;
 
-        let secret_key = std::env::var("S3_SECRET_ACCESS_KEY").map_err(|_| {
+        let secret_key = env("S3_SECRET_ACCESS_KEY").map_err(|_| {
             StorageError::Backend("S3_SECRET_ACCESS_KEY environment variable not set".to_string())
         })?;
 
-        let endpoint_url = std::env::var("S3_ENDPOINT_URL").map_err(|_| {
+        let endpoint_url = env("S3_ENDPOINT_URL").map_err(|_| {
             StorageError::Backend("S3_ENDPOINT_URL environment variable not set".to_string())
         })?;
 
@@ -87,16 +93,13 @@ impl S3Storage {
             .map_err(|e| StorageError::Backend(format!("Failed to create S3 client: {}", e)))?;
 
         let mut storage = Self::new(client, bucket);
-        if let Some(secs) = std::env::var("S3_OP_TIMEOUT_SECONDS")
+        if let Some(secs) = env("S3_OP_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
         {
             storage.op_timeout = Duration::from_secs(secs);
         }
-        if let Some(n) = std::env::var("S3_MAX_ATTEMPTS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(n) = env("S3_MAX_ATTEMPTS").ok().and_then(|v| v.parse().ok()) {
             storage.max_attempts = n;
         }
 
@@ -481,6 +484,20 @@ impl S3Storage {
 mod tests {
     use super::*;
 
+    fn storage_with_immediate_timeout() -> S3Storage {
+        let mut storage = S3Storage::from_env_values(|key| match key {
+            "S3_BUCKET" => Ok("test-bucket".to_string()),
+            "S3_ACCESS_KEY_ID" => Ok("key".to_string()),
+            "S3_SECRET_ACCESS_KEY" => Ok("secret".to_string()),
+            "S3_ENDPOINT_URL" => Ok("http://127.0.0.1:1".to_string()),
+            "S3_MAX_ATTEMPTS" => Ok("1".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        })
+        .unwrap();
+        storage.op_timeout = Duration::ZERO;
+        storage
+    }
+
     #[test]
     fn test_key_generation() {
         assert_eq!(S3Storage::blob_key("abc123"), "blobs/sha256/abc123");
@@ -545,17 +562,9 @@ mod tests {
         assert!(!is_bucket_already_exists_msg("AccessDenied"));
     }
 
-    #[tokio::test]
-    async fn test_s3_storage_from_env_missing_vars() {
-        // Clear environment variables to test error handling
-        unsafe {
-            std::env::remove_var("S3_BUCKET");
-            std::env::remove_var("S3_ACCESS_KEY_ID");
-            std::env::remove_var("S3_SECRET_ACCESS_KEY");
-            std::env::remove_var("S3_ENDPOINT_URL");
-        }
-
-        let result = S3Storage::from_env();
+    #[test]
+    fn test_s3_storage_from_env_missing_vars() {
+        let result = S3Storage::from_env_values(|_| Err(std::env::VarError::NotPresent));
         assert!(result.is_err());
 
         match result {
@@ -564,5 +573,91 @@ mod tests {
             }
             _ => panic!("Expected Backend error for missing S3_BUCKET"),
         }
+    }
+
+    #[test]
+    fn test_s3_storage_from_env_reports_missing_required_environment() {
+        const CHILD_MARKER: &str = "PAPERMAKE_TEST_S3_FROM_ENV_CHILD";
+        const TEST_NAME: &str = "storage::s3_storage::tests::test_s3_storage_from_env_reports_missing_required_environment";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let result = S3Storage::from_env();
+            assert!(matches!(
+                result,
+                Err(StorageError::Backend(msg)) if msg.contains("S3_BUCKET")
+            ));
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(TEST_NAME)
+            .arg("--exact")
+            .env(CHILD_MARKER, "1")
+            .env_remove("S3_BUCKET")
+            .env_remove("S3_ACCESS_KEY_ID")
+            .env_remove("S3_SECRET_ACCESS_KEY")
+            .env_remove("S3_ENDPOINT_URL")
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "child test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn test_s3_storage_from_env_reads_optional_timeouts() {
+        let storage = S3Storage::from_env_values(|key| match key {
+            "S3_BUCKET" => Ok("test-bucket".to_string()),
+            "S3_ACCESS_KEY_ID" => Ok("key".to_string()),
+            "S3_SECRET_ACCESS_KEY" => Ok("secret".to_string()),
+            "S3_ENDPOINT_URL" => Ok("http://localhost:9000".to_string()),
+            "S3_OP_TIMEOUT_SECONDS" => Ok("7".to_string()),
+            "S3_MAX_ATTEMPTS" => Ok("5".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        })
+        .unwrap();
+
+        assert_eq!(storage.op_timeout, Duration::from_secs(7));
+        assert_eq!(storage.max_attempts, 5);
+    }
+
+    #[tokio::test]
+    async fn test_ensure_bucket_returns_backend_error_when_client_cannot_complete() {
+        let storage = storage_with_immediate_timeout();
+
+        let error = storage.ensure_bucket().await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            StorageError::Backend(msg) if msg.contains("Failed to ensure bucket")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_bucket_clamps_attempts_and_returns_backend_error() {
+        let storage = storage_with_immediate_timeout();
+
+        let error = storage
+            .wait_for_bucket(0, Duration::ZERO)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, StorageError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn test_list_files_returns_backend_error_when_client_cannot_complete() {
+        let storage = storage_with_immediate_timeout();
+
+        let error = storage.list_files("refs/").await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            StorageError::Backend(msg) if msg.contains("Failed to list files with prefix 'refs/'")
+        ));
     }
 }

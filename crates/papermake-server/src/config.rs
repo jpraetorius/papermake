@@ -43,7 +43,13 @@ pub struct ServerConfig {
 impl ServerConfig {
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self> {
-        let request_body_limit_bytes = std::env::var("REQUEST_BODY_LIMIT_BYTES")
+        Self::from_env_values(|key| std::env::var(key))
+    }
+
+    pub(crate) fn from_env_values(
+        mut env: impl FnMut(&str) -> std::result::Result<String, std::env::VarError>,
+    ) -> Result<Self> {
+        let request_body_limit_bytes = env("REQUEST_BODY_LIMIT_BYTES")
             .unwrap_or_else(|_| DEFAULT_REQUEST_BODY_LIMIT_BYTES.to_string())
             .parse()
             .map_err(|_| ApiError::Config("Invalid REQUEST_BODY_LIMIT_BYTES value".to_string()))?;
@@ -55,40 +61,40 @@ impl ServerConfig {
         }
 
         Ok(Self {
-            host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
-            port: std::env::var("PORT")
+            host: env("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            port: env("PORT")
                 .unwrap_or_else(|_| "3000".to_string())
                 .parse()
                 .map_err(|_| ApiError::Config("Invalid PORT value".to_string()))?,
-            max_concurrent_renders: std::env::var("MAX_CONCURRENT_RENDERS")
+            max_concurrent_renders: env("MAX_CONCURRENT_RENDERS")
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
                 .map_err(|_| {
                     ApiError::Config("Invalid MAX_CONCURRENT_RENDERS value".to_string())
                 })?,
-            render_timeout_seconds: std::env::var("RENDER_TIMEOUT_SECONDS")
+            render_timeout_seconds: env("RENDER_TIMEOUT_SECONDS")
                 .unwrap_or_else(|_| "300".to_string()) // 5 minutes default
                 .parse()
                 .map_err(|_| {
                     ApiError::Config("Invalid RENDER_TIMEOUT_SECONDS value".to_string())
                 })?,
             request_body_limit_bytes,
-            instance_id: std::env::var("PAPERMAKE_INSTANCE_ID").ok(),
-            flush_interval_seconds: std::env::var("FLUSH_INTERVAL_SECONDS")
+            instance_id: env("PAPERMAKE_INSTANCE_ID").ok(),
+            flush_interval_seconds: env("FLUSH_INTERVAL_SECONDS")
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .map_err(|_| {
                     ApiError::Config("Invalid FLUSH_INTERVAL_SECONDS value".to_string())
                 })?,
-            flush_max_records: std::env::var("FLUSH_MAX_RECORDS")
+            flush_max_records: env("FLUSH_MAX_RECORDS")
                 .unwrap_or_else(|_| "1000".to_string())
                 .parse()
                 .map_err(|_| ApiError::Config("Invalid FLUSH_MAX_RECORDS value".to_string()))?,
-            render_retention_days: std::env::var("RENDER_RETENTION_DAYS")
+            render_retention_days: env("RENDER_RETENTION_DAYS")
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .map_err(|_| ApiError::Config("Invalid RENDER_RETENTION_DAYS value".to_string()))?,
-            shard_size: std::env::var("SHARD_SIZE")
+            shard_size: env("SHARD_SIZE")
                 .unwrap_or_else(|_| "500".to_string())
                 .parse()
                 .map_err(|_| ApiError::Config("Invalid SHARD_SIZE value".to_string()))?,
@@ -110,5 +116,102 @@ impl Default for ServerConfig {
             render_retention_days: 30,
             shard_size: 500,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env::VarError;
+
+    use super::*;
+
+    fn config_from(pairs: &[(&str, &str)]) -> Result<ServerConfig> {
+        ServerConfig::from_env_values(|key| {
+            pairs
+                .iter()
+                .find_map(|(candidate, value)| (*candidate == key).then(|| (*value).to_string()))
+                .ok_or(VarError::NotPresent)
+        })
+    }
+
+    #[test]
+    fn from_env_values_uses_documented_defaults_when_values_are_absent() {
+        let config = config_from(&[]).unwrap();
+        let default = ServerConfig::default();
+
+        assert_eq!(config.host, default.host);
+        assert_eq!(config.port, default.port);
+        assert_eq!(
+            config.max_concurrent_renders,
+            default.max_concurrent_renders
+        );
+        assert_eq!(
+            config.render_timeout_seconds,
+            default.render_timeout_seconds
+        );
+        assert_eq!(
+            config.request_body_limit_bytes,
+            default.request_body_limit_bytes
+        );
+        assert_eq!(config.instance_id, default.instance_id);
+        assert_eq!(
+            config.flush_interval_seconds,
+            default.flush_interval_seconds
+        );
+        assert_eq!(config.flush_max_records, default.flush_max_records);
+        assert_eq!(config.render_retention_days, default.render_retention_days);
+        assert_eq!(config.shard_size, default.shard_size);
+    }
+
+    #[test]
+    fn from_env_values_applies_all_supported_overrides() {
+        let config = config_from(&[
+            ("HOST", "127.0.0.1"),
+            ("PORT", "8080"),
+            ("MAX_CONCURRENT_RENDERS", "3"),
+            ("RENDER_TIMEOUT_SECONDS", "9"),
+            ("REQUEST_BODY_LIMIT_BYTES", "1024"),
+            ("PAPERMAKE_INSTANCE_ID", "server-a"),
+            ("FLUSH_INTERVAL_SECONDS", "7"),
+            ("FLUSH_MAX_RECORDS", "11"),
+            ("RENDER_RETENTION_DAYS", "0"),
+            ("SHARD_SIZE", "13"),
+        ])
+        .unwrap();
+
+        assert_eq!(config.host, "127.0.0.1");
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.max_concurrent_renders, 3);
+        assert_eq!(config.render_timeout_seconds, 9);
+        assert_eq!(config.request_body_limit_bytes, 1024);
+        assert_eq!(config.instance_id.as_deref(), Some("server-a"));
+        assert_eq!(config.flush_interval_seconds, 7);
+        assert_eq!(config.flush_max_records, 11);
+        assert_eq!(config.render_retention_days, 0);
+        assert_eq!(config.shard_size, 13);
+    }
+
+    #[test]
+    fn from_env_values_rejects_invalid_numeric_values() {
+        for key in [
+            "PORT",
+            "MAX_CONCURRENT_RENDERS",
+            "RENDER_TIMEOUT_SECONDS",
+            "REQUEST_BODY_LIMIT_BYTES",
+            "FLUSH_INTERVAL_SECONDS",
+            "FLUSH_MAX_RECORDS",
+            "RENDER_RETENTION_DAYS",
+            "SHARD_SIZE",
+        ] {
+            let error = config_from(&[(key, "not-a-number")]).unwrap_err();
+            assert!(matches!(error, ApiError::Config(_)));
+        }
+    }
+
+    #[test]
+    fn from_env_values_rejects_zero_request_body_limit() {
+        let error = config_from(&[("REQUEST_BODY_LIMIT_BYTES", "0")]).unwrap_err();
+
+        assert!(matches!(error, ApiError::Config(_)));
     }
 }

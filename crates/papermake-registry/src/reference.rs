@@ -10,7 +10,7 @@ pub struct Reference {
 }
 
 impl Reference {
-    /// Parse reference string: [namespace/]name[:tag][@hash]
+    /// Parse reference string: `[namespace/]name[:tag][@hash]`
     pub fn parse(reference: &str) -> Result<Self, ReferenceError> {
         if reference.is_empty() {
             return Err(ReferenceError::InvalidFormat {
@@ -318,6 +318,18 @@ mod tests {
                 "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn test_hash_verification_flag_tracks_hash_presence() {
+        assert!(!Reference::parse("invoice").unwrap().has_hash_verification());
+        assert!(
+            Reference::parse(
+                "invoice@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            )
+            .unwrap()
+            .has_hash_verification()
         );
     }
 

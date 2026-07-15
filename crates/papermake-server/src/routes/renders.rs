@@ -113,3 +113,89 @@ pub async fn get_render_pdf(
         .body(Body::from(pdf_bytes))
         .unwrap())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn render_routes_list_recent_renders_and_serve_pdf() {
+        let registry = test_support::registry();
+        registry
+            .publish(test_support::bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        let rendered = registry
+            .render_and_store("invoice:latest", &serde_json::json!({ "name": "Alice" }))
+            .await
+            .unwrap();
+        let render_id = rendered.render_id.clone();
+        let app = router().with_state(test_support::state(registry));
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/?limit=1&offset=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let list_body = test_support::response_json(list).await;
+        assert_eq!(
+            list_body["data"][0]["render_id"].as_str(),
+            Some(render_id.as_str())
+        );
+        assert_eq!(list_body["pagination"]["limit"].as_u64(), Some(1));
+
+        let pdf = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{render_id}/pdf"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pdf.status(), StatusCode::OK);
+        assert_eq!(
+            pdf.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/pdf"
+        );
+        assert!(
+            pdf.headers()
+                .get(header::CONTENT_DISPOSITION)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains(&render_id)
+        );
+        let pdf_bytes = test_support::response_bytes(pdf).await;
+        assert!(pdf_bytes.starts_with(b"%PDF"));
+    }
+
+    #[tokio::test]
+    async fn unknown_render_pdf_returns_not_found() {
+        let app = router().with_state(test_support::state(test_support::registry()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/missing/pdf")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}

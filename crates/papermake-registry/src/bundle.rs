@@ -265,6 +265,17 @@ mod tests {
     }
 
     #[test]
+    fn test_template_bundle_metadata_mut_updates_metadata() {
+        let metadata = sample_metadata();
+        let content = sample_template_content();
+        let mut bundle = TemplateBundle::new(content, metadata);
+
+        bundle.metadata_mut().retain_days = Some(14);
+
+        assert_eq!(bundle.metadata().retain_days, Some(14));
+    }
+
+    #[test]
     fn test_template_bundle_with_schema() {
         let metadata = sample_metadata();
         let content = sample_template_content();
