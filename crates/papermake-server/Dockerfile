@@ -14,10 +14,9 @@ WORKDIR /app
 RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
     --mount=type=bind,source=crates,target=crates \
-    --mount=type=cache,target=/app/target/ \
-    --mount=type=cache,target=/usr/local/cargo/git/db \
-    --mount=type=cache,target=/usr/local/cargo/registry/ \
-    cargo clean --release -p papermake -p papermake-registry -p papermake-server && \
+    --mount=type=cache,target=/app/target/,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/registry/,sharing=locked \
     cargo build --locked --release -p papermake-server && \
     cp ./target/release/papermake-server /bin/server
 
