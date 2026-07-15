@@ -7,7 +7,7 @@ license = "Apache-2.0"
 repository = "https://github.com/jpraetorius/papermake"
 documentation = "https://docs.rs/papermake-registry"
 homepage = "https://github.com/jpraetorius/papermake"
-readme = "README.md"
+readme = "../../README.md"
 keywords = ["pdf", "typst", "templates", "registry", "versioning"]
 categories = ["template-engine"]
 # Original author retained for attribution (Apache-2.0); fork maintained by JPR.

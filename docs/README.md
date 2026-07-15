@@ -1,19 +1,36 @@
 # Papermake documentation
 
-User-facing guides for running Papermake and turning Typst templates into a
-rendering API.
+Read the [README](../README.md) for the project overview. Use
+[Getting started](tutorials/getting-started.md) to run Papermake and render a
+first PDF.
 
 ## Guides
 
-- **[Getting started](getting-started.md)** — bring up the stack and render your first document.
-- **[Writing templates](templates.md)** — Typst templates, data injection, schemas, assets, imports.
-- **[HTTP API reference](api.md)** — every endpoint, with request/response shapes.
-- **[Analytics & retention](analytics-and-retention.md)** — how render analytics and output expiry work, and how to configure them.
-- **[Self-hosting](self-hosting.md)** — deployment, environment variables, scaling, and the S3 storage layout.
+- [Getting started](tutorials/getting-started.md): bring up the local stack and
+  render a document.
+- [Writing templates](how-to/templates.md): author Typst templates for
+  Papermake.
+- [Batch rendering](how-to/batch-rendering.md): submit many inputs, monitor the
+  job, and collect the resulting PDFs.
+- [Self-hosting](how-to/self-hosting.md): run Papermake with Docker Compose,
+  from source, or against your own S3-compatible storage.
+- [Operations](how-to/operations.md): scale workers, inspect incidents, rotate
+  credentials, and back up S3 data.
 
-## Design notes
+## Reference
 
-- **[Buffered-S3 analytics + SSR UI](analytics-storage-and-ssr.md)** — the design/rationale behind the current storage and UI architecture (implementation reference, not a user guide).
+- [HTTP API reference](reference/api.md): endpoints, request bodies, responses,
+  and error behavior.
+- [Configuration reference](reference/configuration.md): environment variables
+  by process.
+- [Template reference](reference/templates.md): reference strings, tag and
+  manifest semantics, metadata, schemas, bundle paths, and fonts.
 
-New to the project? Start with the [README](../README.md) for the elevator
-pitch, then follow [Getting started](getting-started.md).
+## Explanation
+
+- [Architecture](explanation/architecture.md): the system components, storage
+  model, and main data flows.
+- [Analytics & retention](explanation/analytics-and-retention.md): how render
+  history, rollups, and output expiry work.
+- [Security model](explanation/security.md): deployment trust boundary,
+  authentication status, Typst sandbox assumptions, and operational safeguards.

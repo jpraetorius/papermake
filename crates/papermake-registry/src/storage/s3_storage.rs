@@ -56,7 +56,6 @@ impl S3Storage {
     /// - S3_SECRET_ACCESS_KEY
     /// - S3_ENDPOINT_URL (for S3-compatible services)
     /// - S3_BUCKET
-    /// - S3_REGION (optional)
     pub fn from_env() -> Result<Self, StorageError> {
         let bucket = std::env::var("S3_BUCKET").map_err(|_| {
             StorageError::Backend("S3_BUCKET environment variable not set".to_string())

@@ -28,7 +28,7 @@
 //!
 //! // Create a template bundle
 //! let metadata = TemplateMetadata::new("Invoice Template", "alice@company.com");
-//! let main_content = b"#let data = json(bytes(sys.inputs.data))\n= Invoice\nFor: #data.customer_name".to_vec();
+//! let main_content = b"= Invoice\nFor: #data.customer_name".to_vec();
 //! let bundle = TemplateBundle::new(main_content, metadata);
 //!
 //! // Publish the template

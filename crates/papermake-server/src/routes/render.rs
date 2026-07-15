@@ -25,7 +25,7 @@ pub fn router() -> Router<AppState> {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RenderRequest {
-    /// Arbitrary JSON injected into the template as `sys.inputs.data`.
+    /// Arbitrary JSON made available to the template as `data`.
     #[schema(value_type = Object)]
     pub data: serde_json::Value,
     /// Per-render retention override in days (`0` = keep forever). Falls back to

@@ -12,9 +12,9 @@ use axum::{
 };
 use papermake_registry::{Registry, S3BufferedRenderStorage, S3Storage};
 use serde_json::{Value, json};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tower::ServiceBuilder;
-use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
+use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{Span, debug, debug_span, error, info, warn};
 
 mod config;
@@ -136,8 +136,15 @@ async fn main() -> Result<()> {
     let app = create_router(state);
 
     // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = tokio::net::TcpListener::bind((config.host.as_str(), config.port))
+        .await
+        .map_err(|e| {
+            ApiError::Config(format!(
+                "Failed to bind {}:{}: {e}",
+                config.host, config.port
+            ))
+        })?;
+    let addr = listener.local_addr()?;
 
     info!("🚀 Server listening on http://{}", addr);
 
@@ -252,8 +259,7 @@ fn create_router(state: AppState) -> Router {
                             },
                         ),
                 )
-                .layer(CorsLayer::permissive())
-                .layer(DefaultBodyLimit::max(50 * 1024 * 1024)), // 50MB for large PDFs
+                .layer(DefaultBodyLimit::max(state.config.request_body_limit_bytes)),
         )
         .with_state(state)
 }

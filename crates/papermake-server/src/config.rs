@@ -3,6 +3,9 @@
 use crate::error::{ApiError, Result};
 use serde::{Deserialize, Serialize};
 
+/// Default maximum HTTP request body size: 50 MiB.
+pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 50 * 1024 * 1024;
+
 /// Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -18,11 +21,8 @@ pub struct ServerConfig {
     /// Timeout for render jobs in seconds
     pub render_timeout_seconds: u64,
 
-    /// CORS allowed origins
-    pub cors_origins: Vec<String>,
-
-    /// Whether to enable debug logging
-    pub debug: bool,
+    /// Maximum accepted HTTP request body size in bytes.
+    pub request_body_limit_bytes: usize,
 
     /// Stable identifier for this render instance (used in flushed S3 keys).
     pub instance_id: Option<String>,
@@ -43,6 +43,17 @@ pub struct ServerConfig {
 impl ServerConfig {
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self> {
+        let request_body_limit_bytes = std::env::var("REQUEST_BODY_LIMIT_BYTES")
+            .unwrap_or_else(|_| DEFAULT_REQUEST_BODY_LIMIT_BYTES.to_string())
+            .parse()
+            .map_err(|_| ApiError::Config("Invalid REQUEST_BODY_LIMIT_BYTES value".to_string()))?;
+
+        if request_body_limit_bytes == 0 {
+            return Err(ApiError::Config(
+                "REQUEST_BODY_LIMIT_BYTES must be greater than 0".to_string(),
+            ));
+        }
+
         Ok(Self {
             host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: std::env::var("PORT")
@@ -61,14 +72,7 @@ impl ServerConfig {
                 .map_err(|_| {
                     ApiError::Config("Invalid RENDER_TIMEOUT_SECONDS value".to_string())
                 })?,
-            cors_origins: std::env::var("CORS_ORIGINS")
-                .unwrap_or_else(|_| "*".to_string())
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
-            debug: std::env::var("DEBUG")
-                .map(|s| s.to_lowercase() == "true")
-                .unwrap_or(false),
+            request_body_limit_bytes,
             instance_id: std::env::var("PAPERMAKE_INSTANCE_ID").ok(),
             flush_interval_seconds: std::env::var("FLUSH_INTERVAL_SECONDS")
                 .unwrap_or_else(|_| "30".to_string())
@@ -99,8 +103,7 @@ impl Default for ServerConfig {
             port: 3000,
             max_concurrent_renders: 10,
             render_timeout_seconds: 300,
-            cors_origins: vec!["*".to_string()],
-            debug: false,
+            request_body_limit_bytes: DEFAULT_REQUEST_BODY_LIMIT_BYTES,
             instance_id: None,
             flush_interval_seconds: 30,
             flush_max_records: 1000,

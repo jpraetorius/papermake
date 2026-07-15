@@ -1,306 +1,76 @@
 <p align="center">
-  <img src="crates/papermake-server/assets/logo.svg" alt="Papermake" width="128" height="128">
+  <img src="crates/papermake-server/assets/logo.svg" alt="Papermake" width="256" height="256">
 </p>
 
 # Papermake
 
-**Content-addressable template registry with server-side rendering for [Typst](https://typst.app/) documents.**
+**A self-hosted rendering service for [Typst](https://typst.app/) documents.**
 
-Turn your Typst templates into APIs. Publish once, render anywhere — no local Typst install, no database to operate.
+Papermake turns Typst templates into HTTP APIs. Publish a template once, send
+JSON data to render it, and fetch the resulting PDF by render id. Templates,
+rendered PDFs, input data, and analytics live in S3-compatible object storage.
 
 <p align="center">
   <img src="docs/webapp.png" alt="Papermake web dashboard" width="860">
 </p>
 
-```bash
-# 1. Bring up the stack
-docker compose up -d
+## Why Papermake
 
-# 2. Publish a template
-curl -X POST "http://localhost:3000/api/templates/invoice/publish-simple?tag=latest" \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "main_typ": "#let data = json(bytes(sys.inputs.data))\n= Invoice #data.number\nBill to: #data.customer",
-        "metadata": { "name": "Invoice", "author": "you@company.com" }
-      }'
+- **Manages and versioned templates:** store document templates as immutable, versioned
+  content-addressed bundles.
+- **Server-side rendering:** Typst runs on the server; clients only send data and
+  download PDFs.
+- **Lightning fast:** A typical document renders in under 100ms.
+- **Render individually or as batch:** Render one document on demand or submit
+  thousands of inputs as a batch job and collect the PDFs as they complete.
+- **Support multiple PDF Standards:** besides PDF1.7 you can also generate Archival PDFs in PDF/A-2, PDF/A-3, PDF/A-4 and PDF/UA-1
+- **Built-in history and analytics:** record render volume, success rate,
+  latency, recent renders, and per-template activity.
+- **Retention controls:** expire rendered outputs globally, per template, or per
+  render.
+- **Simple self-hosting:** run the API, web UI, worker, and local object store
+  with Docker Compose.
 
-# 3. Render it with data (returns a render_id)
-curl -X POST "http://localhost:3000/api/render/invoice:latest" \
-  -H 'Content-Type: application/json' \
-  -d '{"data": {"number": "INV-001", "customer": "Acme Corp"}}'
-
-# 4. Download the PDF by render_id
-curl "http://localhost:3000/api/renders/<render_id>/pdf" --output invoice.pdf
-```
-
-Or just open the web UI at **http://localhost:3000/** and publish / test-render in the browser.
-
-## 🚀 Why Papermake?
-
-- **🏗️ Templates as code** — version document templates like software; immutable, deduplicated storage (Git-style content addressing).
-- **⚡ Server-side rendering** — the Typst engine runs in the server; clients only send data.
-- **🗄️ S3 is the only dependency** — templates, rendered PDFs, input data, and analytics all live in S3. No always-on database.
-- **📊 Built-in analytics** — every render is logged; a background worker rolls it up into per-template volume, success rate, and p90 latency.
-- **🧹 Retention built in** — outputs expire on a schedule (per-render, per-template, or global) and are pruned automatically.
-- **🖥️ Server-rendered UI** — a dependency-light dashboard + template editor (a small hand-rolled stylesheet + a touch of htmx), no SPA build step.
-- **🐳 Self-hostable** — `docker compose up` and you're running.
-
-## 🏃 Quick Start
-
-### Bring up the stack (Docker Compose)
+## Quick Start
 
 ```bash
-git clone https://github.com/rkstgr/papermake
+git clone https://github.com/jpraetorius/papermake
 cd papermake
-docker compose up -d      # older Docker: docker-compose up -d
+docker compose up -d
+curl http://localhost:3000/health
 ```
 
-This starts three services on the `papermake` network:
-
-| Service | What it is | Where |
-|---|---|---|
-| **papermake-server** | HTTP API + server-rendered UI | http://localhost:3000 |
-| **papermake-worker** | Aggregates analytics → `summary.json`, prunes expired outputs | (no exposed port) |
-| **object-store** | S3-compatible object storage | S3 API `:9000`, console http://localhost:9001 (`papermake` / `papermake-secret`) |
-
-The server creates its bucket on startup. Check health with `curl http://localhost:3000/health`, then open **http://localhost:3000/** for the dashboard.
-
-To follow logs or tear down:
-
-```bash
-docker compose logs -f papermake-server papermake-worker
-docker compose down          # add -v to also wipe stored data
-```
-
-### Run from source
-
-```bash
-# 1. Start just the S3-compatible backend (Docker or Podman)
-docker compose up -d object-store  # or: podman-compose up -d object-store
-
-# 2. Configure the environment
-cp .env.example .env               # defaults point at the local object store
-
-# 3. Run the server and (optionally) the worker
-cargo run -r -p papermake-server
-cargo run -r -p papermake-worker   # in a second shell, for analytics rollups
-```
-
-## 📖 Documentation
-
-Full guides live in [`docs/`](docs/README.md):
-
-- [Getting started](docs/getting-started.md) — from zero to a rendered PDF.
-- [Writing templates](docs/templates.md) — data injection, schemas, assets, imports.
-- [HTTP API reference](docs/api.md) — every endpoint with request/response shapes.
-- [Analytics & retention](docs/analytics-and-retention.md) — how they work and how to configure them.
-- [Self-hosting](docs/self-hosting.md) — deployment, env vars, scaling, storage layout.
-
-## 📝 Writing a template
-
-A template is a Typst file plus metadata (and optionally a JSON schema and extra asset files). Input data is injected as JSON on `sys.inputs.data`; the idiomatic first line decodes it into `data`:
-
-```typst
-// invoice.typ
-#let data = json(bytes(sys.inputs.data))
-
-= Invoice #data.number
-
-*Bill to:* #data.customer.name \
-*Amount:* $#data.amount
-```
-
-## 📚 Usage
-
-All API routes are under `/api`. Health (`/health`) and the UI (`/`, `/templates/{name}`) are served at the root.
-
-### Publish a template
-
-Simple JSON publish (inline source):
-
-```bash
-curl -X POST "http://localhost:3000/api/templates/invoice/publish-simple?tag=latest" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "main_typ": "#let data = json(bytes(sys.inputs.data))\n= Invoice #data.number",
-    "metadata": { "name": "Customer Invoice", "author": "dev@company.com" }
-  }'
-```
-
-Multipart publish (files from disk, optional schema and extra assets):
-
-```bash
-curl -X POST "http://localhost:3000/api/templates/invoice/publish?tag=latest" \
-  -F "main_typ=@invoice.typ" \
-  -F "schema=@schema.json" \
-  -F "files[assets/logo.png]=@logo.png" \
-  -F 'metadata={"name":"Professional Invoice","author":"finance@company.com"}'
-```
-
-Both return the manifest hash and reference:
-
-```json
-{
-  "data": {
-    "message": "Template 'invoice:latest' published successfully",
-    "manifest_hash": "sha256:8e0e5843…",
-    "reference": "invoice:latest"
-  },
-  "message": "Template published with reference 'invoice:latest'"
-}
-```
-
-> **Tip:** set a per-template retention default by adding `"retain_days": 7` to `metadata` (`0` = keep forever).
-
-### Render a document
-
-Rendering is a two-step flow: `POST /api/render/...` runs the render and returns a `render_id`; you then fetch the PDF by id. (The PDF is written to S3 at render time, so it's fetchable immediately.)
-
-```bash
-# Render — note the data goes under a "data" key
-curl -X POST "http://localhost:3000/api/render/invoice:latest" \
-  -H 'Content-Type: application/json' \
-  -d '{
-        "data": { "number": "INV-001", "customer": {"name": "Acme Corp"}, "amount": 1500 },
-        "retain_days": 14
-      }'
-# → { "data": { "render_id": "0192…", "pdf_hash": "sha256:…", "duration_ms": 42 } }
-
-# Download the rendered PDF
-curl "http://localhost:3000/api/renders/0192…/pdf" --output invoice.pdf
-```
-
-`retain_days` is optional and overrides the template/global default for this render. Renders run under a concurrency limit (`MAX_CONCURRENT_RENDERS`) with a deadline (`RENDER_TIMEOUT_SECONDS`): the render call returns `422` if the template fails to compile, or `408` if it times out. A PDF request for a render that **failed** returns `422`; an unknown or already-pruned `render_id` returns `404`.
-
-### Batch rendering
-
-To render one template against many inputs, submit an async job — it's picked up by the worker (a single warm Typst world for the whole batch) and you poll for results:
-
-```bash
-# Submit → 202 with a job_id
-curl -X POST "http://localhost:3000/api/render/invoice:latest/batch" \
-  -H 'Content-Type: application/json' \
-  -d '{"inputs": [ {"data": {"number": "INV-001"}, "key": "cust-a"}, {"data": {"number": "INV-002"}} ]}'
-# → { "data": { "job_id": "0192…", "total": 2, "status_url": "/api/jobs/0192…" } }
-
-# Poll the job; each item maps an input (by index or your key) to a render_id
-curl "http://localhost:3000/api/jobs/0192…"
-# then fetch each PDF at /api/renders/{render_id}/pdf
-```
-
-See the [API reference](docs/api.md) for the full job document.
-
-### Analytics & history
-
-Analytics are answered from the S3 aggregate (`summary.json`) that the worker refreshes each cycle, so they're eventually consistent across server instances.
-
-```bash
-curl "http://localhost:3000/api/renders?limit=10"                 # recent renders
-curl "http://localhost:3000/api/analytics/templates"              # total renders per template
-curl "http://localhost:3000/api/analytics/volume?days=30"         # render volume over time
-curl "http://localhost:3000/api/analytics/performance?days=30"    # avg duration over time
-```
-
-### Web UI
-
-- **`/`** — dashboard: 24h totals (count, success rate, p90 latency), volume sparkline, per-template bars, recent renders, template list.
-- **`/templates/{name}`** — template detail: metadata/tags, an editor prefilled with the source, a **Test Render** button (htmx-powered, shows the PDF inline in an `<iframe>` — or open it in a new tab — with no page reload), and a publish form.
-
-## 🗄️ How storage works
-
-Two decoupled concerns, both on S3:
-
-- **Artifacts** are keyed by `render_id`: `renders/{id}/meta.json`, `renders/{id}/pdf`, `renders/{id}/data`. By-id lookups are direct blob reads — immediate, no database.
-- **Analytics** flow: each server buffers `RenderRecord`s in memory → flushes NDJSON to `analytics/raw/` on an interval/size threshold → the worker aggregates all raw into `analytics/agg/summary.json` and writes an `expiry/` index → the worker prunes expired outputs and old raw.
-
-Templates, assets, and manifests keep **content addressing** (SHA-256) for dedup.
-
-## ⚙️ Configuration
-
-All configuration is via environment variables (see [`.env.example`](.env.example)).
-
-**Server & worker (S3):** `S3_ENDPOINT_URL`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`
-
-**Server:** `HOST`, `PORT`, `MAX_CONCURRENT_RENDERS`, `RENDER_TIMEOUT_SECONDS`, `PAPERMAKE_INSTANCE_ID`, `FLUSH_INTERVAL_SECONDS`, `FLUSH_MAX_RECORDS`, `RENDER_RETENTION_DAYS`
-
-**Worker:** `WORKER_INTERVAL_SECONDS`, `ANALYTICS_RETENTION_DAYS`
-
-## 🏗️ Architecture
-
-```
-                        ┌──────────────────────────────┐
-  data ───▶  POST /api/render                          │
-                        │  papermake-server            │
-  browser ─▶  GET /  ───┤   • Typst engine (render)    │
-                        │   • SSR UI (maud + htmx)      │
-                        │   • buffers RenderRecords     │
-                        └───────────────┬──────────────┘
-                                        │ put artifacts + flush NDJSON
-                                        ▼
-                        ┌──────────────────────────────┐
-                        │  S3-compatible backend        │
-                        │   renders/{id}/{meta,pdf,data}│
-                        │   analytics/raw · agg · expiry│
-                        │   blobs · manifests · refs    │
-                        └───────────────▲──────────────┘
-                                        │ aggregate + prune
-                        ┌───────────────┴──────────────┐
-                        │  papermake-worker             │
-                        │   summary.json + retention    │
-                        └──────────────────────────────┘
-```
-
-Crates:
-- **`papermake`** — Typst compilation engine with a virtual filesystem.
-- **`papermake-registry`** — content-addressable storage, rendering, buffered-S3 analytics, aggregator, retention.
-- **`papermake-server`** — HTTP API + server-rendered UI.
-- **`papermake-worker`** — analytics aggregator + output pruner.
-
-## 🛠️ API reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET`  | `/health` | Health check |
-| `GET`  | `/` | Dashboard UI |
-| `GET`  | `/templates/{name}` | Template detail UI (editor, test render, publish) |
-| `GET`  | `/api/templates` | List templates (`?limit=&offset=`) |
-| `POST` | `/api/templates/{name}/publish?tag={tag}` | Publish (multipart) |
-| `POST` | `/api/templates/{name}/publish-simple?tag={tag}` | Publish (JSON) |
-| `GET`  | `/api/templates/{name}/tags` | List a template's tags |
-| `GET`  | `/api/templates/{reference}` | Template metadata |
-| `GET`  | `/api/templates/{reference}/source` | Entrypoint source (`text/plain`) |
-| `POST` | `/api/render/{reference}` | Render → `{ render_id, pdf_hash, duration_ms }` |
-| `GET`  | `/api/renders?limit=N&offset=M` | Recent render history |
-| `GET`  | `/api/renders/{render_id}/pdf` | Download rendered PDF |
-| `GET`  | `/api/analytics/volume?days=N` | Render volume over time |
-| `GET`  | `/api/analytics/templates` | Total renders per template |
-| `GET`  | `/api/analytics/performance?days=N` | Average render duration over time |
-
-## 🎯 Use cases
-
-- **Document generation APIs** — invoices, contracts, reports
-- **Transactional documents** — receipts, tickets, certificates, labels
-- **Report automation** — scheduled financial / analytics reports
-
-## 🤝 Development
-
-```bash
-# Unit + doc tests (no infra required — uses in-memory storage)
-cargo test --workspace
-
-# Formatting and lints
-cargo fmt --all
-cargo clippy --workspace --all-targets
-
-# Integration tests that need live S3:
-#   docker compose up -d object-store  # or: podman-compose up -d object-store
-cargo test --workspace -- --ignored
-```
-
-Built with Rust 🦀 • Powered by [Typst](https://typst.app/) • Inspired by Docker registry & Git's content addressing
-
-## License & attribution
-
-Licensed under the **Apache License 2.0** (see [`LICENSE`](LICENSE)). This is a
-modified fork of [papermake](https://github.com/rkstgr/papermake) by Erik
-Steiger; see [`NOTICE`](NOTICE) for attribution.
+Then open **http://localhost:3000/** to publish a template and test-render it
+from the web UI.
+
+For a guided first render with `curl`, follow
+[Getting started](docs/tutorials/getting-started.md).
+
+## Documentation
+
+- [Getting started](docs/tutorials/getting-started.md) - from zero to a rendered PDF.
+- [Writing templates](docs/how-to/templates.md) - data injection, schemas, assets,
+  imports, fonts, PDF standards, and tags.
+- [Batch rendering](docs/how-to/batch-rendering.md) - submit many inputs,
+  monitor the job, and collect the resulting PDFs.
+- [Operations](docs/how-to/operations.md) - scale workers, inspect incidents,
+  rotate credentials, and back up S3 data.
+- [HTTP API reference](docs/reference/api.md) - endpoints, request bodies, responses, and
+  error behavior.
+- [Configuration reference](docs/reference/configuration.md) - environment variables by process.
+- [Template reference](docs/reference/templates.md) - reference strings,
+  manifests, metadata, schemas, bundle paths, and fonts.
+- [Analytics & retention](docs/explanation/analytics-and-retention.md) - how
+  render history, rollups, expiry, and pruning work.
+- [Security model](docs/explanation/security.md) - trust boundary, public
+  exposure, Typst rendering assumptions, and operational safeguards.
+- [Self-hosting](docs/how-to/self-hosting.md) - Docker Compose, running from source,
+  environment variables, fonts, scaling, and storage layout.
+
+## License & Attribution
+
+Licensed under the **Apache License 2.0**; see [LICENSE](LICENSE).
+
+This is a modified fork of
+[papermake](https://github.com/rkstgr/papermake) by Erik Steiger. See
+[NOTICE](NOTICE) for attribution.

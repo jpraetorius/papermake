@@ -2946,7 +2946,6 @@ Content: #data.content"#
             std::env::set_var("S3_ACCESS_KEY_ID", "papermake");
             std::env::set_var("S3_SECRET_ACCESS_KEY", "papermake-secret");
             std::env::set_var("S3_BUCKET", "papermake-registry-test");
-            std::env::set_var("S3_REGION", "us-east-1");
         }
         let storage = S3Storage::from_env().unwrap();
         storage.ensure_bucket().await.unwrap();

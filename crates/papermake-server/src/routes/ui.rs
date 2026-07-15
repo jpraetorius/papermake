@@ -28,8 +28,7 @@ use crate::AppState;
 use crate::i18n::I18n;
 
 /// Starter template pre-filled in the "New template" editor.
-const STARTER_TYP: &str = "#let data = json(bytes(sys.inputs.data))\n\n\
-= Hello #data.name\n\n\
+const STARTER_TYP: &str = "= Hello #data.name\n\n\
 Welcome to Papermake.\n";
 
 pub fn router() -> Router<AppState> {
@@ -1446,7 +1445,7 @@ mod tests {
         assert!(html.contains("name=\"name\""));
         assert!(html.contains("name=\"main_typ\""));
         // Starter source is prefilled.
-        assert!(html.contains("sys.inputs.data"));
+        assert!(html.contains("Hello #data.name"));
     }
 
     #[test]
