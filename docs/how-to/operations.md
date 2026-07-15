@@ -11,6 +11,9 @@ S3_ENDPOINT_URL=http://localhost:9000
 S3_BUCKET=papermake-templates
 ```
 
+Kubernetes examples assume the manifests from `deploy/k8s` and the `papermake`
+namespace.
+
 For AWS S3, set `S3_ENDPOINT_URL` to the regional endpoint URL. The S3 commands
 below use the AWS CLI syntax; any S3-compatible client is fine.
 
@@ -30,6 +33,14 @@ Check that workers are running:
 ```bash
 docker compose ps papermake-worker
 docker compose logs -f papermake-worker
+```
+
+With Kubernetes:
+
+```bash
+kubectl -n papermake scale deploy/papermake-render-worker --replicas=4
+kubectl -n papermake rollout status deploy/papermake-render-worker
+kubectl -n papermake logs -f deploy/papermake-render-worker
 ```
 
 Each worker needs a unique id, but you normally do not need to set
@@ -64,6 +75,16 @@ docker compose ps papermake-maintenance
 docker compose logs -f papermake-maintenance
 ```
 
+With Kubernetes, keep `papermake-maintenance` at one replica:
+
+```bash
+kubectl -n papermake get deploy papermake-maintenance
+kubectl -n papermake logs -f deploy/papermake-maintenance
+```
+
+The sample Kubernetes deployment uses `Recreate` strategy so an update does not
+briefly run two maintenance pods.
+
 Avoid `WORKER_ROLE=all` in scaled production deployments. Scaling an `all`
 worker also scales maintenance.
 
@@ -88,6 +109,20 @@ curl -fsS "$BASE/health"
 
 If render workers are scaled, include the current scale in the recreate command,
 for example `--scale papermake-worker=4`.
+
+With Kubernetes, update the Secret through your normal secret flow, then restart
+the deployments:
+
+```bash
+kubectl -n papermake rollout restart \
+  deploy/papermake-render-worker \
+  deploy/papermake-maintenance \
+  deploy/papermake-server
+
+kubectl -n papermake rollout status deploy/papermake-render-worker
+kubectl -n papermake rollout status deploy/papermake-maintenance
+kubectl -n papermake rollout status deploy/papermake-server
+```
 
 For a rolling deployment, restart render workers first, then maintenance, then
 servers. A render worker interrupted mid-shard is safe: another worker can
@@ -196,6 +231,12 @@ aws s3 ls "s3://$S3_BUCKET/analytics/raw/" \
   | tail
 ```
 
+With Kubernetes, check maintenance logs with:
+
+```bash
+kubectl -n papermake logs --tail=100 deploy/papermake-maintenance
+```
+
 Direct PDF downloads by `render_id` do not depend on `summary.json`.
 
 ## Recover from stale `summary.json`
@@ -207,6 +248,13 @@ maintenance restart:
 ```bash
 docker compose restart papermake-maintenance
 docker compose logs -f papermake-maintenance
+```
+
+With Kubernetes:
+
+```bash
+kubectl -n papermake rollout restart deploy/papermake-maintenance
+kubectl -n papermake logs -f deploy/papermake-maintenance
 ```
 
 If `summary.json` is malformed or you want to force a clean rewrite, move it
@@ -221,6 +269,12 @@ aws s3 mv \
   --endpoint-url "$S3_ENDPOINT_URL"
 
 docker compose restart papermake-maintenance
+```
+
+Or with Kubernetes:
+
+```bash
+kubectl -n papermake rollout restart deploy/papermake-maintenance
 ```
 
 Until the next aggregation cycle, analytics APIs return an empty summary. If
@@ -238,6 +292,12 @@ To pause pruning, stop the maintenance worker:
 docker compose stop papermake-maintenance
 ```
 
+With Kubernetes:
+
+```bash
+kubectl -n papermake scale deploy/papermake-maintenance --replicas=0
+```
+
 This also pauses analytics aggregation, raw analytics pruning, and stale job
 pruning. Synchronous renders, PDF downloads, and render workers can continue.
 
@@ -245,6 +305,12 @@ When the incident is over:
 
 ```bash
 docker compose start papermake-maintenance
+```
+
+With Kubernetes:
+
+```bash
+kubectl -n papermake scale deploy/papermake-maintenance --replicas=1
 ```
 
 Changing `RENDER_RETENTION_DAYS` affects future render expiry decisions only. It
@@ -276,6 +342,24 @@ aws s3 sync "s3://$S3_BUCKET" ./papermake-backup \
   --endpoint-url "$S3_ENDPOINT_URL"
 
 docker compose start papermake-server papermake-worker papermake-maintenance
+```
+
+With Kubernetes, record the intended replica counts, scale writers down, run the
+same S3 sync, then restore the replicas:
+
+```bash
+kubectl -n papermake scale \
+  deploy/papermake-server \
+  deploy/papermake-render-worker \
+  deploy/papermake-maintenance \
+  --replicas=0
+
+aws s3 sync "s3://$S3_BUCKET" ./papermake-backup \
+  --endpoint-url "$S3_ENDPOINT_URL"
+
+kubectl -n papermake scale deploy/papermake-server --replicas=<servers>
+kubectl -n papermake scale deploy/papermake-render-worker --replicas=<workers>
+kubectl -n papermake scale deploy/papermake-maintenance --replicas=1
 ```
 
 To migrate to another bucket or object store:

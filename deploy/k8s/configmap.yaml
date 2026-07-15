@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: papermake-config
+  namespace: papermake
+data:
+  HOST: "0.0.0.0"
+  PORT: "3000"
+  REQUEST_BODY_LIMIT_BYTES: "52428800"
+  MAX_CONCURRENT_RENDERS: "10"
+  RENDER_TIMEOUT_SECONDS: "300"
+  SHARD_SIZE: "500"
+  FONTS_DIR: "/fonts"
+
+  S3_ENDPOINT_URL: "https://s3.example.com"
+  S3_BUCKET: "papermake-templates"
+  S3_OP_TIMEOUT_SECONDS: "20"
+  S3_MAX_ATTEMPTS: "3"
+
+  FLUSH_INTERVAL_SECONDS: "30"
+  FLUSH_MAX_RECORDS: "1000"
+  RENDER_RETENTION_DAYS: "30"
+
+  RENDER_WORKER_INTERVAL_SECONDS: "5"
+  MAINTENANCE_WORKER_INTERVAL_SECONDS: "30"
+  WORKER_LEASE_SECONDS: "120"
+  WORKER_MAX_ATTEMPTS: "3"
+  ANALYTICS_RETENTION_DAYS: "30"
+  JOB_RETENTION_DAYS: "7"
+
+  SERVER_RUST_LOG: "papermake_server=info,papermake_registry=info,tower_http=info"
+  WORKER_RUST_LOG: "papermake_worker=info,papermake_registry=info"

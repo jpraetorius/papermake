@@ -53,6 +53,8 @@ For a guided first render with `curl`, follow
   imports, fonts, PDF standards, and tags.
 - [Batch rendering](docs/how-to/batch-rendering.md) - submit many inputs,
   monitor the job, and collect the resulting PDFs.
+- [Kubernetes](docs/how-to/kubernetes.md) - deploy with plain Kubernetes
+  manifests and external S3-compatible storage.
 - [Operations](docs/how-to/operations.md) - scale workers, inspect incidents,
   rotate credentials, and back up S3 data.
 - [HTTP API reference](docs/reference/api.md) - endpoints, request bodies, responses, and
@@ -64,8 +66,9 @@ For a guided first render with `curl`, follow
   render history, rollups, expiry, and pruning work.
 - [Security model](docs/explanation/security.md) - trust boundary, public
   exposure, Typst rendering assumptions, and operational safeguards.
-- [Self-hosting](docs/how-to/self-hosting.md) - Docker Compose, running from source,
-  environment variables, fonts, scaling, and storage layout.
+- [Self-hosting](docs/how-to/self-hosting.md) - Docker Compose, Kubernetes,
+  running from source, environment variables, fonts, scaling, and storage
+  layout.
 
 ## License & Attribution
 

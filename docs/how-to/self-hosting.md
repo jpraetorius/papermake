@@ -38,6 +38,16 @@ endpoints, and point the S3 variables at your storage service. See the
 [security model](../explanation/security.md) before exposing Papermake outside a
 private network.
 
+## Run on Kubernetes
+
+Use the plain Kubernetes manifests in [`deploy/k8s`](../../deploy/k8s/) when
+you want to run Papermake on a cluster with your own S3-compatible storage.
+They include the server, scalable render workers, one maintenance worker, a
+service, an optional ingress, a ConfigMap, and a Secret example.
+
+See the [Kubernetes guide](kubernetes.md) for the deployment steps and the
+[operations guide](operations.md) for the runbooks.
+
 ## Run from source
 
 Start only the local object store:

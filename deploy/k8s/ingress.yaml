@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: papermake
+  namespace: papermake
+spec:
+  rules:
+    - host: papermake.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: papermake-server
+                port:
+                  number: 80

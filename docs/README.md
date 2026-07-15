@@ -14,6 +14,8 @@ first PDF.
   job, and collect the resulting PDFs.
 - [Self-hosting](how-to/self-hosting.md): run Papermake with Docker Compose,
   from source, or against your own S3-compatible storage.
+- [Kubernetes](how-to/kubernetes.md): deploy Papermake with plain Kubernetes
+  manifests and external S3-compatible storage.
 - [Operations](how-to/operations.md): scale workers, inspect incidents, rotate
   credentials, and back up S3 data.
 
