@@ -143,7 +143,7 @@ In `publish`, the `schema` form field becomes `schema.json`.
 
 ## Bundle file paths
 
-The publish APIs build a bundle from:
+The publish API builds a bundle from:
 
 | Source | Bundle path |
 |---|---|

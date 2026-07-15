@@ -23,15 +23,21 @@ Open **http://localhost:3000/** for the web UI.
 
 ## 2. Publish a template
 
-Use the simple JSON publish endpoint:
+Create a small Typst template:
 
 ```bash
-curl -X POST "http://localhost:3000/api/templates/hello/publish-simple?tag=latest" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "main_typ": "= Hello #data.name\nWelcome aboard.",
-    "metadata": { "name": "Hello", "author": "you@example.com" }
-  }'
+cat > hello.typ <<'EOF'
+= Hello #data.name
+Welcome aboard.
+EOF
+```
+
+Publish it:
+
+```bash
+curl -X POST "http://localhost:3000/api/templates/hello/publish?tag=latest" \
+  -F "main_typ=@hello.typ" \
+  -F 'metadata={"name":"Hello","author":"you@example.com"}'
 ```
 
 The response includes the template reference:

@@ -18,7 +18,6 @@ use utoipa::OpenApi;
         crate::health_check,
         crate::routes::templates::list_templates,
         crate::routes::templates::publish_template,
-        crate::routes::templates::publish_template_simple,
         crate::routes::templates::list_template_tags,
         crate::routes::templates::get_template_source,
         crate::routes::templates::get_template_metadata,
@@ -40,7 +39,6 @@ use utoipa::OpenApi;
         crate::routes::render::BatchRenderRequest,
         crate::routes::render::BatchAccepted,
         crate::routes::templates::PublishResponse,
-        crate::routes::templates::PublishSimpleRequest,
         crate::routes::templates::TemplateMetadataResponse,
         crate::models::api::PaginationInfo,
         // Concrete generic wrappers (aliases)
@@ -95,6 +93,10 @@ mod tests {
         ] {
             assert!(json.contains(path), "spec missing path {path}");
         }
+        assert!(
+            !json.contains("publish-simple"),
+            "spec should not include removed publish-simple endpoint"
+        );
         // PDF/A option surfaced on the render request.
         assert!(json.contains("pdf_standard"), "spec missing pdf_standard");
     }

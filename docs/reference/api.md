@@ -67,23 +67,7 @@ curl -X POST "http://localhost:3000/api/templates/invoice/publish?tag=latest" \
   -F 'metadata={"name":"Invoice","author":"you@example.com"}'
 ```
 
-### `POST /api/templates/{name}/publish-simple`
-
-Publishes a single-file template from JSON.
-
-| Query | Default | Meaning |
-|---|---:|---|
-| `tag` | `latest` | Tag to create or move |
-
-```json
-{
-  "main_typ": "= Hi #data.name",
-  "schema": { "type": "object" },
-  "metadata": { "name": "Greeting", "author": "you@example.com", "retain_days": 7 }
-}
-```
-
-Both publish endpoints respond with:
+The publish endpoint responds with:
 
 ```json
 {
