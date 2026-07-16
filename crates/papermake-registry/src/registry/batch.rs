@@ -212,6 +212,47 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         Ok(None)
     }
 
+    /// Read a shard descriptor from storage.
+    pub(crate) async fn get_shard(
+        &self,
+        job_id: &str,
+        index: usize,
+    ) -> Result<Shard, RegistryError> {
+        let bytes = self
+            .storage
+            .get(&layout::shard_key(job_id, index))
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| RegistryError::RenderStorage(RenderStorageError::Serialization(e)))
+    }
+
+    /// Renew a running shard's lease as a heartbeat, first confirming we still
+    /// own it.
+    ///
+    /// Returns `false` when another worker has reclaimed the shard (its `owner`
+    /// in storage no longer matches ours) — the caller must abandon its run so
+    /// the shard is not rendered to completion twice. Returns `true` after a
+    /// successful renewal. A storage read error is treated as "still ours"
+    /// (fail open): dropping a healthy run on a transient blip is worse than the
+    /// rare double-render the content-addressed design already tolerates.
+    pub(crate) async fn heartbeat_shard(
+        &self,
+        shard: &mut Shard,
+        lease_ttl_secs: u64,
+        now: time::OffsetDateTime,
+    ) -> bool {
+        if let Ok(current) = self.get_shard(&shard.job_id, shard.index).await
+            && current.owner != shard.owner
+        {
+            return false;
+        }
+        shard.lease_expires_at = Some(now + time::Duration::seconds(lease_ttl_secs as i64));
+        shard.updated_at = now;
+        let _ = self.put_shard(shard).await;
+        true
+    }
+
     /// Persist a shard descriptor.
     pub(crate) async fn put_shard(&self, shard: &Shard) -> Result<(), RegistryError> {
         let bytes = serde_json::to_vec(shard)
@@ -391,12 +432,17 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             });
 
             if last_heartbeat.elapsed() >= heartbeat_interval {
-                let now = time::OffsetDateTime::now_utc();
                 shard.done = done;
                 shard.failed = failed;
-                shard.lease_expires_at = Some(now + time::Duration::seconds(lease_ttl_secs as i64));
-                shard.updated_at = now;
-                let _ = self.put_shard(&shard).await;
+                let now = time::OffsetDateTime::now_utc();
+                if !self.heartbeat_shard(&mut shard, lease_ttl_secs, now).await {
+                    tracing::warn!(
+                        job_id = %meta.job_id,
+                        shard = shard.index,
+                        "shard reclaimed by another worker mid-run; abandoning",
+                    );
+                    return Ok(());
+                }
                 last_heartbeat = std::time::Instant::now();
             }
         }

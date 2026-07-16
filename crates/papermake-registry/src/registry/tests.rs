@@ -1682,6 +1682,108 @@ async fn test_batch_shard_orphan_reclaim_and_resume() {
 }
 
 #[tokio::test]
+async fn heartbeat_renews_lease_and_blocks_reclaim_while_owned() {
+    use crate::batch::BatchInput;
+
+    let registry = Registry::new(
+        MemoryStorage::new(),
+        crate::render_storage::MemoryRenderStorage::new(),
+    );
+    registry
+        .publish(create_test_bundle(), "batch", "latest")
+        .await
+        .unwrap();
+    let inputs = vec![BatchInput {
+        data: serde_json::json!({ "name": "A" }),
+        key: None,
+    }];
+    registry
+        .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
+        .await
+        .unwrap();
+
+    let t0 = time::OffsetDateTime::now_utc();
+    let (_m, mut shard, _i) = registry
+        .claim_next_shard("worker-a", 60, 3, t0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shard.lease_expires_at, Some(t0 + time::Duration::seconds(60)));
+
+    // A heartbeat mid-run, while we still own the shard, renews the lease
+    // forward from `now` and reports success.
+    let t_mid = t0 + time::Duration::seconds(30);
+    assert!(registry.heartbeat_shard(&mut shard, 60, t_mid).await);
+    assert_eq!(
+        shard.lease_expires_at,
+        Some(t_mid + time::Duration::seconds(60))
+    );
+
+    // Because the lease was renewed to t0+90, a competing worker at t0+70 —
+    // already past the *original* t0+60 expiry — still cannot reclaim it.
+    let t_after_original = t0 + time::Duration::seconds(70);
+    assert!(
+        registry
+            .claim_next_shard("worker-b", 60, 3, t_after_original)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn heartbeat_aborts_when_shard_was_reclaimed() {
+    use crate::batch::BatchInput;
+
+    let registry = Registry::new(
+        MemoryStorage::new(),
+        crate::render_storage::MemoryRenderStorage::new(),
+    );
+    registry
+        .publish(create_test_bundle(), "batch", "latest")
+        .await
+        .unwrap();
+    let inputs = vec![BatchInput {
+        data: serde_json::json!({ "name": "A" }),
+        key: None,
+    }];
+    registry
+        .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
+        .await
+        .unwrap();
+
+    // Worker A claims, then stalls past its lease.
+    let t0 = time::OffsetDateTime::now_utc();
+    let (_m, mut shard_a, _i) = registry
+        .claim_next_shard("worker-a", 60, 3, t0)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Worker B reclaims the expired lease and now owns the shard in storage.
+    let t_late = t0 + time::Duration::seconds(120);
+    let (_m2, shard_b, _i2) = registry
+        .claim_next_shard("worker-b", 60, 3, t_late)
+        .await
+        .unwrap()
+        .expect("expired lease is reclaimable");
+    assert_eq!(shard_b.owner.as_deref(), Some("worker-b"));
+
+    // Worker A's heartbeat must notice it lost the shard and refuse to renew,
+    // leaving worker B's ownership intact — no resurrection, no double render.
+    assert!(
+        !registry
+            .heartbeat_shard(&mut shard_a, 60, t_late + time::Duration::seconds(1))
+            .await
+    );
+    let persisted = registry
+        .get_shard(&shard_a.job_id, shard_a.index)
+        .await
+        .unwrap();
+    assert_eq!(persisted.owner.as_deref(), Some("worker-b"));
+}
+
+#[tokio::test]
 async fn test_run_claimed_shard_retries_persisted_failure() {
     use crate::batch::{BatchInput, JobStatus};
 
