@@ -1492,7 +1492,7 @@ async fn test_batch_job_enqueue_claim_run() {
         assert_eq!(shard.attempts, 1);
         assert_eq!(sinputs.len(), 1);
         registry
-            .run_claimed_shard(meta, shard, sinputs, 120)
+            .run_claimed_shard(meta, shard, sinputs, 120, || false)
             .await
             .unwrap();
         shards_run += 1;
@@ -1565,7 +1565,7 @@ async fn test_batch_render_pdf_a_distinct_from_plain() {
         registry.claim_next_shard("w", 120, 3, now).await.unwrap()
     {
         registry
-            .run_claimed_shard(meta, shard, sinputs, 120)
+            .run_claimed_shard(meta, shard, sinputs, 120, || false)
             .await
             .unwrap();
     }
@@ -1656,7 +1656,7 @@ async fn test_batch_shard_orphan_reclaim_and_resume() {
     assert_eq!(shard_b.owner.as_deref(), Some("worker-b"));
     assert_eq!(shard_b.attempts, 2);
     registry
-        .run_claimed_shard(meta_b, shard_b, inputs_b, 60)
+        .run_claimed_shard(meta_b, shard_b, inputs_b, 60, || false)
         .await
         .unwrap();
 
@@ -1725,7 +1725,7 @@ async fn test_run_claimed_shard_retries_persisted_failure() {
         .unwrap()
         .unwrap();
     registry
-        .run_claimed_shard(meta, shard, sinputs, 60)
+        .run_claimed_shard(meta, shard, sinputs, 60, || false)
         .await
         .unwrap();
 
@@ -1771,7 +1771,7 @@ async fn test_transient_prepare_error_releases_shard_for_retry() {
     assert_eq!(shard.attempts, 1);
     assert!(
         registry
-            .run_claimed_shard(meta, shard, sinputs, 60)
+            .run_claimed_shard(meta, shard, sinputs, 60, || false)
             .await
             .is_err()
     );
@@ -1792,7 +1792,7 @@ async fn test_transient_prepare_error_releases_shard_for_retry() {
         .expect("released shard is reclaimable");
     assert_eq!(shard2.attempts, 2);
     registry
-        .run_claimed_shard(meta2, shard2, sinputs2, 60)
+        .run_claimed_shard(meta2, shard2, sinputs2, 60, || false)
         .await
         .unwrap();
 
@@ -1841,7 +1841,7 @@ async fn test_render_error_rebuilds_world_and_batch_continues() {
         .unwrap();
     // Completes without panicking even though every item errors.
     registry
-        .run_claimed_shard(meta, shard, sinputs, 60)
+        .run_claimed_shard(meta, shard, sinputs, 60, || false)
         .await
         .unwrap();
 
@@ -1893,7 +1893,7 @@ async fn claim_skips_completed_jobs_via_pending_markers() {
         .unwrap()
         .unwrap();
     registry
-        .run_claimed_shard(meta, shard, inputs, 60)
+        .run_claimed_shard(meta, shard, inputs, 60, || false)
         .await
         .unwrap();
     let _ = job;
@@ -1988,7 +1988,7 @@ async fn dead_worker_shard_is_reclaimed_via_its_pending_marker() {
         .expect("expired lease is reclaimable via its pending marker");
     assert_eq!(shard_b.attempts, 2);
     registry
-        .run_claimed_shard(meta_b, shard_b, inputs_b, 60)
+        .run_claimed_shard(meta_b, shard_b, inputs_b, 60, || false)
         .await
         .unwrap();
 
@@ -2004,6 +2004,72 @@ async fn dead_worker_shard_is_reclaimed_via_its_pending_marker() {
     let view = registry.get_batch_job(&job_id).await.unwrap();
     assert_eq!(view.status, JobStatus::Completed);
     assert_eq!(view.done, 1);
+}
+
+#[tokio::test]
+async fn run_claimed_shard_releases_for_reclaim_on_shutdown() {
+    use crate::batch::{BatchInput, JobStatus, ShardStatus};
+
+    let registry = Registry::new(
+        MemoryStorage::new(),
+        crate::render_storage::MemoryRenderStorage::new(),
+    );
+    registry
+        .publish(create_test_bundle(), "batch", "latest")
+        .await
+        .unwrap();
+    let inputs: Vec<BatchInput> = ["A", "B"]
+        .iter()
+        .map(|n| BatchInput {
+            data: serde_json::json!({ "name": n }),
+            key: None,
+        })
+        .collect();
+    let job = registry
+        .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
+        .await
+        .unwrap();
+    let job_id = job.job_id.clone();
+
+    // A shutdown that trips immediately releases the shard before any item.
+    let t0 = time::OffsetDateTime::now_utc();
+    let (meta, shard, sinputs) = registry
+        .claim_next_shard("w1", 60, 3, t0)
+        .await
+        .unwrap()
+        .unwrap();
+    registry
+        .run_claimed_shard(meta, shard, sinputs, 60, || true)
+        .await
+        .unwrap();
+
+    let shards = registry.list_job_shards(&job_id).await.unwrap();
+    assert_eq!(shards[0].status, ShardStatus::Pending);
+    assert!(shards[0].owner.is_none());
+    // The marker survives so the shard is still discovered as pending work.
+    assert_eq!(
+        registry
+            .storage
+            .list_keys(layout::PENDING_PREFIX)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // A later worker (not shutting down) reclaims and completes it.
+    let (m2, s2, i2) = registry
+        .claim_next_shard("w2", 60, 3, t0)
+        .await
+        .unwrap()
+        .unwrap();
+    registry
+        .run_claimed_shard(m2, s2, i2, 60, || false)
+        .await
+        .unwrap();
+    let done = registry.get_batch_job(&job_id).await.unwrap();
+    assert_eq!(done.status, JobStatus::Completed);
+    assert_eq!(done.done, 2);
 }
 
 #[tokio::test]
@@ -2041,7 +2107,7 @@ async fn test_batch_shards_concurrent_workers() {
             while let Some((meta, shard, sinputs)) =
                 reg.claim_next_shard(&wid, 120, 3, now).await.unwrap()
             {
-                reg.run_claimed_shard(meta, shard, sinputs, 120)
+                reg.run_claimed_shard(meta, shard, sinputs, 120, || false)
                     .await
                     .unwrap();
             }

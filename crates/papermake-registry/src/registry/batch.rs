@@ -262,12 +262,17 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     /// heartbeats the lease, then writes the shard's `results.json` and marks it
     /// `done`. Safe to run concurrently with another worker on the same shard:
     /// identical outputs, deduped analytics.
+    /// `should_stop` is polled between items so a graceful shutdown can release
+    /// a long shard mid-flight instead of running all its items past the process
+    /// grace period; already-rendered items are content-addressed and skipped on
+    /// resume.
     pub async fn run_claimed_shard(
         &self,
         meta: BatchJob,
         mut shard: Shard,
         inputs: Vec<BatchInput>,
         lease_ttl_secs: u64,
+        should_stop: impl Fn() -> bool,
     ) -> Result<(), RegistryError> {
         // Heartbeat/persist every N items to bound writes and keep the lease fresh.
         const FLUSH_EVERY: usize = 20;
@@ -307,6 +312,28 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let mut done = 0usize;
         let mut failed = 0usize;
         for (j, input) in inputs.iter().enumerate() {
+            // Graceful shutdown mid-shard: persist progress counts, release the
+            // shard for reclaim (its pending marker stays), and stop. Completed
+            // items already wrote their content-addressed output, so a resuming
+            // worker skips them.
+            if should_stop() {
+                shard.done = done;
+                shard.failed = failed;
+                shard.status = ShardStatus::Pending;
+                shard.owner = None;
+                shard.lease_expires_at = None;
+                shard.updated_at = time::OffsetDateTime::now_utc();
+                self.put_shard(&shard).await?;
+                tracing::info!(
+                    job_id = %meta.job_id,
+                    shard = shard.index,
+                    done,
+                    failed,
+                    "shard released on shutdown; will resume on reclaim",
+                );
+                return Ok(());
+            }
+
             let global_index = shard.start + j;
             // Compute the item's content-addressed id to check for an existing
             // output (resume) — matches what `render_one` would produce.

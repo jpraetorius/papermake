@@ -77,20 +77,32 @@ fn default_interval_seconds(role: Role) -> u64 {
 
 fn env_u64(key: &str, default: u64) -> u64 {
     let value = std::env::var(key).ok();
-    env_u64_value(value.as_deref(), default)
+    env_u64_value(key, value.as_deref(), default)
 }
 
-fn env_u64_value(value: Option<&str>, default: u64) -> u64 {
-    value.and_then(|v| v.parse().ok()).unwrap_or(default)
+fn env_u64_value(key: &str, value: Option<&str>, default: u64) -> u64 {
+    match value {
+        Some(v) => v.parse().unwrap_or_else(|_| {
+            warn!("Invalid {key}={v:?}; using default {default}");
+            default
+        }),
+        None => default,
+    }
 }
 
 fn env_u32(key: &str, default: u32) -> u32 {
     let value = std::env::var(key).ok();
-    env_u32_value(value.as_deref(), default)
+    env_u32_value(key, value.as_deref(), default)
 }
 
-fn env_u32_value(value: Option<&str>, default: u32) -> u32 {
-    value.and_then(|v| v.parse().ok()).unwrap_or(default)
+fn env_u32_value(key: &str, value: Option<&str>, default: u32) -> u32 {
+    match value {
+        Some(v) => v.parse().unwrap_or_else(|_| {
+            warn!("Invalid {key}={v:?}; using default {default}");
+            default
+        }),
+        None => default,
+    }
 }
 
 #[tokio::main]
@@ -193,7 +205,9 @@ async fn main() {
                             shard_index, job_id, shard_len
                         );
                         if let Err(e) = registry
-                            .run_claimed_shard(meta, shard, inputs, lease_secs)
+                            .run_claimed_shard(meta, shard, inputs, lease_secs, || {
+                                *shutdown_rx.borrow()
+                            })
                             .await
                         {
                             error!("Job {} shard {} failed: {}", job_id, shard_index, e);
@@ -340,12 +354,12 @@ mod tests {
 
     #[test]
     fn numeric_env_helpers_accept_valid_values_and_fall_back_otherwise() {
-        assert_eq!(env_u64_value(Some("12"), 5), 12);
-        assert_eq!(env_u64_value(Some("not-a-number"), 5), 5);
-        assert_eq!(env_u64_value(None, 5), 5);
+        assert_eq!(env_u64_value("TEST", Some("12"), 5), 12);
+        assert_eq!(env_u64_value("TEST", Some("not-a-number"), 5), 5);
+        assert_eq!(env_u64_value("TEST", None, 5), 5);
 
-        assert_eq!(env_u32_value(Some("7"), 3), 7);
-        assert_eq!(env_u32_value(Some("-1"), 3), 3);
-        assert_eq!(env_u32_value(None, 3), 3);
+        assert_eq!(env_u32_value("TEST", Some("7"), 3), 7);
+        assert_eq!(env_u32_value("TEST", Some("-1"), 3), 3);
+        assert_eq!(env_u32_value("TEST", None, 3), 3);
     }
 }
