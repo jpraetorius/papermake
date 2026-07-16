@@ -215,8 +215,11 @@ Expiry files:
 | `expiry/dt=<expiry-date>/<instance>/*.ndjson` | line-delimited text | Render ids due for pruning on that date |
 
 The maintenance worker scans due expiry partitions and deletes the matching
-render artifacts. Analytics rollups can still mention a historical render after
-its PDF has expired.
+render artifacts. Before deleting, it re-reads each render's `meta.json` and
+keeps any whose recorded expiry is now unset or in the future: re-rendering the
+same request overwrites `meta.json` in place but leaves the original expiry-index
+entry behind, so the current `meta.json` — not the index — decides. Analytics
+rollups can still mention a historical render after its PDF has expired.
 
 ## Consistency
 

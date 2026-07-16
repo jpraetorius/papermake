@@ -8,10 +8,11 @@
 use time::{Date, Duration};
 
 use super::layout;
-use super::types::RenderStorageError;
+use super::types::{RenderRecord, RenderStorageError};
 use crate::address::ContentAddress;
 use crate::batch::BatchJob;
 use crate::storage::BlobStorage;
+use crate::storage::blob_storage::StorageError;
 
 /// Resolve the effective retention for a render, in days.
 ///
@@ -96,11 +97,25 @@ pub async fn prune<B: BlobStorage + ?Sized>(
         }
     }
 
+    // A render can appear in more than one expiry partition (e.g. re-rendered
+    // with a longer retention); dedupe so we read each meta.json once.
+    due_render_ids.sort_unstable();
+    due_render_ids.dedup();
+
+    // The expiry index is a hint, not the source of truth: it is written once at
+    // render time and never revisited, so a render re-rendered with a longer or
+    // "keep forever" retention overwrites its meta.json while leaving the old
+    // entry behind. Consult each render's *current* meta.json and only prune
+    // those whose recorded expiry is actually due. The stale entries are still
+    // consumed below so they are not re-read every cycle.
     let mut artifact_keys = Vec::with_capacity(due_render_ids.len() * 3);
     for id in &due_render_ids {
-        artifact_keys.push(ContentAddress::render_meta_key(id));
-        artifact_keys.push(ContentAddress::render_pdf_key(id));
-        artifact_keys.push(ContentAddress::render_data_key(id));
+        if expiry_entry_is_due(blob, id, today).await? {
+            artifact_keys.push(ContentAddress::render_meta_key(id));
+            artifact_keys.push(ContentAddress::render_pdf_key(id));
+            artifact_keys.push(ContentAddress::render_data_key(id));
+            stats.renders_pruned += 1;
+        }
     }
     blob.delete_many(&artifact_keys)
         .await
@@ -108,7 +123,6 @@ pub async fn prune<B: BlobStorage + ?Sized>(
     blob.delete_many(&consumed_expiry_files)
         .await
         .map_err(|e| RenderStorageError::Query(e.to_string()))?;
-    stats.renders_pruned = due_render_ids.len();
     stats.expiry_files_consumed = consumed_expiry_files.len();
 
     // 2. Analytics-raw pruning — independent, usually short retention.
@@ -162,6 +176,45 @@ pub async fn prune<B: BlobStorage + ?Sized>(
     Ok(stats)
 }
 
+/// Decide whether a due expiry-index entry should actually prune its render,
+/// using the render's *current* `meta.json` as the source of truth.
+///
+/// - Meta present with an expiry that is unset ("keep forever") or still in the
+///   future: the retention was extended after this entry was written — keep it.
+/// - Meta present with an expiry `<= today`: genuinely due — prune.
+/// - Meta absent: the render is already gone; report due so the (idempotent)
+///   delete cleans up any orphaned `pdf`/`data` blobs.
+/// - Meta present but unreadable: keep it, rather than risk deleting a record we
+///   cannot verify.
+///
+/// Transient backend errors propagate so the caller retries on the next cycle
+/// instead of silently keeping (leak) or deleting (data loss).
+async fn expiry_entry_is_due<B: BlobStorage + ?Sized>(
+    blob: &B,
+    render_id: &str,
+    today: Date,
+) -> Result<bool, RenderStorageError> {
+    let bytes = match blob.get(&ContentAddress::render_meta_key(render_id)).await {
+        Ok(bytes) => bytes,
+        Err(StorageError::NotFound(_)) => return Ok(true),
+        Err(e) => return Err(RenderStorageError::Query(e.to_string())),
+    };
+    match serde_json::from_slice::<RenderRecord>(&bytes) {
+        Ok(record) => Ok(match record.expiry_date {
+            None => false,
+            Some(expiry) => expiry <= today,
+        }),
+        Err(e) => {
+            tracing::warn!(
+                render_id,
+                error = %e,
+                "skipping prune of render with unreadable meta.json",
+            );
+            Ok(false)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,10 +247,43 @@ mod tests {
         blob.put(&key, body.into_bytes()).await.unwrap();
     }
 
-    async fn write_artifacts(blob: &MemoryStorage, id: &str, with_pdf: bool) {
-        blob.put(&ContentAddress::render_meta_key(id), b"{}".to_vec())
-            .await
-            .unwrap();
+    fn record_with_expiry(id: &str, success: bool, expiry_date: Option<Date>) -> RenderRecord {
+        RenderRecord {
+            render_id: id.to_string(),
+            timestamp: date!(2026 - 07 - 01).midnight().assume_utc(),
+            template_ref: "invoice:latest".to_string(),
+            template_name: "invoice".to_string(),
+            template_tag: "latest".to_string(),
+            manifest_hash: "sha256:test".to_string(),
+            data_hash: "sha256:data".to_string(),
+            pdf_hash: if success {
+                "sha256:pdf".to_string()
+            } else {
+                String::new()
+            },
+            success,
+            duration_ms: 1,
+            pdf_size_bytes: if success { 4 } else { 0 },
+            error: (!success).then(|| "boom".to_string()),
+            expiry_date,
+        }
+    }
+
+    /// Write a render's `meta.json` (a real [`RenderRecord`] carrying
+    /// `expiry_date`), `data`, and — for a successful render — `pdf`.
+    async fn write_artifacts(
+        blob: &MemoryStorage,
+        id: &str,
+        with_pdf: bool,
+        expiry_date: Option<Date>,
+    ) {
+        let record = record_with_expiry(id, with_pdf, expiry_date);
+        blob.put(
+            &ContentAddress::render_meta_key(id),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .await
+        .unwrap();
         blob.put(&ContentAddress::render_data_key(id), b"{}".to_vec())
             .await
             .unwrap();
@@ -214,8 +300,8 @@ mod tests {
         let today = date!(2026 - 07 - 09);
 
         // Due (yesterday) — one success (with pdf) and one failed (no pdf).
-        write_artifacts(&blob, "due-ok", true).await;
-        write_artifacts(&blob, "due-failed", false).await;
+        write_artifacts(&blob, "due-ok", true, Some(date!(2026 - 07 - 08))).await;
+        write_artifacts(&blob, "due-failed", false, Some(date!(2026 - 07 - 08))).await;
         write_expiry(
             &blob,
             date!(2026 - 07 - 08),
@@ -225,7 +311,7 @@ mod tests {
         .await;
 
         // Not yet due (tomorrow) — must survive.
-        write_artifacts(&blob, "future", true).await;
+        write_artifacts(&blob, "future", true, Some(date!(2026 - 07 - 10))).await;
         write_expiry(&blob, date!(2026 - 07 - 10), "inst-1", &["future"]).await;
 
         let stats = prune(&blob, today, 90, 7).await.unwrap();
@@ -255,6 +341,64 @@ mod tests {
             blob.exists(&ContentAddress::render_pdf_key("future"))
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prune_respects_current_meta_over_stale_expiry_index() {
+        let blob = MemoryStorage::new();
+        let today = date!(2026 - 07 - 09);
+
+        // All three have a stale expiry-index entry for 07-08 (yesterday), but
+        // their current meta.json disagrees for two of them:
+        //   - `due`:      still expires 07-08                    → prune
+        //   - `pinned`:   re-rendered "keep forever" (None)      → keep
+        //   - `extended`: re-rendered with retention out to 07-20 → keep
+        write_artifacts(&blob, "due", true, Some(date!(2026 - 07 - 08))).await;
+        write_artifacts(&blob, "pinned", true, None).await;
+        write_artifacts(&blob, "extended", true, Some(date!(2026 - 07 - 20))).await;
+        write_expiry(
+            &blob,
+            date!(2026 - 07 - 08),
+            "inst-1",
+            &["due", "pinned", "extended"],
+        )
+        .await;
+
+        let stats = prune(&blob, today, 90, 7).await.unwrap();
+
+        // Only the genuinely-due render is pruned.
+        assert_eq!(stats.renders_pruned, 1);
+        assert_eq!(stats.expiry_files_consumed, 1);
+        assert!(
+            !blob
+                .exists(&ContentAddress::render_meta_key("due"))
+                .await
+                .unwrap()
+        );
+
+        // Pinned and extended survive despite the stale index entry.
+        for survivor in ["pinned", "extended"] {
+            assert!(
+                blob.exists(&ContentAddress::render_meta_key(survivor))
+                    .await
+                    .unwrap(),
+                "{survivor} meta should survive",
+            );
+            assert!(
+                blob.exists(&ContentAddress::render_pdf_key(survivor))
+                    .await
+                    .unwrap(),
+                "{survivor} pdf should survive",
+            );
+        }
+
+        // The stale expiry partition is still consumed so it is not re-scanned.
+        assert!(
+            blob.list_keys(layout::EXPIRY_PREFIX)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

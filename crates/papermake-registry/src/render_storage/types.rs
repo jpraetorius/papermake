@@ -30,8 +30,12 @@ pub struct RenderRecord {
     pub pdf_size_bytes: u32,
     /// Error message if render failed
     pub error: Option<String>,
-    /// Date this render's outputs expire (for audit/visibility). `None` means
-    /// "keep forever" — no expiry-index entry is written for it.
+    /// Date this render's outputs expire. `None` means "keep forever" — no
+    /// expiry-index entry is written for it. This is the source of truth at
+    /// prune time: because a re-render overwrites `meta.json` (same
+    /// content-addressed id) but never revisits the earlier expiry-index entry,
+    /// pruning re-reads this field and keeps renders whose retention was later
+    /// extended or set to "keep forever".
     #[serde(default)]
     pub expiry_date: Option<Date>,
 }
