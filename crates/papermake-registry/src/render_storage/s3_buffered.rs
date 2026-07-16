@@ -79,12 +79,32 @@ impl<B: BlobStorage> S3BufferedRenderStorage<B> {
             std::mem::take(&mut *buf)
         };
 
+        // If any put fails, put the drained records back so they are retried on
+        // the next flush. The expiry-index entries they carry are the *only*
+        // mechanism that ever prunes these renders' PDFs and input data, so
+        // dropping them silently converts a batch of expiring renders into
+        // "keep forever". Retrying is safe: keys embed instance_id/millis/seq
+        // (so a partially-written flush never overwrites) and the aggregator
+        // dedupes by render_id.
+        if let Err(e) = self.write_drained(&drained).await {
+            let mut buf = self.buffer.write().await;
+            // Re-stage ahead of anything staged since the take, preserving order.
+            let staged_since = std::mem::replace(&mut *buf, drained);
+            buf.extend(staged_since);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Write one analytics-raw object plus the per-expiry-date index objects for
+    /// `drained` to blob storage. On any error the caller re-stages the records.
+    async fn write_drained(&self, drained: &[RenderRecord]) -> Result<(), RenderStorageError> {
         let now = OffsetDateTime::now_utc();
         let unix_millis = (now.unix_timestamp_nanos() / 1_000_000) as u128;
 
         // Analytics raw (full records, partitioned by render date).
         let mut body = String::new();
-        for record in &drained {
+        for record in drained {
             body.push_str(&serde_json::to_string(record)?);
             body.push('\n');
         }
@@ -98,7 +118,7 @@ impl<B: BlobStorage> S3BufferedRenderStorage<B> {
         // Expiry index (render_ids grouped by expiry date).
         let mut by_expiry: std::collections::BTreeMap<time::Date, Vec<&str>> =
             std::collections::BTreeMap::new();
-        for record in &drained {
+        for record in drained {
             if let Some(dt) = record.expiry_date {
                 by_expiry.entry(dt).or_default().push(&record.render_id);
             }
@@ -234,7 +254,50 @@ mod tests {
     use super::*;
     use crate::render_storage::summary::{Summary, TemplateSummary, Totals};
     use crate::storage::blob_storage::MemoryStorage;
+    use std::sync::atomic::AtomicBool;
     use time::macros::datetime;
+
+    /// Blob storage that can be toggled to fail every `put`, delegating all
+    /// other operations to an inner in-memory store.
+    struct TogglePutStorage {
+        inner: MemoryStorage,
+        fail_puts: AtomicBool,
+    }
+
+    impl TogglePutStorage {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStorage::new(),
+                fail_puts: AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_puts(&self, fail: bool) {
+            self.fail_puts.store(fail, Ordering::Relaxed);
+        }
+    }
+
+    #[async_trait]
+    impl BlobStorage for TogglePutStorage {
+        async fn put(&self, key: &str, data: Vec<u8>) -> Result<(), StorageError> {
+            if self.fail_puts.load(Ordering::Relaxed) {
+                return Err(StorageError::Backend("injected put failure".to_string()));
+            }
+            self.inner.put(key, data).await
+        }
+        async fn get(&self, key: &str) -> Result<Vec<u8>, StorageError> {
+            self.inner.get(key).await
+        }
+        async fn exists(&self, key: &str) -> Result<bool, StorageError> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &str) -> Result<(), StorageError> {
+            self.inner.delete(key).await
+        }
+        async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+            self.inner.list_keys(prefix).await
+        }
+    }
 
     fn record(name: &str) -> RenderRecord {
         RenderRecord::success(
@@ -334,6 +397,73 @@ mod tests {
         let ids: Vec<&str> = body.lines().collect();
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&"r1") && ids.contains(&"r2"));
+    }
+
+    #[tokio::test]
+    async fn test_failed_flush_restages_records_and_retries() {
+        let blob = Arc::new(TogglePutStorage::new());
+        let store = S3BufferedRenderStorage::new(blob.clone(), Some("inst-1".to_string()), 1000);
+
+        let mut r = record("invoice");
+        r.render_id = "r1".to_string();
+        r.expiry_date = Some(time::macros::date!(2026 - 08 - 01));
+        store.store_render(r).await.unwrap();
+
+        // A flush that fails must keep the record buffered, not drop it — losing
+        // it would drop the only expiry-index entry that ever prunes its PDF.
+        blob.set_fail_puts(true);
+        assert!(store.flush().await.is_err());
+        assert_eq!(store.buffered_len().await, 1);
+        assert!(blob.list_keys(layout::RAW_PREFIX).await.unwrap().is_empty());
+        assert!(
+            blob.list_keys(layout::EXPIRY_PREFIX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // Once storage recovers, the retained record flushes successfully,
+        // including its expiry-index entry.
+        blob.set_fail_puts(false);
+        store.flush().await.unwrap();
+        assert_eq!(store.buffered_len().await, 0);
+        assert_eq!(blob.list_keys(layout::RAW_PREFIX).await.unwrap().len(), 1);
+        assert_eq!(
+            blob.list_keys(layout::EXPIRY_PREFIX).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_flush_preserves_records_staged_during_flush() {
+        let blob = Arc::new(TogglePutStorage::new());
+        let store = S3BufferedRenderStorage::new(blob.clone(), Some("inst-1".to_string()), 1000);
+
+        let mut r1 = record("invoice");
+        r1.render_id = "r1".to_string();
+        store.store_render(r1).await.unwrap();
+
+        blob.set_fail_puts(true);
+        assert!(store.flush().await.is_err());
+
+        // A record staged after the failed flush must not be lost when the
+        // drained batch is re-staged.
+        let mut r2 = record("letter");
+        r2.render_id = "r2".to_string();
+        store.store_render(r2).await.unwrap();
+        assert_eq!(store.buffered_len().await, 2);
+
+        blob.set_fail_puts(false);
+        store.flush().await.unwrap();
+
+        let keys = blob.list_keys(layout::RAW_PREFIX).await.unwrap();
+        assert_eq!(keys.len(), 1);
+        let text = String::from_utf8(blob.get(&keys[0]).await.unwrap()).unwrap();
+        let ids: Vec<String> = text
+            .lines()
+            .map(|l| serde_json::from_str::<RenderRecord>(l).unwrap().render_id)
+            .collect();
+        assert_eq!(ids, vec!["r1".to_string(), "r2".to_string()]);
     }
 
     #[tokio::test]
