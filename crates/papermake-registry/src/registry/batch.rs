@@ -676,9 +676,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         };
 
         self.put_render_meta(&record).await?;
-        if let Some(render_storage) = &self.render_storage {
-            render_storage.store_render(record).await?;
-        }
+        self.render_storage.store_render(record).await?;
         Ok((render_id, success))
     }
 }

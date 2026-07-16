@@ -104,15 +104,26 @@ Hello #data.name"#
         .with_schema(br#"{"type": "object", "properties": {"name": {"type": "string"}}}"#.to_vec())
 }
 
-#[test]
-fn test_registry_public_constructors_preserve_render_storage_access() {
-    let registry = Registry::new_with_render_storage(
-        MemoryStorage::new(),
-        crate::render_storage::MemoryRenderStorage::new(),
-    )
-    .with_render_limits(0, std::time::Duration::ZERO);
+#[tokio::test]
+async fn blob_only_registry_has_an_in_memory_render_store() {
+    // A registry created without an explicit analytics store still has one (an
+    // in-process MemoryRenderStorage), so analytics reads return empty rather
+    // than erroring, and renders are still recorded in-process.
+    let registry = Registry::new_storage_only(MemoryStorage::new());
+    registry
+        .publish(create_test_bundle(), "invoice", "latest")
+        .await
+        .unwrap();
+    registry
+        .render_and_store("invoice:latest", &serde_json::json!({ "name": "A" }))
+        .await
+        .unwrap();
 
-    assert!(registry.render_storage().is_some());
+    // The in-process store recorded the render (no "not configured" error).
+    let recent = registry.list_recent_renders(10).await.unwrap();
+    assert_eq!(recent.len(), 1);
+    // And the shared handle is always available for the flush loop.
+    let _ = registry.render_storage();
 }
 
 #[test]
@@ -1109,7 +1120,7 @@ async fn test_render_and_store_without_render_storage() {
         "name": "Test User"
     });
 
-    // Render with storage tracking should still work but not store records
+    // Rendering works on a blob-only registry.
     let result = registry
         .render_and_store("test-user/test-template:latest", &test_data)
         .await
@@ -1120,9 +1131,11 @@ async fn test_render_and_store_without_render_storage() {
     assert!(!result.pdf_bytes.is_empty());
     assert_eq!(result.pdf_hash, ContentAddress::hash(&result.pdf_bytes));
 
-    // Trying to list renders should fail without render storage
-    let list_result = registry.list_recent_renders(10).await;
-    assert!(list_result.is_err());
+    // The default in-process analytics store records it (listing no longer
+    // errors "not configured"); it's just ephemeral and not S3-backed.
+    let recent = registry.list_recent_renders(10).await.unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].render_id, result.render_id);
 }
 
 #[tokio::test]

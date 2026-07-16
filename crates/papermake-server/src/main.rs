@@ -278,7 +278,8 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Background flush loop against the same buffer render_and_store stages into.
-    if let Some(rs) = registry.render_storage() {
+    {
+        let rs = registry.render_storage();
         let interval = config.flush_interval_seconds;
         let mut shutdown_rx = shutdown_rx.clone();
         tokio::spawn(async move {
@@ -327,11 +328,9 @@ async fn main() -> Result<()> {
         .await?;
 
     // Flush any staged records on shutdown so none are lost.
-    if let Some(rs) = registry.render_storage() {
-        info!("Flushing analytics buffer on shutdown");
-        if let Err(e) = rs.flush().await {
-            warn!("Final analytics flush failed during shutdown: {}", e);
-        }
+    info!("Flushing analytics buffer on shutdown");
+    if let Err(e) = registry.render_storage().flush().await {
+        warn!("Final analytics flush failed during shutdown: {}", e);
     }
 
     Ok(())

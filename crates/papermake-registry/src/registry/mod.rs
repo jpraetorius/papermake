@@ -138,7 +138,10 @@ fn new_ref_cache() -> moka::future::Cache<String, String> {
 /// Core registry for template publishing and resolution
 pub struct Registry<S: BlobStorage, R: RenderStorage> {
     storage: Arc<S>,
-    render_storage: Option<Arc<R>>,
+    /// Analytics store: renders are staged here for aggregation. Always present
+    /// — a registry created without an explicit store gets an in-process
+    /// [`MemoryRenderStorage`](crate::render_storage::MemoryRenderStorage).
+    render_storage: Arc<R>,
     /// Global default output retention (days); `0` = keep forever.
     default_retention_days: u32,
     /// Limits CPU-bound Typst work running on the blocking thread pool.
@@ -196,7 +199,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage> Registry<S, R> {
     pub fn new(storage: S, render_storage: R) -> Self {
         Self {
             storage: Arc::new(storage),
-            render_storage: Some(Arc::new(render_storage)),
+            render_storage: Arc::new(render_storage),
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
             max_concurrent_renders: DEFAULT_MAX_CONCURRENT_RENDERS,
@@ -215,7 +218,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     pub fn new_with_render_storage(storage: S, render_storage: R) -> Self {
         Self {
             storage: Arc::new(storage),
-            render_storage: Some(Arc::new(render_storage)),
+            render_storage: Arc::new(render_storage),
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
             max_concurrent_renders: DEFAULT_MAX_CONCURRENT_RENDERS,
@@ -231,7 +234,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     pub fn new_blob_only(storage: S) -> Registry<S, crate::render_storage::MemoryRenderStorage> {
         Registry {
             storage: Arc::new(storage),
-            render_storage: None,
+            render_storage: Arc::new(crate::render_storage::MemoryRenderStorage::new()),
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
             max_concurrent_renders: DEFAULT_MAX_CONCURRENT_RENDERS,
@@ -273,10 +276,10 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         self
     }
 
-    /// Shared handle to the render storage, if configured. Lets the server run
-    /// the background flush loop (and flush-on-shutdown) against the same buffer
-    /// that `render_and_store` stages into.
-    pub fn render_storage(&self) -> Option<Arc<R>> {
+    /// Shared handle to the render storage. Lets the server run the background
+    /// flush loop (and flush-on-shutdown) against the same buffer that
+    /// `render_and_store` stages into.
+    pub fn render_storage(&self) -> Arc<R> {
         self.render_storage.clone()
     }
 }
@@ -287,7 +290,7 @@ impl<S: BlobStorage + 'static> Registry<S, crate::render_storage::MemoryRenderSt
     pub fn new_storage_only(storage: S) -> Self {
         Self {
             storage: Arc::new(storage),
-            render_storage: None,
+            render_storage: Arc::new(crate::render_storage::MemoryRenderStorage::new()),
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
             max_concurrent_renders: DEFAULT_MAX_CONCURRENT_RENDERS,

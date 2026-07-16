@@ -222,15 +222,13 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 );
 
                 // Stage the analytics record (write-only buffer; not a read source).
-                if let Some(render_storage) = &self.render_storage {
-                    render_storage.store_render(record).await?;
-                    tracing::debug!(
-                        reference = %reference,
-                        render_id = %render_id,
-                        elapsed_ms = overall_started.elapsed().as_millis() as u64,
-                        "registry render_and_store staged analytics record",
-                    );
-                }
+                self.render_storage.store_render(record).await?;
+                tracing::debug!(
+                    reference = %reference,
+                    render_id = %render_id,
+                    elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                    "registry render_and_store staged analytics record",
+                );
 
                 tracing::debug!(
                     reference = %reference,
@@ -289,14 +287,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     "registry render_and_store wrote failure meta",
                 );
 
-                if let Some(render_storage) = &self.render_storage {
-                    render_storage.store_render(record).await?;
-                    tracing::debug!(
-                        reference = %reference,
-                        elapsed_ms = overall_started.elapsed().as_millis() as u64,
-                        "registry render_and_store staged failure analytics record",
-                    );
-                }
+                self.render_storage.store_render(record).await?;
+                tracing::debug!(
+                    reference = %reference,
+                    elapsed_ms = overall_started.elapsed().as_millis() as u64,
+                    "registry render_and_store staged failure analytics record",
+                );
 
                 Err(render_error)
             }
@@ -325,12 +321,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     pub async fn render_summary(
         &self,
     ) -> Result<crate::render_storage::summary::Summary, RegistryError> {
-        let render_storage = self.render_storage.as_ref().ok_or_else(|| {
-            RegistryError::RenderStorage(RenderStorageError::Connection(
-                "No render storage configured".to_string(),
-            ))
-        })?;
-        Ok(render_storage.summary().await?)
+        Ok(self.render_storage.summary().await?)
     }
 
     /// List recent renders for a specific template (from the aggregate).
@@ -339,12 +330,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         template_name: &str,
         limit: u32,
     ) -> Result<Vec<RenderRecord>, RegistryError> {
-        let render_storage = self.render_storage.as_ref().ok_or_else(|| {
-            RegistryError::RenderStorage(RenderStorageError::Connection(
-                "No render storage configured".to_string(),
-            ))
-        })?;
-        Ok(render_storage
+        Ok(self
+            .render_storage
             .list_template_renders(template_name, limit)
             .await?)
     }
@@ -371,18 +358,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     /// Returns a vector of recent `RenderRecord`s sorted by timestamp (newest first)
     ///
     /// # Errors
-    /// Returns error if no render storage is configured or if query fails
+    /// Returns error if the query fails
     pub async fn list_recent_renders(
         &self,
         limit: u32,
     ) -> Result<Vec<RenderRecord>, RegistryError> {
-        if let Some(render_storage) = &self.render_storage {
-            Ok(render_storage.list_recent_renders(limit).await?)
-        } else {
-            Err(RegistryError::RenderStorage(
-                RenderStorageError::Connection("No render storage configured".to_string()),
-            ))
-        }
+        Ok(self.render_storage.list_recent_renders(limit).await?)
     }
 
     /// Get render input data by render ID
@@ -516,11 +497,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         &self,
         query: AnalyticsQuery,
     ) -> Result<AnalyticsResult, RegistryError> {
-        let render_storage = self.render_storage.as_ref().ok_or_else(|| {
-            RegistryError::RenderStorage(RenderStorageError::Connection(
-                "No render storage configured".to_string(),
-            ))
-        })?;
+        let render_storage = &self.render_storage;
 
         match query {
             AnalyticsQuery::VolumeOverTime { days } => {

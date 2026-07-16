@@ -213,9 +213,7 @@ async fn main() {
                             error!("Job {} shard {} failed: {}", job_id, shard_index, e);
                         }
                         // Persist analytics records staged during the shard.
-                        if let Some(rs) = registry.render_storage()
-                            && let Err(e) = rs.flush().await
-                        {
+                        if let Err(e) = registry.render_storage().flush().await {
                             error!(
                                 "Analytics flush after job {} shard {} failed: {}",
                                 job_id, shard_index, e
@@ -281,8 +279,7 @@ async fn main() {
 
     info!("Shutdown signal received; worker exiting");
     if let Some(registry) = &registry
-        && let Some(rs) = registry.render_storage()
-        && let Err(e) = rs.flush().await
+        && let Err(e) = registry.render_storage().flush().await
     {
         warn!("Final analytics flush failed during shutdown: {}", e);
     }
