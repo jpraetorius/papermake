@@ -127,14 +127,16 @@ impl std::fmt::Debug for PapermakeWorld {
 /// Whether the template source already declares a top-level `data` binding
 /// (`#let data …` in markup or `let data …` in code), so the prelude binding
 /// should be skipped to avoid shadowing it. A trailing identifier char (as in
-/// `database`) does not count.
+/// `database` or the kebab-case `data-table`) does not count — Typst
+/// identifiers may contain `-`, so a hyphen continues the name rather than
+/// ending a bare `data` binding.
 fn binds_data(source: &str) -> bool {
     source.lines().any(|line| {
         let trimmed = line.trim_start();
         for prefix in ["#let data", "let data"] {
             if let Some(rest) = trimmed.strip_prefix(prefix) {
                 let next = rest.chars().next();
-                if next.is_none_or(|c| !c.is_alphanumeric() && c != '_') {
+                if next.is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-') {
                     return true;
                 }
             }
@@ -394,6 +396,10 @@ mod tests {
         assert!(!binds_data("#let total = 1"));
         // A longer identifier must not be mistaken for `data`.
         assert!(!binds_data("#let database = connect()"));
+        // Typst identifiers are kebab-case-legal: `data-table` is its own
+        // binding, not a `data` binding, so the prelude must still be injected.
+        assert!(!binds_data("#let data-table = (1, 2)"));
+        assert!(!binds_data("#let data-2 = 1"));
     }
 
     #[test]
