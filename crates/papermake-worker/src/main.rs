@@ -132,7 +132,8 @@ async fn main() {
 
     // Poll/act cadence, defaulted by role (env overrides): render polls fast to
     // pick up new jobs quickly; maintenance aggregates/prunes on a slower beat.
-    let interval = env_u64("WORKER_INTERVAL_SECONDS", default_interval_seconds(role));
+    // Clamp to >= 1s: a 0 interval would busy-loop the poll against S3.
+    let interval = env_u64("WORKER_INTERVAL_SECONDS", default_interval_seconds(role)).max(1);
     let analytics_retention_days = env_u32("ANALYTICS_RETENTION_DAYS", 30);
     let job_retention_days = env_u32("JOB_RETENTION_DAYS", 7);
     let lease_secs = env_u64("WORKER_LEASE_SECONDS", 120);

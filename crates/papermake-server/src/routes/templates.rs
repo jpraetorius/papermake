@@ -123,18 +123,17 @@ pub async fn list_templates(
 ) -> Result<Json<PaginatedResponse<TemplateInfo>>> {
     let templates = state.registry.list_templates().await?;
 
-    // Apply search filter if provided
-    // let filtered_templates: Vec<TemplateInfo> = if let Some(search_term) = &query.search {
-    //     let search_lower = search_term.to_lowercase();
-    //     templates
-    //         .into_iter()
-    //         .filter(|template| template.full_name().to_lowercase().contains(&search_lower))
-    //         .collect()
-    // } else {
-    //     templates
-    // };
-
-    let filtered_templates = templates;
+    // Apply the case-insensitive name search when provided.
+    let filtered_templates: Vec<TemplateInfo> = match &query.search {
+        Some(term) => {
+            let needle = term.to_lowercase();
+            templates
+                .into_iter()
+                .filter(|t| t.full_name().to_lowercase().contains(&needle))
+                .collect()
+        }
+        None => templates,
+    };
 
     // Apply pagination
     let total = filtered_templates.len() as u32;
@@ -392,5 +391,43 @@ mod tests {
     #[test]
     fn test_default_tag() {
         assert_eq!(default_tag(), "latest");
+    }
+
+    #[tokio::test]
+    async fn list_templates_applies_search_filter() {
+        use crate::test_support;
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        let registry = test_support::registry();
+        for name in ["invoice", "letter"] {
+            registry
+                .publish(test_support::bundle(), name, "latest")
+                .await
+                .unwrap();
+        }
+        let app = router().with_state(test_support::state(registry));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/?search=inv")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test_support::response_json(response).await;
+        let names: Vec<&str> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["invoice"]);
     }
 }

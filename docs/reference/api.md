@@ -29,6 +29,7 @@ Lists templates.
 |---|---:|---|
 | `limit` | `50` | Page size |
 | `offset` | `0` | Number of items to skip |
+| `search` | — | Case-insensitive filter on the template's (full) name |
 
 ```json
 {

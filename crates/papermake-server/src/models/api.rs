@@ -97,26 +97,8 @@ pub struct SearchQuery {
     #[serde(flatten)]
     pub pagination: PaginationQuery,
 
-    /// Search term for name/content filtering
-    #[allow(dead_code)]
+    /// Search term filtering templates by (full) name, case-insensitive.
     pub search: Option<String>,
-
-    /// Sort field
-    #[allow(dead_code)]
-    pub sort_by: Option<String>,
-
-    /// Sort direction
-    #[allow(dead_code)]
-    pub sort_order: Option<SortOrder>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum SortOrder {
-    Asc,
-    #[default]
-    Desc,
 }
 
 #[cfg(test)]

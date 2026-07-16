@@ -86,12 +86,13 @@ impl ServerConfig {
                 })?,
             request_body_limit_bytes,
             instance_id: env("PAPERMAKE_INSTANCE_ID").ok(),
+            // Clamp to >= 1s: a 0 interval would busy-loop the flush task
+            // against S3.
             flush_interval_seconds: env("FLUSH_INTERVAL_SECONDS")
                 .unwrap_or_else(|_| "30".to_string())
-                .parse()
-                .map_err(|_| {
-                    ApiError::Config("Invalid FLUSH_INTERVAL_SECONDS value".to_string())
-                })?,
+                .parse::<u64>()
+                .map_err(|_| ApiError::Config("Invalid FLUSH_INTERVAL_SECONDS value".to_string()))?
+                .max(1),
             flush_max_records: env("FLUSH_MAX_RECORDS")
                 .unwrap_or_else(|_| "1000".to_string())
                 .parse()
@@ -233,5 +234,12 @@ mod tests {
         let error = config_from(&[("REQUEST_BODY_LIMIT_BYTES", "0")]).unwrap_err();
 
         assert!(matches!(error, ApiError::Config(_)));
+    }
+
+    #[test]
+    fn flush_interval_is_clamped_to_at_least_one_second() {
+        // A 0 interval would busy-loop the flush task; it is floored to 1.
+        let config = config_from(&[("FLUSH_INTERVAL_SECONDS", "0")]).unwrap();
+        assert_eq!(config.flush_interval_seconds, 1);
     }
 }

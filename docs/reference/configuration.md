@@ -39,7 +39,7 @@ Used by `papermake-server`.
 | `FONTS_DIR` | no | unset; Docker image uses `/fonts` | One or more font directories, separated by the OS path separator |
 | `CACHE_DIRECTORY` | no | system temp directory | Typst cache directory |
 | `PAPERMAKE_INSTANCE_ID` | no | random uuid | Stable id used in analytics raw keys written by this server |
-| `FLUSH_INTERVAL_SECONDS` | no | `30` | How often the server flushes buffered render records to S3 |
+| `FLUSH_INTERVAL_SECONDS` | no | `30` | How often the server flushes buffered render records to S3 (clamped to at least `1`) |
 | `FLUSH_MAX_RECORDS` | no | `1000` | Buffer size that triggers an eager analytics flush |
 | `RENDER_RETENTION_DAYS` | no | `30` | Global default output retention; `0` keeps outputs forever |
 
@@ -54,7 +54,7 @@ Used by `papermake-worker`.
 | Variable | Required | Default | Meaning |
 |---|---|---:|---|
 | `WORKER_ROLE` | no | `all` | `render`, `maintenance`, or `all` |
-| `WORKER_INTERVAL_SECONDS` | no | role-specific | Poll or maintenance interval: `render` defaults to `5`, `maintenance` to `30`, `all` to `10` |
+| `WORKER_INTERVAL_SECONDS` | no | role-specific | Poll or maintenance interval: `render` defaults to `5`, `maintenance` to `30`, `all` to `10` (clamped to at least `1`) |
 | `PAPERMAKE_WORKER_ID` | no | hostname, then PID | Unique worker id used as shard owner and analytics instance key |
 | `PAPERMAKE_INSTANCE_ID` | no | - | Fallback worker id when `PAPERMAKE_WORKER_ID` is unset |
 | `RUST_LOG` | no | `papermake_worker=info` | Tracing filter |
