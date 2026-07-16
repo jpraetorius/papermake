@@ -97,6 +97,14 @@ pub async fn get_render_pdf(
     State(state): State<AppState>,
     Path(render_id): Path<String>,
 ) -> ApiResult<Response<Body>> {
+    // Reject ids outside the content-addressed charset before they reach a
+    // storage key or a response header. A `%0A` (or `"`) in the path would
+    // otherwise be interpolated into `Content-Disposition`, which is header
+    // injection and makes the response builder fail.
+    if !is_valid_render_id(&render_id) {
+        return Err(ApiError::bad_request("Invalid render id"));
+    }
+
     // Defer to the centralized mapping in `error.rs`: unknown/pruned render →
     // 404, a failed render → 422 (carrying its diagnostic), storage/internal →
     // generic 500. The old blanket-404 hid failed renders and made an S3 outage
@@ -107,19 +115,30 @@ pub async fn get_render_pdf(
         .await
         .map_err(ApiError::Registry)?;
 
-    let filename = format!("render-{}.pdf", render_id);
-
     // `inline` so the PDF renders in the browser (e.g. the editor's <iframe>
     // preview). Explicit "download" links in the UI set the HTML `download`
-    // attribute to force a save instead.
-    Ok(Response::builder()
+    // attribute to force a save instead. The id is validated above, so the
+    // header value is well-formed; still surface any builder error rather than
+    // panicking.
+    Response::builder()
         .header(CONTENT_TYPE, "application/pdf")
         .header(
             CONTENT_DISPOSITION,
-            format!("inline; filename=\"{}\"", filename),
+            format!("inline; filename=\"render-{render_id}.pdf\""),
         )
         .body(Body::from(pdf_bytes))
-        .unwrap())
+        .map_err(|e| ApiError::internal(&e.to_string()))
+}
+
+/// A render id is content-addressed (UUID / hex hash): ASCII alphanumerics plus
+/// `-` and `_`. Anything else can't name a real render and is unsafe to echo
+/// into a storage key or header.
+fn is_valid_render_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[cfg(test)]
@@ -273,6 +292,36 @@ mod tests {
         );
         assert_eq!(page["data"].as_array().unwrap().len(), 3);
         assert_eq!(page["pagination"]["has_more"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn render_id_validation_accepts_ids_and_rejects_unsafe_ones() {
+        assert!(is_valid_render_id("0192abcd-1234-7000-8000-0123456789ab"));
+        assert!(is_valid_render_id("abc_DEF-123"));
+        assert!(!is_valid_render_id(""));
+        assert!(!is_valid_render_id("has space"));
+        assert!(!is_valid_render_id("bad\nid")); // header injection / CRLF
+        assert!(!is_valid_render_id("quote\"id"));
+        assert!(!is_valid_render_id("slash/id"));
+    }
+
+    #[tokio::test]
+    async fn malformed_render_id_is_rejected_without_panic() {
+        let app = router().with_state(test_support::state(test_support::registry()));
+
+        // A newline in the path must not reach the Content-Disposition header
+        // (which would fail the builder) — it's rejected as a bad request.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/bad%0Aid/pdf")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
