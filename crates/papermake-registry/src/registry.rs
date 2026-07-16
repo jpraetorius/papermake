@@ -573,11 +573,22 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         &self,
         key: &str,
     ) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
-        if let Some(hit) = self.blob_cache.get(key).await {
+        Self::get_immutable_from(&self.storage, &self.blob_cache, key).await
+    }
+
+    /// Cache-backed immutable fetch over owned handles (an `Arc<S>` and the
+    /// cache), so callers that fan out inside `tokio::spawn` can hold owned
+    /// clones instead of borrowing `&self` (which would break `Send`).
+    async fn get_immutable_from(
+        storage: &Arc<S>,
+        cache: &moka::future::Cache<String, Arc<Vec<u8>>>,
+        key: &str,
+    ) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
+        if let Some(hit) = cache.get(key).await {
             return Ok(hit.as_ref().clone());
         }
-        let bytes = Arc::new(self.storage.get(key).await?);
-        self.blob_cache.insert(key.to_string(), bytes.clone()).await;
+        let bytes = Arc::new(storage.get(key).await?);
+        cache.insert(key.to_string(), bytes.clone()).await;
         Ok(bytes.as_ref().clone())
     }
 
@@ -787,6 +798,11 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     ) -> Result<(Arc<dyn papermake::RenderFileSystem>, Vec<Font>), RegistryError> {
         const TEMPLATE_FILE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+        use futures_util::StreamExt;
+
+        /// Max template files fetched concurrently while hydrating.
+        const FILE_FETCH_CONCURRENCY: usize = 16;
+
         let started = std::time::Instant::now();
         let mut file_system = papermake::InMemoryFileSystem::new();
         let mut total_bytes = 0usize;
@@ -800,41 +816,60 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             "registry render hydrating template file system",
         );
 
-        for (path, file_hash) in &manifest.files {
-            let file_started = std::time::Instant::now();
-            let blob_key = ContentAddress::blob_key(file_hash);
+        // Fetch every file concurrently (bounded); building the world is done
+        // afterwards so hydration latency scales with the slowest file, not the
+        // sum of all of them. Collect owned (path, hash) pairs up front so the
+        // stream — and each future — borrows nothing from `self` or `manifest`;
+        // a borrow here imposes a higher-ranked lifetime that breaks `Send` when
+        // the render runs inside `tokio::spawn`.
+        let files: Vec<(String, String)> = manifest
+            .files
+            .iter()
+            .map(|(path, hash)| (path.clone(), hash.clone()))
+            .collect();
+        let mut fetches = futures_util::stream::iter(files.into_iter().map(|(path, file_hash)| {
+            let blob_key = ContentAddress::blob_key(&file_hash);
+            let storage = self.storage.clone();
+            let cache = self.blob_cache.clone();
+            async move {
+                let bytes = tokio::time::timeout(
+                    TEMPLATE_FILE_FETCH_TIMEOUT,
+                    Self::get_immutable_from(&storage, &cache, &blob_key),
+                )
+                .await
+                .map_err(|_| {
+                    RegistryError::Storage(StorageError::backend(format!(
+                        "Timed out after {:?} loading template file '{}' from {}",
+                        TEMPLATE_FILE_FETCH_TIMEOUT, path, blob_key
+                    )))
+                })?
+                .map_err(|e| {
+                    RegistryError::Storage(StorageError::backend(format!(
+                        "Failed to load template file '{}' from {}: {}",
+                        path, blob_key, e
+                    )))
+                })?;
+                Ok::<_, RegistryError>((path, file_hash, bytes))
+            }
+        }))
+        .buffer_unordered(FILE_FETCH_CONCURRENCY);
 
-            tracing::debug!(
-                reference = %reference,
-                path = %path,
-                blob_key = %blob_key,
-                "registry render loading template file",
-            );
+        let mut fetched: Vec<(String, String, Vec<u8>)> = Vec::with_capacity(manifest.files.len());
+        while let Some(result) = fetches.next().await {
+            fetched.push(result?);
+        }
+        // Build the file system in a deterministic order (fetches complete out of
+        // order) so font registration order is stable across renders.
+        fetched.sort_by(|a, b| a.0.cmp(&b.0));
 
-            let bytes =
-                tokio::time::timeout(TEMPLATE_FILE_FETCH_TIMEOUT, self.get_immutable(&blob_key))
-                    .await
-                    .map_err(|_| {
-                        RegistryError::Storage(StorageError::backend(format!(
-                            "Timed out after {:?} loading template file '{}' from {}",
-                            TEMPLATE_FILE_FETCH_TIMEOUT, path, blob_key
-                        )))
-                    })?
-                    .map_err(|e| {
-                        RegistryError::Storage(StorageError::backend(format!(
-                            "Failed to load template file '{}' from {}: {}",
-                            path, blob_key, e
-                        )))
-                    })?;
-
-            let file_bytes = bytes.len();
-            total_bytes += file_bytes;
+        for (path, file_hash, bytes) in fetched {
+            total_bytes += bytes.len();
 
             // Register font assets (parsed once per content hash, cached).
-            if is_font_path(path) {
+            if is_font_path(&path) {
                 let faces = {
                     let mut cache = TEMPLATE_FONT_CACHE.lock().unwrap();
-                    if let Some(faces) = cache.get(file_hash) {
+                    if let Some(faces) = cache.get(&file_hash) {
                         faces.clone()
                     } else {
                         let parsed = Arc::new(papermake::load_font_faces(&bytes));
@@ -850,20 +885,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
             // Typst asks for rooted virtual paths (e.g. `/assets/logo.svg`),
             // while manifests store bundle paths without a leading slash.
-            file_system.add_file(path, bytes.clone());
+            file_system.add_file(&path, bytes.clone());
             if let Some(unrooted_path) = path.strip_prefix('/') {
                 file_system.add_file(unrooted_path, bytes);
             } else {
                 file_system.add_file(format!("/{path}"), bytes);
             }
-
-            tracing::debug!(
-                reference = %reference,
-                path = %path,
-                bytes = file_bytes,
-                elapsed_ms = file_started.elapsed().as_millis() as u64,
-                "registry render loaded template file",
-            );
         }
 
         tracing::debug!(
@@ -1442,6 +1469,10 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         };
         let mut world = Some(ctx.build_world());
 
+        // Only a reclaim (attempt > 1) can have partial prior output worth
+        // resuming; a first attempt renders every item without probing storage.
+        let is_resume = shard.attempts > 1;
+
         let mut items: Vec<BatchItem> = Vec::with_capacity(inputs.len());
         let mut done = 0usize;
         let mut failed = 0usize;
@@ -1461,11 +1492,15 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             // persisted `success=false` meta (a timeout or S3 hiccup) is retried
             // rather than counted terminally failed: the id is content-addressed,
             // so re-rendering overwrites the same keys and is harmless.
-            let already_succeeded = self
-                .storage
-                .exists(&ContentAddress::render_meta_key(&det_id))
-                .await
-                .unwrap_or(false)
+            //
+            // On a shard's first attempt there is nothing of ours to resume, so
+            // skip the per-item existence probe entirely (only reclaims pay it).
+            let already_succeeded = is_resume
+                && self
+                    .storage
+                    .exists(&ContentAddress::render_meta_key(&det_id))
+                    .await
+                    .unwrap_or(false)
                 && self.read_meta_success(&det_id).await.unwrap_or(false);
 
             let (render_id, success) = if already_succeeded {
@@ -1948,6 +1983,78 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         template_infos.sort_by_key(|a| a.full_name());
 
         Ok(template_infos)
+    }
+
+    /// Load a single template's info by full name (`name` or `namespace/name`),
+    /// scanning only that template's refs instead of the whole `refs/` tree.
+    ///
+    /// Returns `None` when the template has no tags. Used by the single-template
+    /// endpoints so they don't pay the full `list_templates` scan.
+    pub async fn get_template_info(
+        &self,
+        name: &str,
+    ) -> Result<Option<TemplateInfo>, RegistryError> {
+        let prefix = format!("refs/{}/", name);
+        let ref_keys = self
+            .storage
+            .list_keys(&prefix)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+
+        let mut tags: Vec<String> = Vec::new();
+        let mut latest_ref_key: Option<String> = None;
+        for ref_key in &ref_keys {
+            if let Some((namespace_path, tag)) = Self::parse_ref_key(ref_key) {
+                // Guard against prefix bleed (e.g. `refs/john/` also lists the
+                // namespaced `refs/john/invoice/...`): only exact matches count.
+                if namespace_path != name {
+                    continue;
+                }
+                if tag == "latest" {
+                    latest_ref_key = Some(ref_key.clone());
+                }
+                tags.push(tag);
+            }
+        }
+        if tags.is_empty() {
+            return Ok(None);
+        }
+        tags.sort();
+
+        // Prefer "latest" for metadata, else the first tag alphabetically.
+        let ref_key_to_use = latest_ref_key.unwrap_or_else(|| format!("refs/{}/{}", name, tags[0]));
+        let manifest_hash_bytes = self
+            .storage
+            .get(&ref_key_to_use)
+            .await
+            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        let manifest_hash = String::from_utf8(manifest_hash_bytes).map_err(|e| {
+            RegistryError::Storage(StorageError::backend(format!(
+                "Invalid UTF-8 in stored manifest hash: {}",
+                e
+            )))
+        })?;
+        let manifest_key = ContentAddress::manifest_key(&manifest_hash);
+        let manifest_bytes = self.get_immutable(&manifest_key).await.map_err(|e| {
+            RegistryError::Storage(StorageError::backend(format!(
+                "Failed to load manifest {}: {}",
+                manifest_hash, e
+            )))
+        })?;
+        let manifest = Manifest::from_bytes(&manifest_bytes).map_err(|e| {
+            RegistryError::ContentAddressing(crate::error::ContentAddressingError::manifest_error(
+                e.to_string(),
+            ))
+        })?;
+
+        let (namespace, template_name) = Self::parse_namespace_path(name);
+        Ok(Some(TemplateInfo::new(
+            template_name,
+            namespace,
+            tags,
+            manifest_hash,
+            manifest.metadata.clone(),
+        )))
     }
 
     /// Parse a reference key to extract namespace/name path and tag
@@ -2944,6 +3051,41 @@ Bye #data.name"#
         // Deleting the tag must not keep serving it from cache.
         registry.delete_version("invoice", "latest").await.unwrap();
         assert!(registry.resolve("invoice:latest").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_template_info_loads_one_template_without_prefix_bleed() {
+        let registry = Registry::new_storage_only(MemoryStorage::new());
+        registry
+            .publish(create_test_bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        registry
+            .publish(create_test_bundle(), "invoice", "v1")
+            .await
+            .unwrap();
+        // A different template sharing a name prefix must not leak in.
+        registry
+            .publish(create_test_bundle(), "invoice-2", "latest")
+            .await
+            .unwrap();
+
+        let info = registry
+            .get_template_info("invoice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.name, "invoice");
+        assert_eq!(info.tags, vec!["latest".to_string(), "v1".to_string()]);
+
+        // Unknown template → None (not an error).
+        assert!(
+            registry
+                .get_template_info("missing")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

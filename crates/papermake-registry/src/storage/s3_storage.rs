@@ -7,9 +7,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use minio::s3::{
+    builders::ObjectToDelete,
     client::{MinioClient, MinioClientBuilder},
     creds::StaticProvider,
     http::BaseUrl,
+    response::DeleteResult,
     segmented_bytes::SegmentedBytes,
     types::{S3Api, ToStream},
 };
@@ -435,6 +437,59 @@ impl BlobStorage for S3Storage {
         })
         .await
         .map_err(|e| StorageError::Backend(format!("Failed to delete file '{}': {}", key, e)))
+    }
+
+    /// Batch delete via S3 `DeleteObjects` (up to 1000 keys per request) instead
+    /// of the trait default's one DELETE per key — pruning thousands of renders
+    /// then costs tens of requests, not tens of thousands. Missing keys are not
+    /// errors (S3 quiet mode), keeping the operation idempotent.
+    async fn delete_many(&self, keys: &[String]) -> Result<(), StorageError> {
+        for chunk in keys.chunks(1000) {
+            let objects: Vec<ObjectToDelete> = chunk
+                .iter()
+                .map(|key| {
+                    self.validate_key(key)?;
+                    ObjectToDelete::try_from(key.as_str())
+                        .map_err(|e| StorageError::InvalidKey(format!("{}: {}", key, e)))
+                })
+                .collect::<Result<_, _>>()?;
+
+            self.with_retry("delete_many", "<batch>", || {
+                let objects = objects.clone();
+                async {
+                    let response = self
+                        .client
+                        .delete_objects(&self.bucket, objects)
+                        .map_err(|e| e.to_string())?
+                        .build()
+                        .send()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    // Quiet mode returns only failures; surface any real ones.
+                    let failures: Vec<String> = response
+                        .result()
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .filter_map(|r| match r {
+                            DeleteResult::Error(err) => {
+                                Some(format!("{} ({})", err.object_name, err.code))
+                            }
+                            DeleteResult::Deleted(_) => None,
+                        })
+                        .collect();
+                    if failures.is_empty() {
+                        Ok(())
+                    } else {
+                        Err(format!("could not delete: {}", failures.join(", ")))
+                    }
+                }
+            })
+            .await
+            .map_err(|e| {
+                StorageError::Backend(format!("Failed to delete {} objects: {}", chunk.len(), e))
+            })?;
+        }
+        Ok(())
     }
 
     async fn list_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {

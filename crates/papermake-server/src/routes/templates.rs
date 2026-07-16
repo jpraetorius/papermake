@@ -287,15 +287,13 @@ pub async fn list_template_tags(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<String>>>> {
-    let templates = state.registry.list_templates().await?;
-
-    // Find the template by name (considering both namespaced and non-namespaced)
-    let template = templates
-        .iter()
-        .find(|t| t.name == name || t.full_name() == name)
+    let template = state
+        .registry
+        .get_template_info(&name)
+        .await?
         .ok_or_else(|| ApiError::template_not_found(&name))?;
 
-    Ok(Json(ApiResponse::new(template.tags.clone())))
+    Ok(Json(ApiResponse::new(template.tags)))
 }
 
 /// Get metadata for a specific template reference
@@ -330,14 +328,14 @@ pub async fn get_template_metadata(
         ))
     })?;
 
-    // Resolve the template to get manifest hash
+    // Resolve the requested tag to its manifest hash.
     let manifest_hash = state.registry.resolve(&reference).await?;
 
-    // Get all templates to find the one that matches
-    let templates = state.registry.list_templates().await?;
-    let template = templates
-        .iter()
-        .find(|t| t.name == parsed_ref.name && t.namespace == parsed_ref.namespace)
+    // Load just this template's info (tags + metadata), not the whole registry.
+    let template = state
+        .registry
+        .get_template_info(&parsed_ref.full_name())
+        .await?
         .ok_or_else(|| ApiError::template_not_found(&reference))?;
 
     let tag = parsed_ref.tag_or_default();

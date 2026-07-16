@@ -45,6 +45,8 @@ type RegistryApiResult<T> = std::result::Result<T, RegistryError>;
 pub trait ServerRegistry: Send + Sync {
     async fn list_templates(&self) -> RegistryApiResult<Vec<TemplateInfo>>;
 
+    async fn get_template_info(&self, name: &str) -> RegistryApiResult<Option<TemplateInfo>>;
+
     async fn publish(
         &self,
         bundle: TemplateBundle,
@@ -115,6 +117,10 @@ where
 {
     async fn list_templates(&self) -> RegistryApiResult<Vec<TemplateInfo>> {
         Registry::list_templates(self).await
+    }
+
+    async fn get_template_info(&self, name: &str) -> RegistryApiResult<Option<TemplateInfo>> {
+        Registry::get_template_info(self, name).await
     }
 
     async fn publish(
