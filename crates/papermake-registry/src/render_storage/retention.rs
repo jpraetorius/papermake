@@ -159,12 +159,18 @@ pub async fn prune<B: BlobStorage + ?Sized>(
             if let Ok(job) = serde_json::from_slice::<BatchJob>(&bytes)
                 && job.created_at.date() < job_cutoff
             {
-                // Delete the entire jobs/{id}/ subtree.
+                // Delete the entire jobs/{id}/ subtree plus any pending-shard
+                // markers (kept in a sibling keyspace).
                 let subtree = blob
                     .list_keys(&layout::job_prefix(&job.job_id))
                     .await
                     .map_err(|e| RenderStorageError::Query(e.to_string()))?;
                 stale.extend(subtree);
+                let markers = blob
+                    .list_keys(&layout::pending_job_prefix(&job.job_id))
+                    .await
+                    .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+                stale.extend(markers);
                 stats.jobs_pruned += 1;
             }
         }

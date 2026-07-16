@@ -1246,6 +1246,17 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             .put(&layout::job_key(&job.job_id), bytes)
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+
+        // Publish pending-shard markers last, once job.json, descriptors, and
+        // inputs all exist. A worker claims work by listing these markers, so it
+        // never observes a shard whose job metadata or inputs aren't written yet.
+        for k in 0..num_shards {
+            self.storage
+                .put(&layout::pending_key(&job.job_id, k), Vec::new())
+                .await
+                .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+        }
+
         tracing::info!(
             job_id = %job.job_id,
             reference = %reference,
@@ -1272,21 +1283,25 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         max_attempts: u32,
         now: time::OffsetDateTime,
     ) -> Result<Option<(BatchJob, Shard, Vec<BatchInput>)>, RegistryError> {
-        let keys = self
+        // List only outstanding shards via their pending markers, so the cost
+        // scales with pending work rather than with all job history.
+        let mut markers: Vec<String> = self
             .storage
-            .list_keys(layout::JOBS_PREFIX)
+            .list_keys(layout::PENDING_PREFIX)
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
         // Spread workers across shards: order candidates by a per-worker hash.
-        let mut shard_keys: Vec<String> = keys
-            .into_iter()
-            .filter(|k| k.ends_with("/shard.json"))
-            .collect();
-        shard_keys.sort_by_key(|k| Self::spread_hash(worker_id, k));
+        markers.sort_by_key(|k| Self::spread_hash(worker_id, k));
 
-        for key in shard_keys {
+        for marker in markers {
+            let Some((job_id, index)) = layout::parse_pending_key(&marker) else {
+                continue;
+            };
+            let key = layout::shard_key(&job_id, index);
             let Ok(bytes) = self.storage.get(&key).await else {
+                // The shard (or its whole job) is gone; drop the stale marker.
+                let _ = self.storage.delete(&marker).await;
                 continue;
             };
             let Ok(mut shard) = serde_json::from_slice::<Shard>(&bytes) else {
@@ -1296,7 +1311,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             let claimable = match shard.status {
                 ShardStatus::Pending => true,
                 ShardStatus::Running => shard.lease_expires_at.is_none_or(|exp| exp < now),
-                ShardStatus::Done | ShardStatus::Failed => false,
+                ShardStatus::Done | ShardStatus::Failed => {
+                    // Terminal: the marker is stale (e.g. this worker crashed
+                    // between finishing and clearing it). Clean it up.
+                    let _ = self.storage.delete(&marker).await;
+                    continue;
+                }
             };
             if !claimable {
                 continue;
@@ -1309,6 +1329,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 shard.lease_expires_at = None;
                 shard.updated_at = now;
                 let _ = self.put_shard(&shard).await;
+                let _ = self.storage.delete(&marker).await;
                 continue;
             }
 
@@ -1499,6 +1520,14 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         shard.lease_expires_at = None;
         shard.updated_at = time::OffsetDateTime::now_utc();
         self.put_shard(&shard).await?;
+
+        // The shard no longer needs work: drop its pending marker so future
+        // polls skip it.
+        let _ = self
+            .storage
+            .delete(&layout::pending_key(&meta.job_id, shard.index))
+            .await;
+
         tracing::info!(
             job_id = %meta.job_id,
             shard = shard.index,
@@ -4376,6 +4405,162 @@ Hello #data.name"#
         let view = registry.get_batch_job(&job_id).await.unwrap();
         assert_eq!(view.done, 0);
         assert_eq!(view.failed, 3);
+    }
+
+    #[tokio::test]
+    async fn claim_skips_completed_jobs_via_pending_markers() {
+        use crate::batch::BatchInput;
+
+        let registry = Registry::new(
+            CountingStorage::default(),
+            crate::render_storage::MemoryRenderStorage::new(),
+        );
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+        let job = registry
+            .enqueue_batch_job(
+                "batch:latest",
+                &[BatchInput {
+                    data: serde_json::json!({ "name": "A" }),
+                    key: None,
+                }],
+                None,
+                &RenderOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        // One shard, one pending marker.
+        assert_eq!(
+            registry
+                .storage
+                .list_keys(layout::PENDING_PREFIX)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let now = time::OffsetDateTime::now_utc();
+        let (meta, shard, inputs) = registry
+            .claim_next_shard("w", 60, 3, now)
+            .await
+            .unwrap()
+            .unwrap();
+        registry
+            .run_claimed_shard(meta, shard, inputs, 60)
+            .await
+            .unwrap();
+        let _ = job;
+
+        // Completing the shard removes its marker.
+        assert!(
+            registry
+                .storage
+                .list_keys(layout::PENDING_PREFIX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A later poll reads no shard descriptors at all — the completed job's
+        // descriptors are never scanned, only the (empty) pending listing.
+        let before = registry.storage.total_gets();
+        assert!(
+            registry
+                .claim_next_shard("w", 60, 3, now)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(registry.storage.total_gets(), before);
+    }
+
+    #[tokio::test]
+    async fn dead_worker_shard_is_reclaimed_via_its_pending_marker() {
+        use crate::batch::{BatchInput, JobStatus};
+
+        let registry = Registry::new(
+            MemoryStorage::new(),
+            crate::render_storage::MemoryRenderStorage::new(),
+        );
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+        let job = registry
+            .enqueue_batch_job(
+                "batch:latest",
+                &[BatchInput {
+                    data: serde_json::json!({ "name": "A" }),
+                    key: None,
+                }],
+                None,
+                &RenderOptions::default(),
+            )
+            .await
+            .unwrap();
+        let job_id = job.job_id.clone();
+
+        // Worker A claims the only shard, then "dies" without running it.
+        let t0 = time::OffsetDateTime::now_utc();
+        let (_m, shard_a, _i) = registry
+            .claim_next_shard("worker-a", 60, 3, t0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(shard_a.attempts, 1);
+
+        // The pending marker survives the claim (a claim isn't completion), so
+        // the shard still shows up as outstanding work.
+        assert_eq!(
+            registry
+                .storage
+                .list_keys(layout::PENDING_PREFIX)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Before the lease expires no other worker can take it.
+        let t_soon = t0 + time::Duration::seconds(10);
+        assert!(
+            registry
+                .claim_next_shard("worker-b", 60, 3, t_soon)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // After the lease expires, worker B reclaims it via the marker and runs
+        // it to completion.
+        let t_late = t0 + time::Duration::seconds(120);
+        let (meta_b, shard_b, inputs_b) = registry
+            .claim_next_shard("worker-b", 60, 3, t_late)
+            .await
+            .unwrap()
+            .expect("expired lease is reclaimable via its pending marker");
+        assert_eq!(shard_b.attempts, 2);
+        registry
+            .run_claimed_shard(meta_b, shard_b, inputs_b, 60)
+            .await
+            .unwrap();
+
+        // Completed now: the marker is gone and the job is done.
+        assert!(
+            registry
+                .storage
+                .list_keys(layout::PENDING_PREFIX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let view = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(view.status, JobStatus::Completed);
+        assert_eq!(view.done, 1);
     }
 
     #[tokio::test]

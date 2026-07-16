@@ -68,6 +68,7 @@ manifests/sha256/<hash>                     template manifests
 refs/<namespace>/<tag>                      mutable tag pointers
 renders/<render_id>/{meta.json,pdf,data}    render artifacts
 jobs/<job_id>/...                           batch job state
+jobs/pending/<job_id>/<k>                   pending-shard work markers
 analytics/raw/...                           raw render records
 analytics/agg/summary.json                  aggregated analytics
 expiry/dt=<date>/...                        retention index
@@ -152,6 +153,12 @@ Batch state is split across small documents:
 Each shard is an independent unit of work. Render workers claim shards by
 writing an owner and lease to `shard.json`. When a worker finishes a shard, it
 writes `results.json` with each item's status and `render_id`.
+
+To find work, a worker lists the `jobs/pending/` marker keyspace rather than
+scanning every job's descriptors: a marker is written for each shard when the
+job is enqueued (after its metadata and inputs exist) and removed when the shard
+completes or is abandoned. Claim cost then scales with outstanding work, not with
+accumulated job history.
 
 If a worker dies, its lease expires. Another worker can reclaim the shard and
 resume it. Because render ids are content-addressed, already-written outputs can

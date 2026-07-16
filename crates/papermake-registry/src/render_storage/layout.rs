@@ -32,6 +32,29 @@ pub fn job_prefix(job_id: &str) -> String {
     format!("{}{}/", JOBS_PREFIX, job_id)
 }
 
+/// Prefix for pending-shard markers. A marker exists for each shard that still
+/// needs work, so a worker can list only outstanding shards instead of scanning
+/// every job's descriptors. `job_id` is a uuid, so it never collides with the
+/// literal `pending` segment.
+pub const PENDING_PREFIX: &str = "jobs/pending/";
+
+/// Marker key for a shard that still needs work.
+pub fn pending_key(job_id: &str, shard_index: usize) -> String {
+    format!("{}{}/{}", PENDING_PREFIX, job_id, shard_index)
+}
+
+/// Prefix covering all of a job's pending-shard markers.
+pub fn pending_job_prefix(job_id: &str) -> String {
+    format!("{}{}/", PENDING_PREFIX, job_id)
+}
+
+/// Parse a pending marker key back into `(job_id, shard_index)`.
+pub fn parse_pending_key(key: &str) -> Option<(String, usize)> {
+    let rest = key.strip_prefix(PENDING_PREFIX)?;
+    let (job_id, index) = rest.split_once('/')?;
+    Some((job_id.to_string(), index.parse().ok()?))
+}
+
 /// Key for a shard's descriptor (status/owner/lease/counts).
 pub fn shard_key(job_id: &str, shard_index: usize) -> String {
     format!(
@@ -169,6 +192,18 @@ mod tests {
         );
         assert_eq!(parse_dt("expiry/dt=2026-07-09/x.ndjson"), Some(d));
         assert_eq!(parse_dt("no-date-here"), None);
+    }
+
+    #[test]
+    fn test_pending_key_roundtrip() {
+        assert_eq!(pending_key("job-1", 7), "jobs/pending/job-1/7");
+        assert_eq!(pending_job_prefix("job-1"), "jobs/pending/job-1/");
+        assert_eq!(
+            parse_pending_key("jobs/pending/job-1/7"),
+            Some(("job-1".to_string(), 7))
+        );
+        assert_eq!(parse_pending_key("jobs/pending/job-1/nope"), None);
+        assert_eq!(parse_pending_key("jobs/job-1/shards/7/shard.json"), None);
     }
 
     #[test]
