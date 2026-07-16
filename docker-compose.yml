@@ -1,3 +1,8 @@
+# Local development stack only. The S3 credentials below are guessable and the
+# API is served over plaintext HTTP with no auth — do NOT use this as-is in
+# production. For production, inject real secrets (e.g. from your orchestrator's
+# secret store, not committed env values), put TLS + authentication in front of
+# the server, and lock the object store down. See docs/explanation/security.md.
 services:
   # Papermake Server - Template registry HTTP API + SSR UI
   papermake-server:
