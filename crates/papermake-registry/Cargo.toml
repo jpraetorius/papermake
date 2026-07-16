@@ -23,7 +23,7 @@ thiserror = "2.0"
 uuid = { version = "1.0", features = ["v4", "v5", "v7", "serde"] }
 sha2 = "0.11"
 tracing = "0.1"
-utoipa = { version = "5", features = ["time"] }
+utoipa = { version = "5", features = ["time"], optional = true }
 moka = { version = "0.12", features = ["future"] }
 
 # Optional features
@@ -38,6 +38,9 @@ bytes = { version = "1.0", optional = true }
 default = ["s3"]
 s3 = ["minio", "futures-util", "bytes", "tokio"]
 memory = []
+# Derive `utoipa::ToSchema` on the public data types, for OpenAPI consumers
+# (the server). Off by default so non-server users don't pull in utoipa.
+openapi = ["dep:utoipa"]
 
 [dev-dependencies]
 tempfile = "3.0"

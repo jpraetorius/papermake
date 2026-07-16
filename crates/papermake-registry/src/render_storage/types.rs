@@ -3,7 +3,8 @@ use time::{Date, OffsetDateTime};
 use uuid::Uuid;
 
 /// Record of a template render operation
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct RenderRecord {
     /// UUIDv7 for time-sortable, distributed-friendly IDs
     pub render_id: String,
@@ -137,7 +138,8 @@ impl RenderRecord {
 }
 
 /// Analytics data point for render volume over time
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct VolumePoint {
     pub date: Date,
     /// Total renders on this day (success + failure).
@@ -148,14 +150,16 @@ pub struct VolumePoint {
 }
 
 /// Analytics data for template render statistics
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TemplateStats {
     pub template_name: String,
     pub total_renders: u64,
 }
 
 /// Analytics data point for render duration over time (successful renders).
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct DurationPoint {
     pub date: Date,
     pub avg_duration_ms: f64,
@@ -179,7 +183,8 @@ pub enum AnalyticsQuery {
 }
 
 /// Result types for analytics queries
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub enum AnalyticsResult {
     Volume(Vec<VolumePoint>),
     Templates(Vec<TemplateStats>),

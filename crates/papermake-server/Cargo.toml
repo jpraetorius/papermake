@@ -8,7 +8,7 @@ authors = ["Erik Steiger", "Joachim Praetorius"]
 
 [dependencies]
 papermake = { path = "../papermake" }
-papermake-registry = { path = "../papermake-registry" }
+papermake-registry = { path = "../papermake-registry", features = ["openapi"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8.3", features = ["ws", "macros", "multipart"] }
 tower = "0.5"
