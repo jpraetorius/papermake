@@ -38,8 +38,17 @@ pub async fn load_raw_records<B: BlobStorage + ?Sized>(
             if line.trim().is_empty() {
                 continue;
             }
-            let record: RenderRecord = serde_json::from_str(line)?;
-            records.push(record);
+            // Skip (don't propagate) a malformed line: a single corrupt record
+            // must not fail every future aggregation cycle and freeze
+            // summary.json forever. The bad line is logged for investigation.
+            match serde_json::from_str::<RenderRecord>(line) {
+                Ok(record) => records.push(record),
+                Err(e) => tracing::warn!(
+                    key = %key,
+                    error = %e,
+                    "skipping malformed analytics raw record",
+                ),
+            }
         }
     }
     Ok(records)
@@ -130,6 +139,43 @@ mod tests {
         let persisted = blob.get(layout::SUMMARY_KEY).await.unwrap();
         let reloaded: Summary = serde_json::from_slice(&persisted).unwrap();
         assert_eq!(reloaded.totals.renders_24h, 3);
+    }
+
+    #[tokio::test]
+    async fn test_aggregator_skips_malformed_raw_lines() {
+        let blob = MemoryStorage::new();
+        let now = datetime!(2026-07-09 12:00 UTC);
+
+        // A raw file with a corrupt line wedged between two valid records.
+        let mut body = String::new();
+        body.push_str(
+            &serde_json::to_string(&rec("invoice", datetime!(2026-07-09 10:00 UTC), true, 100))
+                .unwrap(),
+        );
+        body.push('\n');
+        body.push_str("{ not valid json\n");
+        body.push_str(
+            &serde_json::to_string(&rec("letter", datetime!(2026-07-09 11:00 UTC), true, 200))
+                .unwrap(),
+        );
+        body.push('\n');
+        blob.put(
+            &layout::raw_key(now.date(), "inst-a", 1, 0),
+            body.into_bytes(),
+        )
+        .await
+        .unwrap();
+
+        // The corrupt line is skipped; the cycle still succeeds and the two
+        // valid records aggregate. Before the fix this errored and froze
+        // summary.json forever.
+        let summary = run(&blob, now, 50).await.unwrap();
+        assert_eq!(summary.totals.renders_24h, 2);
+        assert_eq!(summary.templates.len(), 2);
+
+        let persisted = blob.get(layout::SUMMARY_KEY).await.unwrap();
+        let reloaded: Summary = serde_json::from_slice(&persisted).unwrap();
+        assert_eq!(reloaded.totals.renders_24h, 2);
     }
 
     #[tokio::test]
