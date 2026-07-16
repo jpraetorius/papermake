@@ -16,6 +16,18 @@ static TEMPLATE_FONT_CACHE: LazyLock<Mutex<HashMap<String, Arc<Vec<Font>>>>> =
 /// Max distinct font blobs to keep parsed in memory before clearing the cache.
 const TEMPLATE_FONT_CACHE_CAP: usize = 512;
 
+/// Max distinct immutable blobs/manifests to keep cached before clearing.
+const BLOB_CACHE_CAP: usize = 1024;
+
+/// Max distinct `refs/<name>/<tag>` entries to keep cached before clearing.
+const REF_CACHE_CAP: usize = 4096;
+
+/// How long a resolved tag → manifest-hash mapping stays cached. Tags are
+/// mutable, so this is deliberately short: a republish on another instance
+/// becomes visible within this window; a republish on this instance updates the
+/// entry immediately.
+const REF_CACHE_TTL: Duration = Duration::from_secs(5);
+
 /// Whether a bundle path is a font file Typst can use (TTF/OTF/TTC).
 fn is_font_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
@@ -100,6 +112,19 @@ pub const DEFAULT_RENDER_TIMEOUT_SECONDS: u64 = 60;
 /// Default number of items per batch shard (the unit of work a worker claims).
 pub const DEFAULT_SHARD_SIZE: usize = 500;
 
+/// Build the immutable-blob cache (bounded LRU over content-addressed objects).
+fn new_blob_cache() -> moka::future::Cache<String, Arc<Vec<u8>>> {
+    moka::future::Cache::new(BLOB_CACHE_CAP as u64)
+}
+
+/// Build the ref cache (bounded, short TTL because tags are mutable).
+fn new_ref_cache() -> moka::future::Cache<String, String> {
+    moka::future::Cache::builder()
+        .max_capacity(REF_CACHE_CAP as u64)
+        .time_to_live(REF_CACHE_TTL)
+        .build()
+}
+
 /// Core registry for template publishing and resolution
 pub struct Registry<S: BlobStorage, R: RenderStorage> {
     storage: Arc<S>,
@@ -120,6 +145,14 @@ pub struct Registry<S: BlobStorage, R: RenderStorage> {
     render_timeout: Duration,
     /// Items per shard when enqueuing a batch (the unit of work workers claim).
     batch_shard_size: usize,
+    /// Cache of immutable content-addressed objects (`blobs/…`, `manifests/…`)
+    /// keyed by storage key. Safe to keep indefinitely because the content at a
+    /// given key never changes; size-bounded LRU eviction.
+    blob_cache: moka::future::Cache<String, Arc<Vec<u8>>>,
+    /// Cache of resolved `refs/<name>/<tag>` → manifest hash. Tags are mutable,
+    /// so entries expire after [`REF_CACHE_TTL`] and are updated/removed on
+    /// publish/delete.
+    ref_cache: moka::future::Cache<String, String>,
 }
 
 /// Result of a render operation with tracking
@@ -160,6 +193,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage> Registry<S, R> {
             leaked_renders: Arc::new(AtomicUsize::new(0)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
             batch_shard_size: DEFAULT_SHARD_SIZE,
+            blob_cache: new_blob_cache(),
+            ref_cache: new_ref_cache(),
         }
     }
 }
@@ -177,6 +212,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             leaked_renders: Arc::new(AtomicUsize::new(0)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
             batch_shard_size: DEFAULT_SHARD_SIZE,
+            blob_cache: new_blob_cache(),
+            ref_cache: new_ref_cache(),
         }
     }
 
@@ -191,6 +228,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             leaked_renders: Arc::new(AtomicUsize::new(0)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
             batch_shard_size: DEFAULT_SHARD_SIZE,
+            blob_cache: new_blob_cache(),
+            ref_cache: new_ref_cache(),
         }
     }
 
@@ -245,6 +284,8 @@ impl<S: BlobStorage + 'static> Registry<S, crate::render_storage::MemoryRenderSt
             leaked_renders: Arc::new(AtomicUsize::new(0)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
             batch_shard_size: DEFAULT_SHARD_SIZE,
+            blob_cache: new_blob_cache(),
+            ref_cache: new_ref_cache(),
         }
     }
 }
@@ -328,6 +369,11 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
+        // Keep this instance's ref cache correct after a republish.
+        self.ref_cache
+            .insert(ref_key.clone(), manifest_hash.clone())
+            .await;
+
         // Return the manifest hash for content-addressable access
         Ok(manifest_hash)
     }
@@ -376,6 +422,9 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             .delete(&ref_key)
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
+
+        // Drop any cached resolution for the deleted tag.
+        self.ref_cache.invalidate(&ref_key).await;
 
         self.gc_orphaned(&manifest_hash).await
     }
@@ -477,20 +526,26 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let tag = parsed_ref.tag_or_default();
         let ref_key = ContentAddress::ref_key(&namespace_path, tag);
 
-        // Step 3: Look up the manifest hash from storage
-        let manifest_hash_bytes = self.storage.get(&ref_key).await.map_err(|e| match e {
-            crate::storage::blob_storage::StorageError::NotFound(_) => {
-                RegistryError::Template(crate::error::TemplateError::not_found(reference))
-            }
-            _ => RegistryError::Storage(StorageError::backend(e.to_string())),
-        })?;
-
-        let manifest_hash = String::from_utf8(manifest_hash_bytes).map_err(|e| {
-            RegistryError::Storage(StorageError::backend(format!(
-                "Invalid UTF-8 in stored manifest hash: {}",
-                e
-            )))
-        })?;
+        // Step 3: Look up the manifest hash — from the short-TTL ref cache when
+        // fresh, otherwise from storage (then cache it).
+        let manifest_hash = if let Some(hash) = self.ref_cache.get(&ref_key).await {
+            hash
+        } else {
+            let manifest_hash_bytes = self.storage.get(&ref_key).await.map_err(|e| match e {
+                crate::storage::blob_storage::StorageError::NotFound(_) => {
+                    RegistryError::Template(crate::error::TemplateError::not_found(reference))
+                }
+                _ => RegistryError::Storage(StorageError::backend(e.to_string())),
+            })?;
+            let hash = String::from_utf8(manifest_hash_bytes).map_err(|e| {
+                RegistryError::Storage(StorageError::backend(format!(
+                    "Invalid UTF-8 in stored manifest hash: {}",
+                    e
+                )))
+            })?;
+            self.ref_cache.insert(ref_key.clone(), hash.clone()).await;
+            hash
+        };
 
         // Step 4: Verify hash if provided in reference
         if let Some(expected_hash) = &parsed_ref.hash
@@ -507,6 +562,23 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
         // Return the manifest hash
         Ok(manifest_hash)
+    }
+
+    /// Fetch an immutable content-addressed object (`blobs/…` or `manifests/…`),
+    /// serving it from the in-process cache when present. The content at these
+    /// keys never changes, so a cached copy is always valid; this collapses the
+    /// per-render manifest/entrypoint/asset re-downloads into one fetch each,
+    /// then cache hits.
+    async fn get_immutable(
+        &self,
+        key: &str,
+    ) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
+        if let Some(hit) = self.blob_cache.get(key).await {
+            return Ok(hit.as_ref().clone());
+        }
+        let bytes = Arc::new(self.storage.get(key).await?);
+        self.blob_cache.insert(key.to_string(), bytes.clone()).await;
+        Ok(bytes.as_ref().clone())
     }
 
     /// Render a template to PDF using JSON data
@@ -586,7 +658,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             manifest_key = %manifest_key,
             "registry render loading manifest",
         );
-        let manifest_bytes = self.storage.get(&manifest_key).await.map_err(|e| {
+        let manifest_bytes = self.get_immutable(&manifest_key).await.map_err(|e| {
             RegistryError::Storage(StorageError::backend(format!(
                 "Failed to load manifest {}: {}",
                 manifest_hash, e
@@ -619,7 +691,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             entrypoint_key = %entrypoint_key,
             "registry render loading entrypoint",
         );
-        let entrypoint_bytes = self.storage.get(&entrypoint_key).await.map_err(|e| {
+        let entrypoint_bytes = self.get_immutable(&entrypoint_key).await.map_err(|e| {
             RegistryError::Storage(StorageError::backend(format!(
                 "Failed to load entrypoint file: {}",
                 e
@@ -740,7 +812,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             );
 
             let bytes =
-                tokio::time::timeout(TEMPLATE_FILE_FETCH_TIMEOUT, self.storage.get(&blob_key))
+                tokio::time::timeout(TEMPLATE_FILE_FETCH_TIMEOUT, self.get_immutable(&blob_key))
                     .await
                     .map_err(|_| {
                         RegistryError::Storage(StorageError::backend(format!(
@@ -1541,7 +1613,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
         let manifest_hash = self.resolve(reference).await?;
         let manifest_key = ContentAddress::manifest_key(&manifest_hash);
-        let manifest_bytes = self.storage.get(&manifest_key).await.map_err(|e| {
+        let manifest_bytes = self.get_immutable(&manifest_key).await.map_err(|e| {
             RegistryError::Storage(StorageError::backend(format!(
                 "Failed to load manifest {}: {}",
                 manifest_hash, e
@@ -1562,8 +1634,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             })?
             .clone();
         let entrypoint_bytes = self
-            .storage
-            .get(&ContentAddress::blob_key(&entrypoint_hash))
+            .get_immutable(&ContentAddress::blob_key(&entrypoint_hash))
             .await
             .map_err(|e| {
                 RegistryError::Storage(StorageError::backend(format!(
@@ -1807,7 +1878,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
                     // Load the manifest to get metadata
                     let manifest_key = ContentAddress::manifest_key(&manifest_hash);
-                    match self.storage.get(&manifest_key).await {
+                    match self.get_immutable(&manifest_key).await {
                         Ok(manifest_bytes) => {
                             match Manifest::from_bytes(&manifest_bytes) {
                                 Ok(manifest) => {
@@ -2213,7 +2284,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     /// then falls back to the global default).
     async fn template_retain_days(&self, manifest_hash: &str) -> Option<u32> {
         let manifest_key = ContentAddress::manifest_key(manifest_hash);
-        let bytes = self.storage.get(&manifest_key).await.ok()?;
+        let bytes = self.get_immutable(&manifest_key).await.ok()?;
         let manifest = Manifest::from_bytes(&bytes).ok()?;
         manifest.metadata.retain_days
     }
@@ -2223,7 +2294,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     pub async fn get_template_source(&self, reference: &str) -> Result<String, RegistryError> {
         let manifest_hash = self.resolve(reference).await?;
         let manifest_key = ContentAddress::manifest_key(&manifest_hash);
-        let manifest_bytes = self.storage.get(&manifest_key).await.map_err(|e| {
+        let manifest_bytes = self.get_immutable(&manifest_key).await.map_err(|e| {
             RegistryError::Storage(StorageError::backend(format!(
                 "Failed to load manifest {}: {}",
                 manifest_hash, e
@@ -2240,8 +2311,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             ))
         })?;
         let bytes = self
-            .storage
-            .get(&ContentAddress::blob_key(entrypoint_hash))
+            .get_immutable(&ContentAddress::blob_key(entrypoint_hash))
             .await
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
         String::from_utf8(bytes).map_err(|e| {
@@ -2535,6 +2605,55 @@ mod tests {
         }
     }
 
+    /// Blob storage that counts `get` calls, to prove caching avoids re-reads.
+    #[derive(Default)]
+    struct CountingStorage {
+        inner: MemoryStorage,
+        gets: std::sync::Mutex<usize>,
+    }
+
+    impl CountingStorage {
+        fn total_gets(&self) -> usize {
+            *self.gets.lock().unwrap()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobStorage for CountingStorage {
+        async fn put(
+            &self,
+            key: &str,
+            data: Vec<u8>,
+        ) -> Result<(), crate::storage::blob_storage::StorageError> {
+            self.inner.put(key, data).await
+        }
+        async fn get(
+            &self,
+            key: &str,
+        ) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
+            *self.gets.lock().unwrap() += 1;
+            self.inner.get(key).await
+        }
+        async fn exists(
+            &self,
+            key: &str,
+        ) -> Result<bool, crate::storage::blob_storage::StorageError> {
+            self.inner.exists(key).await
+        }
+        async fn delete(
+            &self,
+            key: &str,
+        ) -> Result<(), crate::storage::blob_storage::StorageError> {
+            self.inner.delete(key).await
+        }
+        async fn list_keys(
+            &self,
+            prefix: &str,
+        ) -> Result<Vec<String>, crate::storage::blob_storage::StorageError> {
+            self.inner.list_keys(prefix).await
+        }
+    }
+
     fn create_test_bundle() -> TemplateBundle {
         let metadata = TemplateMetadata::new("Test Template", "test@example.com");
         let main_content = br#"#let data = json(bytes(sys.inputs.data))
@@ -2745,6 +2864,57 @@ Hello #data.name"#
             .await
             .unwrap();
         assert!(registry.resolve("invoice:latest").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn immutable_reads_are_cached_across_renders() {
+        let registry = Registry::new_storage_only(CountingStorage::default());
+        registry
+            .publish(create_test_bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+
+        // Warm the caches with a first render.
+        registry
+            .render_and_store("invoice:latest", &serde_json::json!({ "name": "A" }))
+            .await
+            .unwrap();
+
+        // A second identical render must not read any immutable object (manifest,
+        // entrypoint, assets) or the tag from storage again — everything is cached.
+        let before = registry.storage.total_gets();
+        registry
+            .render_and_store("invoice:latest", &serde_json::json!({ "name": "B" }))
+            .await
+            .unwrap();
+        assert_eq!(registry.storage.total_gets(), before);
+    }
+
+    #[tokio::test]
+    async fn ref_cache_is_invalidated_on_publish_and_delete() {
+        let registry = Registry::new_storage_only(MemoryStorage::new());
+        registry
+            .publish(create_test_bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        let h1 = registry.resolve("invoice:latest").await.unwrap();
+
+        // Republishing the same tag with different content must be visible
+        // immediately, not shadowed by the cached resolution.
+        let other = TemplateBundle::new(
+            br#"#let data = json(bytes(sys.inputs.data))
+= Changed
+Bye #data.name"#
+                .to_vec(),
+            TemplateMetadata::new("Changed", "test@example.com"),
+        );
+        registry.publish(other, "invoice", "latest").await.unwrap();
+        let h2 = registry.resolve("invoice:latest").await.unwrap();
+        assert_ne!(h1, h2, "republish must update the cached resolution");
+
+        // Deleting the tag must not keep serving it from cache.
+        registry.delete_version("invoice", "latest").await.unwrap();
+        assert!(registry.resolve("invoice:latest").await.is_err());
     }
 
     #[tokio::test]

@@ -239,6 +239,14 @@ Aggregated reads are eventually consistent:
 This split is deliberate. Users can download a PDF as soon as the render
 returns, while analytics are updated asynchronously.
 
+Each process also keeps small in-process caches to avoid repeated S3 reads for
+hot templates: content-addressed blobs and manifests are immutable, so they are
+cached by key indefinitely (bounded, LRU-evicted); tag resolutions
+(`refs/<name>/<tag>` → manifest hash) are cached with a short time-to-live. A
+republish on the same process updates that entry immediately; on other processes
+the new version becomes visible once the cached entry expires. Direct `render_id`
+reads are unaffected.
+
 ## Process layout
 
 A typical deployment looks like this:
