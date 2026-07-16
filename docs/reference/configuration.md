@@ -34,6 +34,8 @@ Used by `papermake-server`.
 | `RENDER_TIMEOUT_SECONDS` | no | `60` | Render timeout, including time waiting for a render slot. Kept short because a timed-out render keeps running and holds its slot until it finishes on its own |
 | `REQUEST_BODY_LIMIT_BYTES` | no | `52428800` | Maximum accepted HTTP request body size; default is 50 MiB |
 | `SHARD_SIZE` | no | `500` | Number of batch inputs per shard when the server enqueues a batch |
+| `MAX_BATCH_INPUTS` | no | `100000` | Maximum inputs accepted in a single batch submission; more returns `400` |
+| `MAX_BATCH_ITEM_BYTES` | no | `1048576` | Maximum serialized size of a single batch item's `data`; larger returns `400`. Default is 1 MiB |
 | `FONTS_DIR` | no | unset; Docker image uses `/fonts` | One or more font directories, separated by the OS path separator |
 | `CACHE_DIRECTORY` | no | system temp directory | Typst cache directory |
 | `PAPERMAKE_INSTANCE_ID` | no | random uuid | Stable id used in analytics raw keys written by this server |

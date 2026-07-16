@@ -38,6 +38,12 @@ pub struct ServerConfig {
 
     /// Items per batch shard (the unit of work a worker claims).
     pub shard_size: usize,
+
+    /// Maximum number of inputs accepted in a single batch submission.
+    pub max_batch_inputs: usize,
+
+    /// Maximum serialized size (bytes) of a single batch item's `data`.
+    pub max_batch_item_bytes: usize,
 }
 
 impl ServerConfig {
@@ -98,6 +104,14 @@ impl ServerConfig {
                 .unwrap_or_else(|_| "500".to_string())
                 .parse()
                 .map_err(|_| ApiError::Config("Invalid SHARD_SIZE value".to_string()))?,
+            max_batch_inputs: env("MAX_BATCH_INPUTS")
+                .unwrap_or_else(|_| "100000".to_string())
+                .parse()
+                .map_err(|_| ApiError::Config("Invalid MAX_BATCH_INPUTS value".to_string()))?,
+            max_batch_item_bytes: env("MAX_BATCH_ITEM_BYTES")
+                .unwrap_or_else(|_| "1048576".to_string()) // 1 MiB
+                .parse()
+                .map_err(|_| ApiError::Config("Invalid MAX_BATCH_ITEM_BYTES value".to_string()))?,
         })
     }
 }
@@ -115,6 +129,8 @@ impl Default for ServerConfig {
             flush_max_records: 1000,
             render_retention_days: 30,
             shard_size: 500,
+            max_batch_inputs: 100_000,
+            max_batch_item_bytes: 1024 * 1024,
         }
     }
 }
@@ -176,6 +192,8 @@ mod tests {
             ("FLUSH_MAX_RECORDS", "11"),
             ("RENDER_RETENTION_DAYS", "0"),
             ("SHARD_SIZE", "13"),
+            ("MAX_BATCH_INPUTS", "17"),
+            ("MAX_BATCH_ITEM_BYTES", "2048"),
         ])
         .unwrap();
 
@@ -189,6 +207,8 @@ mod tests {
         assert_eq!(config.flush_max_records, 11);
         assert_eq!(config.render_retention_days, 0);
         assert_eq!(config.shard_size, 13);
+        assert_eq!(config.max_batch_inputs, 17);
+        assert_eq!(config.max_batch_item_bytes, 2048);
     }
 
     #[test]

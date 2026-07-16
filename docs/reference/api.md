@@ -177,6 +177,10 @@ Response status: `202 Accepted`.
 { "data": { "job_id": "0192...", "total": 2, "status_url": "/api/jobs/0192..." } }
 ```
 
+The batch must be non-empty, hold at most `MAX_BATCH_INPUTS` items (default
+100000), and each item's `data` must serialize to at most `MAX_BATCH_ITEM_BYTES`
+(default 1 MiB). Violations return `400`.
+
 ## Jobs
 
 ### `GET /api/jobs/{job_id}`

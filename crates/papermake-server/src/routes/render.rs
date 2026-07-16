@@ -174,6 +174,7 @@ pub struct BatchAccepted {
     request_body = BatchRenderRequest,
     responses(
         (status = 202, description = "Batch accepted; poll the job", body = crate::models::api::BatchAcceptedApiResponse),
+        (status = 400, description = "Empty batch, too many inputs, or an oversized item"),
         (status = 500, description = "Failed to enqueue the job"),
     ),
 )]
@@ -191,14 +192,39 @@ pub async fn batch_render(
         "batch render request accepted",
     );
 
-    let inputs: Vec<BatchInput> = request
-        .inputs
-        .into_iter()
-        .map(|i| BatchInput {
-            data: i.data,
-            key: i.key,
-        })
-        .collect();
+    // Bound the batch before doing any work: an unbounded count fans out into
+    // tens of thousands of synchronous S3 writes here and unbounded worker/
+    // storage amplification. A 50 MiB body alone can pack millions of tiny
+    // `{"data":{}}` items.
+    if request.inputs.is_empty() {
+        return Err(ApiError::bad_request(
+            "Batch must contain at least one input",
+        ));
+    }
+    if request.inputs.len() > state.config.max_batch_inputs {
+        return Err(ApiError::bad_request(&format!(
+            "Batch has {} inputs; the maximum is {}",
+            request.inputs.len(),
+            state.config.max_batch_inputs,
+        )));
+    }
+
+    let max_item_bytes = state.config.max_batch_item_bytes;
+    let mut inputs: Vec<BatchInput> = Vec::with_capacity(request.inputs.len());
+    for (index, item) in request.inputs.into_iter().enumerate() {
+        let item_bytes = serde_json::to_vec(&item.data)?;
+        if item_bytes.len() > max_item_bytes {
+            return Err(ApiError::bad_request(&format!(
+                "Batch item {index} data is {} bytes; the maximum is {} bytes",
+                item_bytes.len(),
+                max_item_bytes,
+            )));
+        }
+        inputs.push(BatchInput {
+            data: item.data,
+            key: item.key,
+        });
+    }
 
     let options = RenderOptions {
         pdf_standards: request.pdf_standard.map(|s| vec![s]).unwrap_or_default(),
@@ -352,6 +378,69 @@ mod tests {
         assert_eq!(
             body["data"]["status_url"].as_str(),
             Some(format!("/api/jobs/{job_id}").as_str())
+        );
+    }
+
+    /// A published-template `AppState`, with an optional config tweak applied.
+    async fn published_state(configure: impl FnOnce(&mut crate::AppState)) -> crate::AppState {
+        let registry = test_support::registry();
+        registry
+            .publish(test_support::bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        let mut state = test_support::state(registry);
+        configure(&mut state);
+        state
+    }
+
+    async fn batch_status(state: crate::AppState, body: &'static str) -> StatusCode {
+        router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/invoice:latest/batch")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn batch_render_rejects_empty_too_many_and_oversized_inputs() {
+        // Empty batch → 400.
+        let state = published_state(|_| {}).await;
+        assert_eq!(
+            batch_status(state, r#"{"inputs":[]}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // More inputs than the cap → 400.
+        let state = published_state(|s| s.config.max_batch_inputs = 2).await;
+        assert_eq!(
+            batch_status(state, r#"{"inputs":[{"data":{}},{"data":{}},{"data":{}}]}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // A single oversized item → 400.
+        let state = published_state(|s| s.config.max_batch_item_bytes = 8).await;
+        assert_eq!(
+            batch_status(
+                state,
+                r#"{"inputs":[{"data":{"name":"far longer than eight bytes"}}]}"#,
+            )
+            .await,
+            StatusCode::BAD_REQUEST
+        );
+
+        // Within limits → still accepted.
+        let state = published_state(|_| {}).await;
+        assert_eq!(
+            batch_status(state, r#"{"inputs":[{"data":{"name":"ok"}}]}"#).await,
+            StatusCode::ACCEPTED
         );
     }
 }
