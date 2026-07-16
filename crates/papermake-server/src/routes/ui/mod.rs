@@ -20,7 +20,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use maud::{DOCTYPE, Markup, PreEscaped, html};
+use maud::{DOCTYPE, Markup, html};
 use serde::Deserialize;
 use time::OffsetDateTime;
 
@@ -50,18 +50,20 @@ pub fn router() -> Router<AppState> {
         // works under distroless and regardless of the working directory).
         .route("/assets/app.css", get(app_css))
         .route("/assets/htmx.min.js", get(htmx_js))
+        .route("/assets/template-detail.js", get(template_detail_js))
         .route("/assets/logo.svg", get(logo_svg))
         .layer(from_fn(security_headers))
 }
 
 /// Add defensive security headers to every server-rendered UI response. The CSP
 /// keeps resources same-origin (blocking exfiltration via injected `src`s) and
-/// restricts framing to same-origin (clickjacking); `'unsafe-inline'` is kept
-/// because the editor ships inline module scripts and styles. `nosniff` stops
-/// content-type sniffing.
+/// restricts framing to same-origin (clickjacking). Scripts are all served from
+/// `/assets` so `script-src` stays `'self'` (no inline scripts); `style-src`
+/// keeps `'unsafe-inline'` because the charts use inline `style` attributes.
+/// `nosniff` stops content-type sniffing.
 async fn security_headers(request: Request, next: Next) -> Response {
     const CSP: &str = "default-src 'self'; img-src 'self' data:; \
-        style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; \
+        style-src 'self' 'unsafe-inline'; script-src 'self'; \
         frame-ancestors 'self'; object-src 'none'; base-uri 'self'";
 
     let mut response = next.run(request).await;
@@ -269,6 +271,9 @@ async fn publish(
 const APP_CSS: &[u8] = include_bytes!("../../../assets/app.css");
 /// Vendored htmx (htmx@4.0.0-beta5), embedded at compile time.
 const HTMX_JS: &[u8] = include_bytes!("../../../assets/htmx.min.js");
+/// Template-editor web component, embedded at compile time. Served here rather
+/// than inlined so the page carries no inline script.
+const TEMPLATE_DETAIL_JS: &[u8] = include_bytes!("../../../assets/template-detail.js");
 /// Paper-crane logo / favicon (SVG), embedded at compile time.
 const LOGO_SVG: &[u8] = include_bytes!("../../../assets/logo.svg");
 
@@ -289,6 +294,16 @@ async fn htmx_js() -> impl IntoResponse {
             (CACHE_CONTROL, "public, max-age=3600"),
         ],
         HTMX_JS,
+    )
+}
+
+async fn template_detail_js() -> impl IntoResponse {
+    (
+        [
+            (CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        TEMPLATE_DETAIL_JS,
     )
 }
 

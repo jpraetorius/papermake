@@ -235,7 +235,8 @@ fn test_template_detail_page_has_editor_and_htmx() {
     assert!(html.contains("name=\"tag\" value=\"v2\""));
     // Data references are inferred into a prefilled JSON skeleton + field list.
     assert!(html.contains("<template-detail-page>"));
-    assert!(html.contains("customElements.define('template-detail-page'"));
+    // The web component is loaded from an external asset (no inline script).
+    assert!(html.contains(r#"<script type="module" src="/assets/template-detail.js">"#));
     assert!(html.contains("data-json-input"));
     assert!(html.contains("data-data-field=\"customer.name\""));
     assert!(html.contains("data-data-field=\"document_number\""));
@@ -357,4 +358,34 @@ async fn ui_responses_carry_security_headers() {
         .unwrap();
     assert!(csp.contains("default-src 'self'"));
     assert!(csp.contains("frame-ancestors 'self'"));
+    // Scripts are external-only: no 'unsafe-inline' on script-src.
+    assert!(csp.contains("script-src 'self'"));
+    assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
+}
+
+#[tokio::test]
+async fn template_detail_script_is_served_as_an_asset() {
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let app = router().with_state(crate::test_support::state(crate::test_support::registry()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/template-detail.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "text/javascript; charset=utf-8"
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains("customElements.define('template-detail-page'")
+    );
 }
