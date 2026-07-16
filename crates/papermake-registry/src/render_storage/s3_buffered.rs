@@ -27,6 +27,11 @@ use crate::storage::blob_storage::StorageError;
 /// Default buffer size threshold that triggers an eager flush.
 pub const DEFAULT_FLUSH_MAX_RECORDS: usize = 1000;
 
+/// Default multiple of `flush_max_records` the staging buffer may hold before it
+/// starts dropping the oldest records. Re-staging on a failed flush would
+/// otherwise grow the buffer without bound during a sustained backend outage.
+pub const DEFAULT_BUFFER_BACKLOG_FACTOR: usize = 10;
+
 /// Buffered render store backed by blob storage.
 pub struct S3BufferedRenderStorage<B: BlobStorage> {
     blob: Arc<B>,
@@ -36,6 +41,9 @@ pub struct S3BufferedRenderStorage<B: BlobStorage> {
     instance_id: String,
     /// Flush eagerly once the buffer reaches this many records.
     flush_max_records: usize,
+    /// Hard cap on staged records; the oldest are dropped past this so a
+    /// sustained flush outage cannot grow the buffer without bound.
+    max_buffered_records: usize,
     /// Monotonic sequence to disambiguate multiple flushes within one millisecond.
     seq: AtomicU64,
 }
@@ -45,13 +53,25 @@ impl<B: BlobStorage> S3BufferedRenderStorage<B> {
     ///
     /// `instance_id` defaults to a generated uuid when `None`.
     pub fn new(blob: Arc<B>, instance_id: Option<String>, flush_max_records: usize) -> Self {
+        let flush_max_records = flush_max_records.max(1);
         Self {
             blob,
             buffer: RwLock::new(Vec::new()),
             instance_id: instance_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            flush_max_records: flush_max_records.max(1),
+            flush_max_records,
+            max_buffered_records: flush_max_records.saturating_mul(DEFAULT_BUFFER_BACKLOG_FACTOR),
             seq: AtomicU64::new(0),
         }
+    }
+
+    /// Override the cap on staged records (default:
+    /// `flush_max_records * DEFAULT_BUFFER_BACKLOG_FACTOR`). Once re-staging
+    /// after a failed flush would exceed this, the oldest records are dropped —
+    /// their analytics/expiry entries are lost, but the process stays up rather
+    /// than growing the buffer without bound through a backend outage.
+    pub fn with_max_buffered_records(mut self, max: usize) -> Self {
+        self.max_buffered_records = max.max(1);
+        self
     }
 
     /// This instance's identifier (used in flushed object keys).
@@ -91,9 +111,28 @@ impl<B: BlobStorage> S3BufferedRenderStorage<B> {
             // Re-stage ahead of anything staged since the take, preserving order.
             let staged_since = std::mem::replace(&mut *buf, drained);
             buf.extend(staged_since);
+            // Bound memory: a backend that keeps rejecting flushes would
+            // otherwise let the buffer grow one batch per store forever.
+            self.enforce_buffer_cap(&mut buf);
             return Err(e);
         }
         Ok(())
+    }
+
+    /// Drop the oldest staged records if the buffer is over its cap, keeping the
+    /// most recent `max_buffered_records`. The dropped records' analytics and
+    /// expiry-index entries are lost (logged), which is the deliberate trade for
+    /// surviving a sustained flush outage without unbounded memory growth.
+    fn enforce_buffer_cap(&self, buf: &mut Vec<RenderRecord>) {
+        if buf.len() > self.max_buffered_records {
+            let dropped = buf.len() - self.max_buffered_records;
+            buf.drain(0..dropped);
+            tracing::warn!(
+                dropped,
+                retained = self.max_buffered_records,
+                "analytics buffer over capacity during a flush outage; dropped oldest staged records",
+            );
+        }
     }
 
     /// Write one analytics-raw object plus the per-expiry-date index objects for
@@ -464,6 +503,39 @@ mod tests {
             .map(|l| serde_json::from_str::<RenderRecord>(l).unwrap().render_id)
             .collect();
         assert_eq!(ids, vec!["r1".to_string(), "r2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_buffer_is_capped_during_a_flush_outage() {
+        let blob = Arc::new(TogglePutStorage::new());
+        // Threshold 1 => every store triggers a (failing) flush that re-stages;
+        // cap 3 => the buffer must never hold more than the 3 most recent.
+        let store = S3BufferedRenderStorage::new(blob.clone(), Some("inst-1".to_string()), 1)
+            .with_max_buffered_records(3);
+        blob.set_fail_puts(true);
+
+        for i in 0..6 {
+            let mut r = record("invoice");
+            r.render_id = format!("r{i}");
+            // The flush error is expected while the backend is down.
+            let _ = store.store_render(r).await;
+        }
+
+        // Without the cap the buffer would hold all 6; with it, only 3.
+        assert_eq!(store.buffered_len().await, 3);
+
+        // Once the backend recovers, the retained records flush — and they are
+        // the most recent three (the oldest were dropped to bound memory).
+        blob.set_fail_puts(false);
+        store.flush().await.unwrap();
+        let keys = blob.list_keys(layout::RAW_PREFIX).await.unwrap();
+        assert_eq!(keys.len(), 1);
+        let text = String::from_utf8(blob.get(&keys[0]).await.unwrap()).unwrap();
+        let ids: Vec<String> = text
+            .lines()
+            .map(|l| serde_json::from_str::<RenderRecord>(l).unwrap().render_id)
+            .collect();
+        assert_eq!(ids, vec!["r3".to_string(), "r4".to_string(), "r5".to_string()]);
     }
 
     #[tokio::test]
