@@ -56,7 +56,7 @@ pub struct PruneStats {
 ///   expiry files.
 /// - Deletes `analytics/raw/dt=<old>/…` older than `analytics_retention_days`
 ///   (the persisted `summary.json` keeps the rollups, so history survives).
-/// - Deletes `jobs/{id}/…` batch-job documents whose `updated_at` is older than
+/// - Deletes `jobs/{id}/…` batch-job documents whose `created_at` is older than
 ///   `job_retention_days` (status trackers accrue one per submission). `0`
 ///   disables job pruning (keep forever).
 ///

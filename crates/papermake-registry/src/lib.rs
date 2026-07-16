@@ -1,18 +1,22 @@
 //! # Papermake Registry
 //!
-//! A template registry and versioning system for papermake that provides:
-//! - Template versioning with immutable versions
-//! - Multi-level access control (user, organization, public, marketplace)
-//! - Fork workflows with clean slate approach
-//! - Auto-incrementing version numbers
-//! - Enterprise-grade template management
+//! A content-addressed template registry for papermake over S3-compatible
+//! object storage, plus the render/analytics/retention machinery built on it:
+//! - Template files and manifests are hashed and stored immutably; identical
+//!   content is deduplicated.
+//! - Tags (`refs/<name>/<tag>`) are mutable pointers to an immutable manifest
+//!   hash, so a tag names an exact template version.
+//! - Synchronous rendering (with a bounded pool) and sharded, multi-worker
+//!   batch rendering, both writing content-addressed render outputs.
+//! - Eventually-consistent render analytics and time-based output retention.
 //!
 //! ## Core Concepts
 //!
-//! - **Templates** are versioned immutable assets once published
-//! - **Scopes** define visibility: User → Organization → Public → Marketplace
-//! - **Forks** create independent copies with attribution to source
-//! - **Versions** auto-increment (1, 2, 3...) for simplicity
+//! - **Blobs & manifests** are immutable, content-addressed, and deduplicated.
+//! - **Tags** are the only mutable pointers; publishing moves a tag to a new
+//!   manifest hash.
+//! - **Renders** are content-addressed from `(manifest hash, data, options)`, so
+//!   re-rendering the same request is idempotent.
 //!
 //! ## Example Usage
 //!
