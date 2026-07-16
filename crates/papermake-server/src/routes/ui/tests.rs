@@ -334,3 +334,27 @@ fn test_relative_time_localized() {
         "vor 2 Std."
     );
 }
+
+#[tokio::test]
+async fn ui_responses_carry_security_headers() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let app = router().with_state(crate::test_support::state(crate::test_support::registry()));
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    let headers = response.headers();
+    assert_eq!(headers.get(X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+    assert_eq!(headers.get(X_FRAME_OPTIONS).unwrap(), "SAMEORIGIN");
+    let csp = headers
+        .get(CONTENT_SECURITY_POLICY)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("frame-ancestors 'self'"));
+}

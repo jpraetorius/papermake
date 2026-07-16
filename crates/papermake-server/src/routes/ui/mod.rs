@@ -10,8 +10,13 @@
 
 use axum::{
     Router,
-    extract::{Form, Path, State},
-    http::header::{CACHE_CONTROL, CONTENT_TYPE},
+    extract::{Form, Path, Request, State},
+    http::HeaderValue,
+    http::header::{
+        CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+        X_FRAME_OPTIONS,
+    },
+    middleware::{Next, from_fn},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -46,6 +51,25 @@ pub fn router() -> Router<AppState> {
         .route("/assets/app.css", get(app_css))
         .route("/assets/htmx.min.js", get(htmx_js))
         .route("/assets/logo.svg", get(logo_svg))
+        .layer(from_fn(security_headers))
+}
+
+/// Add defensive security headers to every server-rendered UI response. The CSP
+/// keeps resources same-origin (blocking exfiltration via injected `src`s) and
+/// restricts framing to same-origin (clickjacking); `'unsafe-inline'` is kept
+/// because the editor ships inline module scripts and styles. `nosniff` stops
+/// content-type sniffing.
+async fn security_headers(request: Request, next: Next) -> Response {
+    const CSP: &str = "default-src 'self'; img-src 'self' data:; \
+        style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; \
+        frame-ancestors 'self'; object-src 'none'; base-uri 'self'";
+
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(CSP));
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("SAMEORIGIN"));
+    response
 }
 
 mod charts;
