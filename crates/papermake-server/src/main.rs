@@ -35,8 +35,6 @@ mod routes;
 use config::ServerConfig;
 use error::{ApiError, Result};
 
-use crate::models::RenderJob;
-
 /// Render storage backing the server: the buffered-S3 store over S3 blobs.
 pub type ServerRenderStorage = S3BufferedRenderStorage<S3Storage>;
 type RegistryApiResult<T> = std::result::Result<T, RegistryError>;
@@ -218,7 +216,6 @@ where
 pub struct AppState {
     pub registry: Arc<dyn ServerRegistry>,
     pub config: ServerConfig,
-    pub job_sender: tokio::sync::mpsc::UnboundedSender<RenderJob>,
 }
 
 #[tokio::main]
@@ -303,14 +300,10 @@ async fn main() -> Result<()> {
         info!("🔧 Analytics flush loop started (every {}s)", interval);
     }
 
-    // Create job channel for event-driven processing
-    let (job_sender, _job_receiver) = tokio::sync::mpsc::unbounded_channel();
-
     // Create application state
     let state = AppState {
         registry: registry.clone(),
         config: config.clone(),
-        job_sender,
     };
 
     // Build router
@@ -493,11 +486,9 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn state(registry: TestRegistry) -> AppState {
-        let (job_sender, _job_receiver) = tokio::sync::mpsc::unbounded_channel();
         AppState {
             registry: Arc::new(registry),
             config: ServerConfig::default(),
-            job_sender,
         }
     }
 

@@ -241,11 +241,6 @@ impl Reference {
         Self::validate_tag(tag)
     }
 
-    /// Check if reference includes hash verification
-    pub fn has_hash_verification(&self) -> bool {
-        self.hash.is_some()
-    }
-
     /// Get the full namespace/name path
     pub fn full_name(&self) -> String {
         match &self.namespace {
@@ -367,14 +362,15 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_verification_flag_tracks_hash_presence() {
-        assert!(!Reference::parse("invoice").unwrap().has_hash_verification());
+    fn parse_tracks_hash_presence() {
+        assert!(Reference::parse("invoice").unwrap().hash.is_none());
         assert!(
             Reference::parse(
                 "invoice@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
             )
             .unwrap()
-            .has_hash_verification()
+            .hash
+            .is_some()
         );
     }
 

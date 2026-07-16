@@ -64,7 +64,7 @@ pub use error::RegistryError;
 pub use papermake::{PdfStandard, RenderOptions};
 pub use registry::Registry;
 pub use render_storage::{AnalyticsQuery, AnalyticsResult, RenderRecord, RenderStorage};
-pub use storage::{BlobStorage, TypstFileSystem};
+pub use storage::BlobStorage;
 
 #[cfg(feature = "s3")]
 pub use storage::s3_storage::S3Storage;
