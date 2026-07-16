@@ -39,8 +39,10 @@ pub enum JobStatus {
     Queued,
     /// At least one shard is being rendered (or already done) but not all are terminal.
     Running,
-    /// Every shard is terminal (with at least one rendered).
+    /// Every shard is terminal and every item rendered successfully.
     Completed,
+    /// Every shard is terminal, but at least one item failed to render.
+    CompletedWithFailures,
     /// Every shard was abandoned (poison / unrenderable template).
     Failed,
 }
@@ -161,6 +163,10 @@ impl JobView {
         } else if shards.len() == meta.num_shards && shards.iter().all(terminal) {
             if shards.iter().all(|s| s.status == ShardStatus::Failed) {
                 JobStatus::Failed
+            } else if failed > 0 {
+                // Terminal, some rendered — but not everything: don't report a
+                // clean "completed" when items failed.
+                JobStatus::CompletedWithFailures
             } else {
                 JobStatus::Completed
             }
@@ -185,5 +191,75 @@ impl JobView {
             retain_days: meta.retain_days,
             created_at: meta.created_at,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    fn job(num_shards: usize) -> BatchJob {
+        BatchJob {
+            job_id: "j".to_string(),
+            reference: "invoice:latest".to_string(),
+            total: 10,
+            retain_days: None,
+            pdf_standards: Vec::new(),
+            shard_size: 5,
+            num_shards,
+            created_at: datetime!(2026-07-09 12:00 UTC),
+        }
+    }
+
+    fn shard(index: usize, status: ShardStatus, done: usize, failed: usize) -> Shard {
+        Shard {
+            job_id: "j".to_string(),
+            index,
+            start: index * 5,
+            len: 5,
+            status,
+            owner: None,
+            lease_expires_at: None,
+            done,
+            failed,
+            attempts: 1,
+            updated_at: datetime!(2026-07-09 12:00 UTC),
+        }
+    }
+
+    #[test]
+    fn aggregate_distinguishes_clean_completion_from_item_failures() {
+        // All terminal, all items succeeded → Completed.
+        let clean = JobView::aggregate(
+            &job(2),
+            &[
+                shard(0, ShardStatus::Done, 5, 0),
+                shard(1, ShardStatus::Done, 5, 0),
+            ],
+        );
+        assert_eq!(clean.status, JobStatus::Completed);
+
+        // All terminal but an item failed → CompletedWithFailures (not Completed).
+        let partial = JobView::aggregate(
+            &job(2),
+            &[
+                shard(0, ShardStatus::Done, 5, 0),
+                shard(1, ShardStatus::Done, 4, 1),
+            ],
+        );
+        assert_eq!(partial.status, JobStatus::CompletedWithFailures);
+        assert_eq!(partial.done, 9);
+        assert_eq!(partial.failed, 1);
+
+        // Every shard abandoned → Failed.
+        let failed = JobView::aggregate(
+            &job(2),
+            &[
+                shard(0, ShardStatus::Failed, 0, 5),
+                shard(1, ShardStatus::Failed, 0, 5),
+            ],
+        );
+        assert_eq!(failed.status, JobStatus::Failed);
     }
 }

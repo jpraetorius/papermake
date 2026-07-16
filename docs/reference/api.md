@@ -203,7 +203,8 @@ Returns batch status and counts.
 }
 ```
 
-`status` is `queued`, `running`, `completed`, or `failed`.
+`status` is `queued`, `running`, `completed`, `completed_with_failures` (every
+shard finished but some items failed), or `failed` (every shard was abandoned).
 
 ### `GET /api/jobs/{job_id}/items`
 
