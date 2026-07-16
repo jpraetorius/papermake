@@ -62,15 +62,43 @@ impl I18n {
     }
 }
 
-/// Pick the first supported language mentioned in an `Accept-Language` header.
+/// Pick the best supported language from an `Accept-Language` header, honoring
+/// quality values: the highest-`q` acceptable entry wins, ties break on header
+/// order, and `q=0` explicitly rejects a tag. `*` matches the default (English).
 fn negotiate(header: &str) -> Option<LanguageIdentifier> {
-    for part in header.split(',') {
-        let tag = part
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
+    // Collect (quality, order, tag), dropping explicitly-rejected (q=0) entries.
+    let mut ranked: Vec<(f32, usize, String)> = Vec::new();
+    for (order, part) in header.split(',').enumerate() {
+        let mut fields = part.split(';');
+        let tag = fields.next().unwrap_or("").trim().to_ascii_lowercase();
+        if tag.is_empty() {
+            continue;
+        }
+        // Default quality is 1.0; a `q=` parameter overrides it.
+        let quality = fields
+            .find_map(|f| {
+                f.trim()
+                    .strip_prefix("q=")
+                    .map(str::trim)
+                    .map(str::to_owned)
+            })
+            .and_then(|q| q.parse::<f32>().ok())
+            .unwrap_or(1.0);
+        if quality > 0.0 {
+            ranked.push((quality, order, tag));
+        }
+    }
+    // Highest quality first; equal quality keeps the client's stated order.
+    ranked.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+
+    for (_, _, tag) in ranked {
+        if tag == "*" {
+            return "en".parse().ok();
+        }
         if tag.starts_with("de") {
             return "de".parse().ok();
         }
@@ -109,6 +137,25 @@ mod tests {
         let de = I18n::from_accept_language(Some("de-DE,de;q=0.9,en;q=0.8"));
         assert_eq!(de.t("nav-dashboard"), "Übersicht");
         assert_eq!(de.t("nav-templates"), "Vorlagen");
+    }
+
+    #[test]
+    fn negotiate_picks_highest_quality_not_header_order() {
+        // en outranks de by quality even though de appears first.
+        assert_eq!(negotiate("de;q=0.5, en;q=0.9").unwrap().to_string(), "en");
+        // Equal (default) quality falls back to stated order.
+        assert_eq!(negotiate("de, en").unwrap().to_string(), "de");
+        assert_eq!(negotiate("en, de").unwrap().to_string(), "en");
+    }
+
+    #[test]
+    fn negotiate_respects_explicit_rejection_and_wildcard() {
+        // q=0 rejects en, leaving de.
+        assert_eq!(negotiate("en;q=0, de;q=0.3").unwrap().to_string(), "de");
+        // A wildcard maps to the default language.
+        assert_eq!(negotiate("*").unwrap().to_string(), "en");
+        // Only unsupported tags → no match (caller falls back to English).
+        assert!(negotiate("fr, es;q=0.8").is_none());
     }
 
     #[test]
