@@ -82,6 +82,7 @@ delete-confirm-body = Dies löscht die Version endgültig und kann nicht rückg�
 # Render fragments
 rendered = Gerendert
 render-failed = Rendern fehlgeschlagen
+analytics-unavailable = Analysedaten sind vorübergehend nicht verfügbar
 invalid-json = Ungültiges JSON: { $error }
 
 # Relative time

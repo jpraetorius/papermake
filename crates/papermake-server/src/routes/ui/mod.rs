@@ -24,6 +24,7 @@ use maud::{DOCTYPE, Markup, html};
 use serde::Deserialize;
 use time::OffsetDateTime;
 
+use papermake_registry::RegistryError;
 use papermake_registry::TemplateInfo;
 use papermake_registry::bundle::{TemplateBundle, TemplateMetadata};
 use papermake_registry::render_storage::summary::{DurationBucket, Summary, TemplateSummary};
@@ -90,13 +91,17 @@ mod tests;
 
 async fn dashboard(State(state): State<AppState>, t: I18n) -> Markup {
     let now = OffsetDateTime::now_utc();
-    let summary = state
-        .registry
-        .render_summary()
-        .await
-        .unwrap_or_else(|_| Summary::empty(now));
+    // An empty aggregate ("no renders yet") is normal; a backend error is not.
+    // Surface the latter as a notice instead of a misleading all-zeros view.
+    let (summary, analytics_unavailable) = match state.registry.render_summary().await {
+        Ok(summary) => (summary, false),
+        Err(e) => {
+            tracing::error!(error = %e, "dashboard analytics unavailable");
+            (Summary::empty(now), true)
+        }
+    };
     let templates = state.registry.list_templates().await.unwrap_or_default();
-    dashboard_page(&summary, &templates, now, &t)
+    dashboard_page(&summary, &templates, analytics_unavailable, now, &t)
 }
 
 async fn new_template(t: I18n) -> Markup {
@@ -177,7 +182,20 @@ async fn ui_render(
     // yet, so there's nothing to OOB-update here.
     match state.registry.render_and_store(&reference, &data).await {
         Ok(result) => render_result_fragment(&result.render_id, &t),
-        Err(e) => render_error_fragment(&e.to_string(), &t),
+        Err(e) => {
+            // Show compile/template diagnostics (the product); for anything else
+            // (storage/internal) log the detail and show a generic message so we
+            // don't render raw error strings — which can carry S3/key details —
+            // into the page.
+            let detail = match &e {
+                RegistryError::Template(_) | RegistryError::Compilation(_) => e.to_string(),
+                other => {
+                    tracing::error!(reference = %reference, error = %other, "ui test render failed");
+                    String::new()
+                }
+            };
+            render_error_fragment(&detail, &t)
+        }
     }
 }
 

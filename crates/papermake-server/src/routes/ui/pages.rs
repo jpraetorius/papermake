@@ -13,9 +13,12 @@ pub(crate) fn template_detail_component_script() -> Markup {
 // ---------------------------------------------------------------------------
 
 /// Dashboard: KPI cards, volume sparkline, per-template bars, recent renders.
+/// `analytics_unavailable` shows a notice when the aggregate couldn't be loaded,
+/// so an outage isn't misread as genuinely-zero activity.
 pub fn dashboard_page(
     summary: &Summary,
     templates: &[TemplateInfo],
+    analytics_unavailable: bool,
     now: OffsetDateTime,
     t: &I18n,
 ) -> Markup {
@@ -23,6 +26,10 @@ pub fn dashboard_page(
         div.split {
             h1 { (t.t("dashboard-title")) }
             a.btn.primary href="/templates/new" { (t.t("btn-new-template")) }
+        }
+
+        @if analytics_unavailable {
+            div.callout.warn role="alert" { strong { (t.t("analytics-unavailable")) } }
         }
 
         // KPI cards.
@@ -279,12 +286,15 @@ pub fn render_result_fragment(render_id: &str, t: &I18n) -> Markup {
     }
 }
 
-/// htmx fragment shown after a failed test render.
+/// htmx fragment shown after a failed test render. `message` carries a compile
+/// diagnostic when there is one; it is omitted for errors with no safe detail.
 pub fn render_error_fragment(message: &str, t: &I18n) -> Markup {
     html! {
         div.callout.warn role="alert" {
             strong { (t.t("render-failed")) }
-            p { (message) }
+            @if !message.is_empty() {
+                p { (message) }
+            }
         }
     }
 }

@@ -82,6 +82,7 @@ delete-confirm-body = This permanently deletes the version and cannot be undone.
 # Render fragments
 rendered = Rendered
 render-failed = Render failed
+analytics-unavailable = Analytics are temporarily unavailable
 invalid-json = Invalid JSON: { $error }
 
 # Relative time

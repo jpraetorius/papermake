@@ -59,7 +59,7 @@ fn test_dashboard_page_shows_metrics_not_template_list() {
     let now = datetime!(2026-07-09 12:00 UTC);
     let summary = sample_summary(now);
     let templates = vec![sample_template()];
-    let html = dashboard_page(&summary, &templates, now, &en()).into_string();
+    let html = dashboard_page(&summary, &templates, false, now, &en()).into_string();
     // The template list now lives on its own page, not the dashboard.
     assert!(!html.contains("Invoice Template"));
     // Navbar links to the dedicated templates page.
@@ -167,7 +167,7 @@ fn test_dashboard_charts_render_donut_and_series() {
         },
     };
 
-    let html = dashboard_page(&summary, &[], now, &en()).into_string();
+    let html = dashboard_page(&summary, &[], false, now, &en()).into_string();
     // Chart regions render both bar/series charts and the template donut.
     assert!(html.contains("bar-chart"));
     assert!(html.contains("donut-chart"));
@@ -178,7 +178,7 @@ fn test_dashboard_charts_render_donut_and_series() {
 #[test]
 fn test_dashboard_page_german() {
     let now = datetime!(2026-07-09 12:00 UTC);
-    let html = dashboard_page(&sample_summary(now), &[], now, &de()).into_string();
+    let html = dashboard_page(&sample_summary(now), &[], false, now, &de()).into_string();
     assert!(html.contains("<html lang=\"de\""));
 }
 
@@ -286,7 +286,7 @@ fn test_infer_data_fields_from_typst_source() {
 #[test]
 fn test_active_nav_marks_current_and_templates_tags_link() {
     let now = datetime!(2026-07-09 12:00 UTC);
-    let dash = dashboard_page(&sample_summary(now), &[], now, &en()).into_string();
+    let dash = dashboard_page(&sample_summary(now), &[], false, now, &en()).into_string();
     assert!(dash.contains("href=\"/\" aria-current=\"page\""));
     // Templates table renders each tag as a link to its tagged detail.
     let tpls = templates_page(&[sample_template()], &en()).into_string();
@@ -388,4 +388,28 @@ async fn template_detail_script_is_served_as_an_asset() {
     assert!(
         String::from_utf8_lossy(&body).contains("customElements.define('template-detail-page'")
     );
+}
+
+#[test]
+fn dashboard_shows_a_notice_when_analytics_are_unavailable() {
+    let now = datetime!(2026-07-09 12:00 UTC);
+    let en = en();
+    // With the flag set, a notice appears; without it, it does not.
+    let down = dashboard_page(&sample_summary(now), &[], true, now, &en).into_string();
+    assert!(down.contains(&en.t("analytics-unavailable")));
+    let up = dashboard_page(&sample_summary(now), &[], false, now, &en).into_string();
+    assert!(!up.contains(&en.t("analytics-unavailable")));
+}
+
+#[test]
+fn render_error_fragment_omits_empty_detail() {
+    let t = en();
+    // A diagnostic is shown in its own paragraph.
+    let with = render_error_fragment("unknown variable: foo", &t).into_string();
+    assert!(with.contains("unknown variable: foo"));
+    assert!(with.contains("<p>"));
+    // An empty detail (generic/redacted error) shows only the heading, no <p>.
+    let without = render_error_fragment("", &t).into_string();
+    assert!(without.contains(&t.t("render-failed")));
+    assert!(!without.contains("<p>"));
 }
