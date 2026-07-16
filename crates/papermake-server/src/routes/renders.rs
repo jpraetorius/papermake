@@ -97,16 +97,15 @@ pub async fn get_render_pdf(
     State(state): State<AppState>,
     Path(render_id): Path<String>,
 ) -> ApiResult<Response<Body>> {
+    // Defer to the centralized mapping in `error.rs`: unknown/pruned render →
+    // 404, a failed render → 422 (carrying its diagnostic), storage/internal →
+    // generic 500. The old blanket-404 hid failed renders and made an S3 outage
+    // look like "render not found".
     let pdf_bytes = state
         .registry
         .get_render_pdf(&render_id)
         .await
-        .map_err(|e| match e {
-            papermake_registry::RegistryError::RenderStorage(_) => {
-                ApiError::render_not_found(&render_id)
-            }
-            _ => ApiError::Internal(e.to_string()),
-        })?;
+        .map_err(ApiError::Registry)?;
 
     let filename = format!("render-{}.pdf", render_id);
 
@@ -291,5 +290,38 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn failed_render_pdf_returns_unprocessable_not_not_found() {
+        let registry = test_support::registry();
+        registry
+            .publish(test_support::bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        // A render that fails to compile still persists a failure meta.
+        let _ = registry
+            .render_and_store("invoice:latest", &serde_json::json!({}))
+            .await;
+        let failed_id = registry.list_recent_renders(10).await.unwrap()[0]
+            .render_id
+            .clone();
+        let app = router().with_state(test_support::state(registry));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/{failed_id}/pdf"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // A render that exists but failed is 422 (carrying its diagnostic), not
+        // the blanket 404 the old handler returned.
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = test_support::response_json(response).await;
+        assert_eq!(body["status"].as_u64(), Some(422));
     }
 }

@@ -5,10 +5,7 @@ use axum::{
     routing::post,
 };
 
-use papermake_registry::{
-    PdfStandard, RegistryError, RenderOptions, batch::BatchInput,
-    render_storage::types::RenderStorageError,
-};
+use papermake_registry::{PdfStandard, RenderOptions, batch::BatchInput};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{error, info};
@@ -59,6 +56,7 @@ pub struct RenderResponse {
     request_body = RenderRequest,
     responses(
         (status = 200, description = "Render succeeded", body = crate::models::api::RenderApiResponse),
+        (status = 400, description = "Malformed template reference"),
         (status = 404, description = "Template not found"),
         (status = 408, description = "Render timed out"),
         (status = 422, description = "Template failed to compile"),
@@ -112,17 +110,11 @@ pub async fn render_template(
                 error = %e,
                 "render request failed",
             );
-            return Err(match e {
-                RegistryError::RenderTimeout { .. } => ApiError::Timeout,
-                pool_exhausted @ RegistryError::RenderPoolExhausted { .. } => {
-                    ApiError::Registry(pool_exhausted)
-                }
-                RegistryError::Template(_) => ApiError::template_not_found(&reference),
-                RegistryError::RenderStorage(RenderStorageError::NotFound(_)) => {
-                    ApiError::render_not_found(&reference)
-                }
-                other => ApiError::RenderFailed(other.to_string()),
-            });
+            // Defer to the centralized mapping in `error.rs`, which honors the
+            // documented contract (404 unknown template, 408 timeout, 422
+            // compile failure, 500 storage/internal) and never leaks S3 or
+            // internal key details for server-side errors.
+            return Err(ApiError::Registry(e));
         }
     };
 
@@ -299,6 +291,34 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = test_support::response_json(response).await;
         assert_eq!(body["status"].as_u64(), Some(404));
+    }
+
+    #[tokio::test]
+    async fn render_template_reports_compile_failure_as_unprocessable() {
+        let registry = test_support::registry();
+        registry
+            .publish(test_support::bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        let app = router().with_state(test_support::state(registry));
+
+        // The template reads `data.name`; omitting it makes the render fail to
+        // compile. That is a 422 (the diagnostic is the product), not a 404.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/invoice:latest")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"data":{}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = test_support::response_json(response).await;
+        assert_eq!(body["status"].as_u64(), Some(422));
     }
 
     #[tokio::test]

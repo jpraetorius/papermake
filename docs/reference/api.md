@@ -142,6 +142,7 @@ Common errors:
 
 | Status | Meaning |
 |---:|---|
+| `400` | Malformed template reference |
 | `404` | Template reference not found |
 | `408` | Render timed out |
 | `422` | Template compiled or exported unsuccessfully |

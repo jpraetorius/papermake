@@ -5,7 +5,6 @@ use axum::{
     extract::{Path, Query, State},
     routing::get,
 };
-use papermake_registry::RegistryError;
 use papermake_registry::batch::{BatchItem, JobView};
 use serde::Deserialize;
 
@@ -19,13 +18,6 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/{job_id}", get(get_job))
         .route("/{job_id}/items", get(get_job_items))
-}
-
-fn map_job_err(job_id: &str) -> impl Fn(RegistryError) -> ApiError + '_ {
-    move |e| match e {
-        RegistryError::RenderStorage(_) => ApiError::render_not_found(job_id),
-        other => ApiError::Internal(other.to_string()),
-    }
 }
 
 /// GET /api/jobs/{job_id} — poll a batch job's aggregated status and counts
@@ -49,7 +41,7 @@ pub async fn get_job(
         .registry
         .get_batch_job(&job_id)
         .await
-        .map_err(map_job_err(&job_id))?;
+        .map_err(ApiError::Registry)?;
     Ok(Json(ApiResponse::new(job)))
 }
 
@@ -93,7 +85,7 @@ pub async fn get_job_items(
         .registry
         .list_job_items(&job_id, q.offset, q.limit)
         .await
-        .map_err(map_job_err(&job_id))?;
+        .map_err(ApiError::Registry)?;
     Ok(Json(ApiResponse::new(items)))
 }
 

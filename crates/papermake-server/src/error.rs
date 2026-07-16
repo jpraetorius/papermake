@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use papermake_registry::RegistryError;
+use papermake_registry::error::TemplateError;
 use papermake_registry::render_storage::types::RenderStorageError;
 use serde_json::json;
 use thiserror::Error;
@@ -76,13 +77,22 @@ impl IntoResponse for ApiError {
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Render capacity temporarily exhausted".to_string(),
                 ),
-                RegistryError::Template(_) => (StatusCode::NOT_FOUND, self.to_string()),
-                RegistryError::RenderStorage(RenderStorageError::NotFound(_)) => {
+                // Unknown template reference (or missing render record) → 404.
+                RegistryError::Template(TemplateError::NotFound { .. })
+                | RegistryError::RenderStorage(RenderStorageError::NotFound(_)) => {
                     (StatusCode::NOT_FOUND, self.to_string())
                 }
-                RegistryError::RenderStorage(RenderStorageError::RenderFailed(_)) => {
+                // Template/compile diagnostics and failed renders are the product
+                // — surface them to the caller as 422.
+                RegistryError::Template(_)
+                | RegistryError::Compilation(_)
+                | RegistryError::RenderStorage(RenderStorageError::RenderFailed(_)) => {
                     (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
                 }
+                // Malformed reference is bad client input.
+                RegistryError::Reference(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+                // Storage/content-addressing/internal → generic message so S3
+                // and internal key details never reach an anonymous client.
                 _ => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Registry error".to_string(),
@@ -229,6 +239,49 @@ mod tests {
         );
         // Internal slot count is not leaked to the client.
         assert_eq!(body["error"], "Render capacity temporarily exhausted");
+    }
+
+    #[tokio::test]
+    async fn registry_errors_map_to_the_documented_contract() {
+        // Unknown template → 404.
+        let (status, _) = response_json(ApiError::Registry(RegistryError::Template(
+            TemplateError::NotFound {
+                reference: "invoice:latest".to_string(),
+            },
+        )))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Compile/template failure → 422, and the diagnostic is surfaced.
+        let (status, body) = response_json(ApiError::Registry(RegistryError::Template(
+            TemplateError::Invalid {
+                message: "Template rendering failed: unknown variable".to_string(),
+            },
+        )))
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["error"].as_str().unwrap().contains("unknown variable"));
+
+        // A failed render fetched by id → 422.
+        let (status, _) = response_json(ApiError::Registry(RegistryError::RenderStorage(
+            RenderStorageError::RenderFailed("boom".to_string()),
+        )))
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn storage_errors_are_5xx_and_do_not_leak_details() {
+        use papermake_registry::error::StorageError;
+
+        let (status, body) = response_json(ApiError::Registry(RegistryError::Storage(
+            StorageError::backend("s3://internal-bucket/refs/secret-key failed"),
+        )))
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        // The S3 key / bucket detail must not reach the client.
+        assert_eq!(body["error"], "Registry error");
     }
 
     #[tokio::test]
