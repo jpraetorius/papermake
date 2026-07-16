@@ -124,6 +124,25 @@ impl std::fmt::Debug for PapermakeWorld {
     }
 }
 
+/// Whether the template source already declares a top-level `data` binding
+/// (`#let data …` in markup or `let data …` in code), so the prelude binding
+/// should be skipped to avoid shadowing it. A trailing identifier char (as in
+/// `database`) does not count.
+fn binds_data(source: &str) -> bool {
+    source.lines().any(|line| {
+        let trimmed = line.trim_start();
+        for prefix in ["#let data", "let data"] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                let next = rest.chars().next();
+                if next.is_none_or(|c| !c.is_alphanumeric() && c != '_') {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
 impl PapermakeWorld {
     /// Create a new TypstWorld with the given template content and data
     pub fn new(template_content: String, data: String) -> Self {
@@ -135,10 +154,18 @@ impl PapermakeWorld {
 
         let library = Library::builder().with_inputs(inputs_dict).build();
 
-        let source_text = format!(
-            "#let data = json(bytes(sys.inputs.data))\n{}",
+        // Bind `data` from the injected inputs — but only if the template does
+        // not already define its own `data`. Injecting unconditionally would
+        // double-bind (shadow) a template that declares `data` itself and shift
+        // every reported error offset relative to the user's source.
+        let source_text = if binds_data(&template_content) {
             template_content
-        );
+        } else {
+            format!(
+                "#let data = json(bytes(sys.inputs.data))\n{}",
+                template_content
+            )
+        };
 
         Self {
             library: LazyHash::new(library),
@@ -355,6 +382,32 @@ mod tests {
     fn font_helpers_are_safe_for_startup_and_malformed_template_font_data() {
         preload_fonts();
         assert!(load_font_faces(b"not a font").is_empty());
+    }
+
+    #[test]
+    fn binds_data_detects_an_existing_data_binding() {
+        assert!(binds_data("#let data = (name: \"x\")\nHello"));
+        assert!(binds_data("  #let data=1"));
+        assert!(binds_data("let data = 1")); // code mode
+        // No `data` binding → prelude should be injected.
+        assert!(!binds_data("Hello #data.name"));
+        assert!(!binds_data("#let total = 1"));
+        // A longer identifier must not be mistaken for `data`.
+        assert!(!binds_data("#let database = connect()"));
+    }
+
+    #[test]
+    fn new_injects_prelude_only_when_data_is_not_already_bound() {
+        // Template without its own `data` gets the injected prelude.
+        let injected = PapermakeWorld::new("Hello #data.name".to_string(), "{}".to_string());
+        assert!(injected.source.text().starts_with("#let data = json("));
+
+        // Template that binds `data` itself is left untouched (no double-bind).
+        let own = PapermakeWorld::new(
+            "#let data = (name: \"Ada\")\nHi".to_string(),
+            "{}".to_string(),
+        );
+        assert!(!own.source.text().contains("json(bytes(sys.inputs.data))"));
     }
 
     #[tokio::test]
