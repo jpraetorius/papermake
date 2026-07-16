@@ -4,8 +4,10 @@
 //! [`Summary`], and write it to `layout::SUMMARY_KEY`. Run by the worker on an
 //! interval; testable offline with `MemoryStorage`.
 //!
-//! The whole raw set is re-scanned each run (idempotent). Retention pruning of
-//! `analytics/raw/` bounds that set; incremental watermarking is a later
+//! The whole raw set is re-scanned each run (idempotent), fetching the raw
+//! objects concurrently so cycle latency scales with the slowest few rather than
+//! the sum of every GET. Retention pruning of `analytics/raw/` bounds that set;
+//! incremental per-day rollups (re-reading only recent partitions) are a later
 //! optimization.
 
 use time::OffsetDateTime;
@@ -18,21 +20,35 @@ use crate::storage::BlobStorage;
 /// Default number of recent renders retained per template and globally.
 pub const DEFAULT_RECENT_N: usize = 50;
 
+/// Max raw files fetched from storage concurrently per aggregation cycle.
+const RAW_FETCH_CONCURRENCY: usize = 16;
+
 /// Read raw NDJSON records from `analytics/raw/`.
+///
+/// Files are fetched concurrently (bounded) rather than one at a time, so cycle
+/// latency scales with the slowest few objects instead of the sum of every GET.
 pub async fn load_raw_records<B: BlobStorage + ?Sized>(
     blob: &B,
 ) -> Result<Vec<RenderRecord>, RenderStorageError> {
+    use futures_util::StreamExt;
+
     let keys = blob
         .list_keys(layout::RAW_PREFIX)
         .await
         .map_err(|e| RenderStorageError::Query(e.to_string()))?;
 
-    let mut records = Vec::new();
-    for key in keys {
+    let mut fetches = futures_util::stream::iter(keys.into_iter().map(|key| async move {
         let bytes = blob
             .get(&key)
             .await
             .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+        Ok::<(String, Vec<u8>), RenderStorageError>((key, bytes))
+    }))
+    .buffer_unordered(RAW_FETCH_CONCURRENCY);
+
+    let mut records = Vec::new();
+    while let Some(result) = fetches.next().await {
+        let (key, bytes) = result?;
         let text = String::from_utf8_lossy(&bytes);
         for line in text.lines() {
             if line.trim().is_empty() {
