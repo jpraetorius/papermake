@@ -15,8 +15,6 @@ variables:
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
   CARGO_TARGET_DIR: "$CI_PROJECT_DIR/target"
   CARGO_TERM_COLOR: always
-  DOCKER_BUILDKIT: "1"
-  DOCKER_TLS_CERTDIR: ""
   RUST_VERSION: "1.97.0"
 
 .cargo_cache:
@@ -34,29 +32,25 @@ variables:
       - target/
     policy: pull-push
 
-.buildx_cache:
+.buildkit_cache:
   cache:
     key:
       files:
         - Cargo.lock
-      prefix: buildx-$CI_COMMIT_REF_SLUG
+      prefix: buildkit-$CI_COMMIT_REF_SLUG
     fallback_keys:
-      - buildx-$CI_DEFAULT_BRANCH
-      - buildx
+      - buildkit-$CI_DEFAULT_BRANCH
+      - buildkit
     paths:
-      - .buildx-cache/
+      - .buildkit-cache/
     policy: pull-push
 
-.docker:
-  image: docker:27
-  services:
-    - name: docker:27-dind
-      alias: docker
+.buildkit:
+  image:
+    name: moby/buildkit:rootless
+    entrypoint: [""]
   variables:
-    DOCKER_HOST: tcp://docker:2375
-  before_script:
-    - docker buildx create --use --name papermake-ci
-    - docker buildx inspect --bootstrap
+    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
 
 test-and-build-crates:
   stage: test
@@ -75,75 +69,97 @@ test-and-build-crates:
 build-docker-images:
   stage: image
   extends:
-    - .docker
-    - .buildx_cache
+    - .buildkit
+    - .buildkit_cache
   script:
-    - mkdir -p .buildx-cache/server .buildx-cache/worker .buildx-cache-new
-    - >
-      docker buildx build
-      --file crates/papermake-server/Dockerfile
-      --tag "$CI_REGISTRY_IMAGE/papermake-server:$CI_COMMIT_SHA"
-      --cache-from type=local,src=.buildx-cache/server
-      --cache-to type=local,dest=.buildx-cache-new/server,mode=max
-      --load
-      .
-    - rm -rf .buildx-cache/server
-    - mv .buildx-cache-new/server .buildx-cache/server
-    - >
-      docker buildx build
-      --file crates/papermake-worker/Dockerfile
-      --tag "$CI_REGISTRY_IMAGE/papermake-worker:$CI_COMMIT_SHA"
-      --cache-from type=local,src=.buildx-cache/worker
-      --cache-to type=local,dest=.buildx-cache-new/worker,mode=max
-      --load
-      .
-    - rm -rf .buildx-cache/worker
-    - mv .buildx-cache-new/worker .buildx-cache/worker
+    - mkdir -p .buildkit-cache/server .buildkit-cache/worker .buildkit-cache-new
+    - |
+      SERVER_IMPORT_CACHE=
+      if [ -f .buildkit-cache/server/index.json ]; then
+        SERVER_IMPORT_CACHE="--import-cache type=local,src=.buildkit-cache/server"
+      fi
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --opt filename=crates/papermake-server/Dockerfile \
+        $SERVER_IMPORT_CACHE \
+        --export-cache type=local,dest=.buildkit-cache-new/server,mode=max
+    - rm -rf .buildkit-cache/server
+    - mv .buildkit-cache-new/server .buildkit-cache/server
+    - |
+      WORKER_IMPORT_CACHE=
+      if [ -f .buildkit-cache/worker/index.json ]; then
+        WORKER_IMPORT_CACHE="--import-cache type=local,src=.buildkit-cache/worker"
+      fi
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --opt filename=crates/papermake-worker/Dockerfile \
+        $WORKER_IMPORT_CACHE \
+        --export-cache type=local,dest=.buildkit-cache-new/worker,mode=max
+    - rm -rf .buildkit-cache/worker
+    - mv .buildkit-cache-new/worker .buildkit-cache/worker
 
 publish-docker-images:
   stage: publish
   extends:
-    - .docker
-    - .buildx_cache
+    - .buildkit
+    - .buildkit_cache
   needs:
     - build-docker-images
   rules:
     - if: $CI_COMMIT_BRANCH || $CI_COMMIT_TAG
       when: manual
       allow_failure: true
+  before_script:
+    - mkdir -p "$HOME/.docker"
+    - |
+      AUTH="$(printf '%s:%s' "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" | base64 | tr -d '\n')"
+      printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$CI_REGISTRY" "$AUTH" > "$HOME/.docker/config.json"
   script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
-    - SERVER_TAGS="--tag $CI_REGISTRY_IMAGE/papermake-server:$CI_COMMIT_SHA"
-    - WORKER_TAGS="--tag $CI_REGISTRY_IMAGE/papermake-worker:$CI_COMMIT_SHA"
+    - SERVER_IMAGE_NAMES="$CI_REGISTRY_IMAGE/papermake-server:$CI_COMMIT_SHA"
+    - WORKER_IMAGE_NAMES="$CI_REGISTRY_IMAGE/papermake-worker:$CI_COMMIT_SHA"
     - |
       if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
-        SERVER_TAGS="$SERVER_TAGS --tag $CI_REGISTRY_IMAGE/papermake-server:latest"
-        WORKER_TAGS="$WORKER_TAGS --tag $CI_REGISTRY_IMAGE/papermake-worker:latest"
+        SERVER_IMAGE_NAMES="$SERVER_IMAGE_NAMES,$CI_REGISTRY_IMAGE/papermake-server:latest"
+        WORKER_IMAGE_NAMES="$WORKER_IMAGE_NAMES,$CI_REGISTRY_IMAGE/papermake-worker:latest"
       fi
     - |
       if [ -n "$CI_COMMIT_TAG" ]; then
         REF_TAG="$(printf '%s' "$CI_COMMIT_TAG" | tr '/:@' '---' | tr -c 'A-Za-z0-9_.-' '-')"
-        SERVER_TAGS="$SERVER_TAGS --tag $CI_REGISTRY_IMAGE/papermake-server:$REF_TAG"
-        WORKER_TAGS="$WORKER_TAGS --tag $CI_REGISTRY_IMAGE/papermake-worker:$REF_TAG"
+        SERVER_IMAGE_NAMES="$SERVER_IMAGE_NAMES,$CI_REGISTRY_IMAGE/papermake-server:$REF_TAG"
+        WORKER_IMAGE_NAMES="$WORKER_IMAGE_NAMES,$CI_REGISTRY_IMAGE/papermake-worker:$REF_TAG"
       fi
-    - mkdir -p .buildx-cache/server .buildx-cache/worker .buildx-cache-new
-    - >
-      docker buildx build
-      --file crates/papermake-server/Dockerfile
-      $SERVER_TAGS
-      --cache-from type=local,src=.buildx-cache/server
-      --cache-to type=local,dest=.buildx-cache-new/server,mode=max
-      --push
-      .
-    - rm -rf .buildx-cache/server
-    - mv .buildx-cache-new/server .buildx-cache/server
-    - >
-      docker buildx build
-      --file crates/papermake-worker/Dockerfile
-      $WORKER_TAGS
-      --cache-from type=local,src=.buildx-cache/worker
-      --cache-to type=local,dest=.buildx-cache-new/worker,mode=max
-      --push
-      .
-    - rm -rf .buildx-cache/worker
-    - mv .buildx-cache-new/worker .buildx-cache/worker
+    - mkdir -p .buildkit-cache/server .buildkit-cache/worker .buildkit-cache-new
+    - |
+      SERVER_IMPORT_CACHE=
+      if [ -f .buildkit-cache/server/index.json ]; then
+        SERVER_IMPORT_CACHE="--import-cache type=local,src=.buildkit-cache/server"
+      fi
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --opt filename=crates/papermake-server/Dockerfile \
+        $SERVER_IMPORT_CACHE \
+        --export-cache type=local,dest=.buildkit-cache-new/server,mode=max \
+        --output "type=image,name=$SERVER_IMAGE_NAMES,push=true"
+    - rm -rf .buildkit-cache/server
+    - mv .buildkit-cache-new/server .buildkit-cache/server
+    - |
+      WORKER_IMPORT_CACHE=
+      if [ -f .buildkit-cache/worker/index.json ]; then
+        WORKER_IMPORT_CACHE="--import-cache type=local,src=.buildkit-cache/worker"
+      fi
+      buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=. \
+        --local dockerfile=. \
+        --opt filename=crates/papermake-worker/Dockerfile \
+        $WORKER_IMPORT_CACHE \
+        --export-cache type=local,dest=.buildkit-cache-new/worker,mode=max \
+        --output "type=image,name=$WORKER_IMAGE_NAMES,push=true"
+    - rm -rf .buildkit-cache/worker
+    - mv .buildkit-cache-new/worker .buildkit-cache/worker
