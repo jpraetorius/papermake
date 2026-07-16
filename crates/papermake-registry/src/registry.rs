@@ -1330,15 +1330,19 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 &render_options_tag(&ctx.options),
             );
 
-            let (render_id, success) = if self
+            // Resume skips an item only if a prior attempt *succeeded*. A
+            // persisted `success=false` meta (a timeout or S3 hiccup) is retried
+            // rather than counted terminally failed: the id is content-addressed,
+            // so re-rendering overwrites the same keys and is harmless.
+            let already_succeeded = self
                 .storage
                 .exists(&ContentAddress::render_meta_key(&det_id))
                 .await
                 .unwrap_or(false)
-            {
-                // Already processed by a prior attempt: reuse its outcome.
-                let ok = self.read_meta_success(&det_id).await.unwrap_or(false);
-                (det_id, ok)
+                && self.read_meta_success(&det_id).await.unwrap_or(false);
+
+            let (render_id, success) = if already_succeeded {
+                (det_id, true)
             } else {
                 match self.render_one(&ctx, &mut world, &input.data).await {
                     Ok((rid, ok)) => (rid, ok),
@@ -3892,6 +3896,75 @@ Hello #data.name"#
         // Item A reused the pre-existing content-addressed render (idempotent).
         let items = registry.list_job_items(&job_id, 0, 10).await.unwrap();
         assert_eq!(items[0].render_id.as_deref(), Some(pre.render_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_run_claimed_shard_retries_persisted_failure() {
+        use crate::batch::{BatchInput, JobStatus};
+
+        let registry = Registry::new(
+            MemoryStorage::new(),
+            crate::render_storage::MemoryRenderStorage::new(),
+        );
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+
+        let inputs = vec![BatchInput {
+            data: serde_json::json!({ "name": "A" }),
+            key: None,
+        }];
+        let job = registry
+            .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
+            .await
+            .unwrap();
+        let job_id = job.job_id.clone();
+
+        // Simulate a prior attempt that persisted a *failure* meta for item A
+        // (e.g. a timeout or S3 hiccup) at its content-addressed id.
+        let manifest_hash = registry.resolve("batch:latest").await.unwrap();
+        let data_bytes = serde_json::to_vec(&serde_json::json!({ "name": "A" })).unwrap();
+        let data_hash = ContentAddress::hash(&data_bytes);
+        let det_id = ContentAddress::content_render_id_with_options(&manifest_hash, &data_hash, "");
+        let mut failed_meta = RenderRecord::failure(
+            "batch:latest".to_string(),
+            "batch".to_string(),
+            "latest".to_string(),
+            manifest_hash.clone(),
+            data_hash.clone(),
+            "transient failure".to_string(),
+            1,
+        );
+        failed_meta.render_id = det_id.clone();
+        registry
+            .storage
+            .put(
+                &ContentAddress::render_meta_key(&det_id),
+                serde_json::to_vec(&failed_meta).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Run the shard. The persisted failure must be retried, not counted as a
+        // terminal failure.
+        let t0 = time::OffsetDateTime::now_utc();
+        let (meta, shard, sinputs) = registry
+            .claim_next_shard("worker", 60, 3, t0)
+            .await
+            .unwrap()
+            .unwrap();
+        registry
+            .run_claimed_shard(meta, shard, sinputs, 60)
+            .await
+            .unwrap();
+
+        let done = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(done.status, JobStatus::Completed);
+        assert_eq!(done.done, 1);
+        assert_eq!(done.failed, 0);
+        // The failure meta was overwritten by a successful re-render.
+        assert!(registry.read_meta_success(&det_id).await.unwrap());
     }
 
     #[tokio::test]
