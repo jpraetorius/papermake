@@ -167,9 +167,12 @@ impl JobView {
         } else if shards.len() == meta.num_shards && shards.iter().all(terminal) {
             if shards.iter().all(|s| s.status == ShardStatus::Failed) {
                 JobStatus::Failed
-            } else if failed > 0 {
-                // Terminal, some rendered — but not everything: don't report a
-                // clean "completed" when items failed.
+            } else if failed > 0 || done < meta.total {
+                // Terminal, some rendered — but not everything. Either items
+                // failed, or a shard was abandoned (poison guard): an abandoned
+                // shard's un-rendered items are counted in neither `done` nor
+                // `failed`, so `done < total` is what catches that case. Don't
+                // report a clean "completed" when outputs are missing.
                 JobStatus::CompletedWithFailures
             } else {
                 JobStatus::Completed
@@ -265,5 +268,24 @@ mod tests {
             ],
         );
         assert_eq!(failed.status, JobStatus::Failed);
+    }
+
+    #[test]
+    fn aggregate_does_not_report_completed_when_a_shard_is_abandoned() {
+        // One shard rendered its items; the other was abandoned by the poison
+        // guard, which marks it Failed with its counts untouched (done=failed=0,
+        // since it never ran). `failed` sums to 0, so the old `failed > 0` check
+        // wrongly fell through to Completed even though half the items are
+        // missing. The job must not read as a clean success.
+        let view = JobView::aggregate(
+            &job(2),
+            &[
+                shard(0, ShardStatus::Done, 5, 0),
+                shard(1, ShardStatus::Failed, 0, 0),
+            ],
+        );
+        assert_eq!(view.status, JobStatus::CompletedWithFailures);
+        assert_eq!(view.done, 5);
+        assert!(view.done < view.total);
     }
 }
