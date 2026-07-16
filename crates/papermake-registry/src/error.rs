@@ -39,6 +39,11 @@ pub enum RegistryError {
     #[error("Render timed out after {seconds}s")]
     RenderTimeout { seconds: u64 },
 
+    /// Every render slot is held by a timed-out render that could not be
+    /// cancelled, so the request was rejected instead of queued.
+    #[error("Render pool exhausted: all {max} slots held by timed-out renders")]
+    RenderPoolExhausted { max: usize },
+
     /// Authorization and permission errors
     #[error("Access denied: {0}")]
     AccessDenied(String),

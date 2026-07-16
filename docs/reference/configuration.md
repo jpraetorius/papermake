@@ -31,7 +31,7 @@ Used by `papermake-server`.
 | `HOST` | no | `0.0.0.0` | HTTP bind address |
 | `RUST_LOG` | no | `papermake_server=info,papermake_registry=info,tower_http=info` | Tracing filter |
 | `MAX_CONCURRENT_RENDERS` | no | `10` | Maximum synchronous Typst renders running per server |
-| `RENDER_TIMEOUT_SECONDS` | no | `300` | Render timeout, including time waiting for a render slot |
+| `RENDER_TIMEOUT_SECONDS` | no | `60` | Render timeout, including time waiting for a render slot. Kept short because a timed-out render keeps running and holds its slot until it finishes on its own |
 | `REQUEST_BODY_LIMIT_BYTES` | no | `52428800` | Maximum accepted HTTP request body size; default is 50 MiB |
 | `SHARD_SIZE` | no | `500` | Number of batch inputs per shard when the server enqueues a batch |
 | `FONTS_DIR` | no | unset; Docker image uses `/fonts` | One or more font directories, separated by the OS path separator |
@@ -94,7 +94,7 @@ HOST=0.0.0.0
 PORT=3000
 RUST_LOG=papermake_server=info,papermake_registry=info
 MAX_CONCURRENT_RENDERS=10
-RENDER_TIMEOUT_SECONDS=300
+RENDER_TIMEOUT_SECONDS=60
 REQUEST_BODY_LIMIT_BYTES=52428800
 SHARD_SIZE=500
 FONTS_DIR=/fonts

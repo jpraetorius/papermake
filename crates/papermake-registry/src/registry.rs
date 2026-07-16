@@ -1,6 +1,7 @@
 use papermake::{Font, RenderOptions};
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use time;
@@ -71,7 +72,12 @@ pub const DEFAULT_RENDER_RETENTION_DAYS: u32 = 30;
 pub const DEFAULT_MAX_CONCURRENT_RENDERS: usize = 10;
 
 /// Default wall-clock timeout for a render, including queue wait.
-pub const DEFAULT_RENDER_TIMEOUT_SECONDS: u64 = 300;
+///
+/// Kept deliberately short: a timed-out render cannot be cancelled (Typst
+/// compilation runs on a blocking thread that holds its render slot until it
+/// finishes on its own), so a long timeout lets a slow or non-terminating
+/// template tie up a slot for that whole window. See [`Registry::track_leaked_render`].
+pub const DEFAULT_RENDER_TIMEOUT_SECONDS: u64 = 60;
 
 /// Default number of items per batch shard (the unit of work a worker claims).
 pub const DEFAULT_SHARD_SIZE: usize = 500;
@@ -84,6 +90,14 @@ pub struct Registry<S: BlobStorage, R: RenderStorage> {
     default_retention_days: u32,
     /// Limits CPU-bound Typst work running on the blocking thread pool.
     render_semaphore: Arc<Semaphore>,
+    /// Number of render slots (`render_semaphore` capacity), retained so the
+    /// leaked-slot circuit breaker can tell when the whole pool is stuck.
+    max_concurrent_renders: usize,
+    /// Count of render tasks that timed out but could not be cancelled and are
+    /// still running while holding their render slot. When this reaches
+    /// [`Self::max_concurrent_renders`] the pool is exhausted and new renders
+    /// are rejected fast instead of queueing until they also time out.
+    leaked_renders: Arc<AtomicUsize>,
     /// Wall-clock timeout for acquiring a render slot and waiting for Typst.
     render_timeout: Duration,
     /// Items per shard when enqueuing a batch (the unit of work workers claim).
@@ -124,6 +138,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage> Registry<S, R> {
             render_storage: Some(Arc::new(render_storage)),
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
+            max_concurrent_renders: DEFAULT_MAX_CONCURRENT_RENDERS,
+            leaked_renders: Arc::new(AtomicUsize::new(0)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
             batch_shard_size: DEFAULT_SHARD_SIZE,
         }
@@ -139,6 +155,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             render_storage: Some(Arc::new(render_storage)),
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
+            max_concurrent_renders: DEFAULT_MAX_CONCURRENT_RENDERS,
+            leaked_renders: Arc::new(AtomicUsize::new(0)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
             batch_shard_size: DEFAULT_SHARD_SIZE,
         }
@@ -151,6 +169,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             render_storage: None,
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
+            max_concurrent_renders: DEFAULT_MAX_CONCURRENT_RENDERS,
+            leaked_renders: Arc::new(AtomicUsize::new(0)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
             batch_shard_size: DEFAULT_SHARD_SIZE,
         }
@@ -176,7 +196,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         max_concurrent_renders: usize,
         render_timeout: Duration,
     ) -> Self {
-        self.render_semaphore = Arc::new(Semaphore::new(max_concurrent_renders.max(1)));
+        self.max_concurrent_renders = max_concurrent_renders.max(1);
+        self.render_semaphore = Arc::new(Semaphore::new(self.max_concurrent_renders));
         self.render_timeout = if render_timeout.is_zero() {
             Duration::from_secs(1)
         } else {
@@ -202,6 +223,8 @@ impl<S: BlobStorage + 'static> Registry<S, crate::render_storage::MemoryRenderSt
             render_storage: None,
             default_retention_days: DEFAULT_RENDER_RETENTION_DAYS,
             render_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_RENDERS)),
+            max_concurrent_renders: DEFAULT_MAX_CONCURRENT_RENDERS,
+            leaked_renders: Arc::new(AtomicUsize::new(0)),
             render_timeout: Duration::from_secs(DEFAULT_RENDER_TIMEOUT_SECONDS),
             batch_shard_size: DEFAULT_SHARD_SIZE,
         }
@@ -755,6 +778,47 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         Ok((Arc::new(file_system), fonts))
     }
 
+    /// Reject a render immediately if every slot is currently held by a
+    /// timed-out render that could not be cancelled.
+    ///
+    /// A timed-out Typst compile keeps running on the blocking pool and keeps
+    /// its semaphore permit until it finishes on its own (see
+    /// [`Self::track_leaked_render`]). Without this guard, once enough
+    /// non-terminating templates pile up every later render would block on the
+    /// semaphore and then time out too. Failing fast turns a slow, repeated
+    /// timeout into an immediate, observable "capacity exhausted" signal.
+    fn check_render_capacity(&self) -> Result<(), RegistryError> {
+        let leaked = self.leaked_renders.load(Ordering::Relaxed);
+        if leaked >= self.max_concurrent_renders {
+            tracing::error!(
+                leaked,
+                max_concurrent_renders = self.max_concurrent_renders,
+                "render pool exhausted by timed-out renders; rejecting new render",
+            );
+            return Err(RegistryError::RenderPoolExhausted {
+                max: self.max_concurrent_renders,
+            });
+        }
+        Ok(())
+    }
+
+    /// Account for a render task that timed out but is still running.
+    ///
+    /// `spawn_blocking` tasks cannot be cancelled, so a timed-out compile keeps
+    /// running and holds its render slot (the permit is moved into the closure)
+    /// until it returns on its own. We count it as leaked and watch the handle
+    /// so the count drops back once the task actually finishes — a slow but
+    /// terminating render self-heals, while a genuinely non-terminating one
+    /// stays counted and eventually trips [`Self::check_render_capacity`].
+    fn track_leaked_render<T: Send + 'static>(&self, handle: tokio::task::JoinHandle<T>) {
+        let leaked = self.leaked_renders.clone();
+        leaked.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(async move {
+            let _ = handle.await;
+            leaked.fetch_sub(1, Ordering::Relaxed);
+        });
+    }
+
     /// Run the CPU-bound Typst compile/PDF generation on Tokio's blocking pool.
     ///
     /// S3/template hydration is already complete before this is called, so the
@@ -771,6 +835,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let started = std::time::Instant::now();
         let timeout = self.render_timeout;
         let timeout_seconds = timeout.as_secs().max(1);
+
+        self.check_render_capacity()?;
 
         tracing::debug!(
             reference = %reference,
@@ -802,7 +868,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             "typst render acquired blocking permit",
         );
 
-        let task = tokio::task::spawn_blocking(move || {
+        let mut task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let task_started = std::time::Instant::now();
             tracing::debug!(
@@ -841,26 +907,28 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             result
         });
 
-        tokio::time::timeout(remaining_timeout, task)
-            .await
-            .map_err(|_| {
+        match tokio::time::timeout(remaining_timeout, &mut task).await {
+            Ok(join_result) => join_result
+                .map_err(|e| {
+                    RegistryError::Template(crate::error::TemplateError::invalid(format!(
+                        "Render task failed: {}",
+                        e
+                    )))
+                })?
+                .map_err(RegistryError::Compilation),
+            Err(_) => {
                 tracing::error!(
                     reference = %reference,
                     timeout_seconds,
                     elapsed_ms = started.elapsed().as_millis() as u64,
-                    "typst blocking render timed out",
+                    "typst blocking render timed out; task detached and still holds a render slot",
                 );
-                RegistryError::RenderTimeout {
+                self.track_leaked_render(task);
+                Err(RegistryError::RenderTimeout {
                     seconds: timeout_seconds,
-                }
-            })?
-            .map_err(|e| {
-                RegistryError::Template(crate::error::TemplateError::invalid(format!(
-                    "Render task failed: {}",
-                    e
-                )))
-            })?
-            .map_err(RegistryError::Compilation)
+                })
+            }
+        }
     }
 
     /// Run cached batch rendering on the blocking pool, returning the warmed
@@ -880,6 +948,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let started = std::time::Instant::now();
         let timeout = self.render_timeout;
         let timeout_seconds = timeout.as_secs().max(1);
+
+        self.check_render_capacity()?;
 
         tracing::debug!(
             reference = %ctx.reference,
@@ -914,7 +984,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             "cached typst render acquired blocking permit",
         );
 
-        let task = tokio::task::spawn_blocking(move || {
+        let mut task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let task_started = std::time::Instant::now();
             tracing::debug!(
@@ -953,25 +1023,26 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             (world, result)
         });
 
-        tokio::time::timeout(remaining_timeout, task)
-            .await
-            .map_err(|_| {
-                tracing::error!(
-                    reference = %ctx.reference,
-                    timeout_seconds,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    "cached typst blocking render timed out",
-                );
-                RegistryError::RenderTimeout {
-                    seconds: timeout_seconds,
-                }
-            })?
-            .map_err(|e| {
+        match tokio::time::timeout(remaining_timeout, &mut task).await {
+            Ok(join_result) => join_result.map_err(|e| {
                 RegistryError::Template(crate::error::TemplateError::invalid(format!(
                     "Render task failed: {}",
                     e
                 )))
-            })
+            }),
+            Err(_) => {
+                tracing::error!(
+                    reference = %ctx.reference,
+                    timeout_seconds,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "cached typst blocking render timed out; task detached and still holds a render slot",
+                );
+                self.track_leaked_render(task);
+                Err(RegistryError::RenderTimeout {
+                    seconds: timeout_seconds,
+                })
+            }
+        }
     }
 
     /// Render one template against many inputs, reusing a single warm Typst
@@ -2396,6 +2467,30 @@ Hello #data.name"#
         .with_render_limits(0, std::time::Duration::ZERO);
 
         assert!(registry.render_storage().is_some());
+    }
+
+    #[test]
+    fn render_capacity_check_trips_when_all_slots_are_leaked() {
+        let registry = Registry::new_storage_only(MemoryStorage::new())
+            .with_render_limits(2, std::time::Duration::from_secs(1));
+
+        // No leaked renders: capacity is available.
+        assert!(registry.check_render_capacity().is_ok());
+
+        // One of two slots leaked: still room for another render.
+        registry.leaked_renders.fetch_add(1, Ordering::Relaxed);
+        assert!(registry.check_render_capacity().is_ok());
+
+        // Both slots leaked: reject fast instead of queueing until timeout.
+        registry.leaked_renders.fetch_add(1, Ordering::Relaxed);
+        assert!(matches!(
+            registry.check_render_capacity(),
+            Err(RegistryError::RenderPoolExhausted { max: 2 })
+        ));
+
+        // A leaked render finishing frees capacity again.
+        registry.leaked_renders.fetch_sub(1, Ordering::Relaxed);
+        assert!(registry.check_render_capacity().is_ok());
     }
 
     #[tokio::test]

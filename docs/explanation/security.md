@@ -62,6 +62,16 @@ For untrusted template authors, run Papermake in containers or another workload
 isolation boundary and apply strict CPU, memory, upload, and rate limits outside
 the process.
 
+The render timeout is a wall-clock limit on *waiting* for a render, not a
+cancellation: Typst compilation runs on a blocking thread that keeps running
+until it returns on its own, so a timed-out render keeps its render slot until
+it finishes. Papermake tracks these leaked slots and, once every slot is held by
+a timed-out render, rejects new renders fast with `503` instead of letting them
+queue and time out too. This bounds the blast radius but does not stop a single
+non-terminating or memory-hungry template from consuming a slot or the process's
+memory. Keep `RENDER_TIMEOUT_SECONDS` short and set container memory limits so a
+runaway template is OOM-killed and restarted rather than thrashing the host.
+
 ## S3 credentials and data
 
 Papermake stores durable state in one S3-compatible bucket: templates, manifests,
@@ -111,7 +121,7 @@ Papermake has some built-in limits:
 |---|---|
 | HTTP request body size | `REQUEST_BODY_LIMIT_BYTES`, default 50 MiB |
 | Concurrent synchronous renders | `MAX_CONCURRENT_RENDERS` per server |
-| Render timeout | `RENDER_TIMEOUT_SECONDS`, including queue wait |
+| Render timeout | `RENDER_TIMEOUT_SECONDS` (default 60s), including queue wait |
 | S3 operation timeout and retries | `S3_OP_TIMEOUT_SECONDS`, `S3_MAX_ATTEMPTS` |
 | Batch parallelism | Number of render workers and `SHARD_SIZE` |
 | Output retention | `RENDER_RETENTION_DAYS`, template `retain_days`, or render override |

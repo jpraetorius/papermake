@@ -63,6 +63,7 @@ pub struct RenderResponse {
         (status = 408, description = "Render timed out"),
         (status = 422, description = "Template failed to compile"),
         (status = 500, description = "Server or storage error"),
+        (status = 503, description = "Render capacity temporarily exhausted"),
     ),
 )]
 #[axum::debug_handler]
@@ -113,6 +114,9 @@ pub async fn render_template(
             );
             return Err(match e {
                 RegistryError::RenderTimeout { .. } => ApiError::Timeout,
+                pool_exhausted @ RegistryError::RenderPoolExhausted { .. } => {
+                    ApiError::Registry(pool_exhausted)
+                }
                 RegistryError::Template(_) => ApiError::template_not_found(&reference),
                 RegistryError::RenderStorage(RenderStorageError::NotFound(_)) => {
                     ApiError::render_not_found(&reference)

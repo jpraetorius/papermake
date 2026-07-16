@@ -72,6 +72,10 @@ impl IntoResponse for ApiError {
                 RegistryError::RenderTimeout { .. } => {
                     (StatusCode::REQUEST_TIMEOUT, self.to_string())
                 }
+                RegistryError::RenderPoolExhausted { .. } => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Render capacity temporarily exhausted".to_string(),
+                ),
                 RegistryError::Template(_) => (StatusCode::NOT_FOUND, self.to_string()),
                 RegistryError::RenderStorage(RenderStorageError::NotFound(_)) => {
                     (StatusCode::NOT_FOUND, self.to_string())
@@ -208,6 +212,23 @@ mod tests {
             Some(u64::from(StatusCode::INTERNAL_SERVER_ERROR.as_u16()))
         );
         assert_eq!(body["error"], "Internal server error");
+    }
+
+    #[tokio::test]
+    async fn render_pool_exhaustion_is_reported_as_service_unavailable() {
+        let (status, body) =
+            response_json(ApiError::Registry(RegistryError::RenderPoolExhausted {
+                max: 10,
+            }))
+            .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body["status"].as_u64(),
+            Some(u64::from(StatusCode::SERVICE_UNAVAILABLE.as_u16()))
+        );
+        // Internal slot count is not leaked to the client.
+        assert_eq!(body["error"], "Render capacity temporarily exhausted");
     }
 
     #[tokio::test]

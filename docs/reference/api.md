@@ -145,6 +145,7 @@ Common errors:
 | `404` | Template reference not found |
 | `408` | Render timed out |
 | `422` | Template compiled or exported unsuccessfully |
+| `503` | Render capacity temporarily exhausted by timed-out renders; retry later |
 
 ### `POST /api/render/{reference}/batch`
 

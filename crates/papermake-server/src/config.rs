@@ -73,7 +73,7 @@ impl ServerConfig {
                     ApiError::Config("Invalid MAX_CONCURRENT_RENDERS value".to_string())
                 })?,
             render_timeout_seconds: env("RENDER_TIMEOUT_SECONDS")
-                .unwrap_or_else(|_| "300".to_string()) // 5 minutes default
+                .unwrap_or_else(|_| "60".to_string()) // short: timed-out renders can't be cancelled
                 .parse()
                 .map_err(|_| {
                     ApiError::Config("Invalid RENDER_TIMEOUT_SECONDS value".to_string())
@@ -108,7 +108,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 3000,
             max_concurrent_renders: 10,
-            render_timeout_seconds: 300,
+            render_timeout_seconds: 60,
             request_body_limit_bytes: DEFAULT_REQUEST_BODY_LIMIT_BYTES,
             instance_id: None,
             flush_interval_seconds: 30,
