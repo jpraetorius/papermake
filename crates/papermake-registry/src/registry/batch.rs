@@ -274,8 +274,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         lease_ttl_secs: u64,
         should_stop: impl Fn() -> bool,
     ) -> Result<(), RegistryError> {
-        // Heartbeat/persist every N items to bound writes and keep the lease fresh.
-        const FLUSH_EVERY: usize = 20;
+        // Renew the lease on a time schedule (roughly half the TTL) rather than
+        // every N items: a shard of slow items would otherwise let its lease
+        // expire and get reclaimed, while a shard of fast items would rewrite the
+        // descriptor needlessly.
+        let heartbeat_interval = std::time::Duration::from_secs((lease_ttl_secs / 2).max(1));
+        let mut last_heartbeat = std::time::Instant::now();
 
         let options = RenderOptions {
             pdf_standards: meta.pdf_standards.clone(),
@@ -386,13 +390,14 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 },
             });
 
-            if (done + failed).is_multiple_of(FLUSH_EVERY) {
+            if last_heartbeat.elapsed() >= heartbeat_interval {
                 let now = time::OffsetDateTime::now_utc();
                 shard.done = done;
                 shard.failed = failed;
                 shard.lease_expires_at = Some(now + time::Duration::seconds(lease_ttl_secs as i64));
                 shard.updated_at = now;
                 let _ = self.put_shard(&shard).await;
+                last_heartbeat = std::time::Instant::now();
             }
         }
 
