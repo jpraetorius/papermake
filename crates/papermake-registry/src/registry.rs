@@ -45,8 +45,26 @@ struct BatchCtx {
     retain_days: u32,
     entrypoint_content: String,
     file_system: Arc<dyn papermake::RenderFileSystem>,
+    /// Template-bundled font faces, kept so a warm world can be rebuilt after a
+    /// render error without re-hydrating the bundle. `Font` is `Arc`-backed, so
+    /// cloning is cheap.
+    fonts: Vec<Font>,
     /// PDF export options applied to every item in the batch.
     options: RenderOptions,
+}
+
+impl BatchCtx {
+    /// Build a fresh warm Typst world for this batch, registering the template's
+    /// bundled fonts. Used for the first item and to rebuild the world after a
+    /// render error consumes it.
+    fn build_world(&self) -> papermake::PapermakeWorld {
+        papermake::PapermakeWorld::with_file_system_and_fonts(
+            self.entrypoint_content.clone(),
+            "{}".to_string(),
+            self.file_system.clone(),
+            self.fonts.clone(),
+        )
+    }
 }
 
 /// Stable, order-independent tag describing a render's PDF export options, used
@@ -1078,9 +1096,10 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         inputs: &[serde_json::Value],
         retain_override: Option<u32>,
     ) -> Result<Vec<String>, RegistryError> {
-        let (ctx, mut world) = self
+        let ctx = self
             .prepare_batch(reference, retain_override, RenderOptions::default())
             .await?;
+        let mut world = Some(ctx.build_world());
         let mut render_ids = Vec::with_capacity(inputs.len());
         for data in inputs {
             let (render_id, _success) = self.render_one(&ctx, &mut world, data).await?;
@@ -1297,11 +1316,11 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let options = RenderOptions {
             pdf_standards: meta.pdf_standards.clone(),
         };
-        let (ctx, mut world) = match self
+        let ctx = match self
             .prepare_batch(&meta.reference, meta.retain_days, options)
             .await
         {
-            Ok(prepared) => prepared,
+            Ok(ctx) => ctx,
             Err(e) => {
                 // A prepare error is often transient (e.g. an S3 hiccup loading
                 // the manifest or entrypoint). Marking the shard Failed here
@@ -1319,6 +1338,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 return Err(e);
             }
         };
+        let mut world = Some(ctx.build_world());
 
         let mut items: Vec<BatchItem> = Vec::with_capacity(inputs.len());
         let mut done = 0usize;
@@ -1505,7 +1525,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         reference: &str,
         retain_override: Option<u32>,
         options: RenderOptions,
-    ) -> Result<(BatchCtx, papermake::PapermakeWorld), RegistryError> {
+    ) -> Result<BatchCtx, RegistryError> {
         let parsed_ref = Reference::parse(reference)?;
         let template_name = parsed_ref.name.clone();
         let template_tag = parsed_ref.tag.unwrap_or_else(|| "latest".to_string());
@@ -1550,31 +1570,23 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         })?;
 
         let (file_system, fonts) = self.hydrate_file_system(reference, &manifest).await?;
-        let world = papermake::PapermakeWorld::with_file_system_and_fonts(
-            entrypoint_content.clone(),
-            "{}".to_string(),
-            file_system.clone(),
-            fonts,
-        );
         let retain_days = crate::render_storage::retention::effective_retain_days(
             retain_override,
             per_template_retain,
             self.default_retention_days,
         );
 
-        Ok((
-            BatchCtx {
-                reference: reference.to_string(),
-                template_name,
-                template_tag,
-                manifest_hash,
-                retain_days,
-                entrypoint_content,
-                file_system,
-                options,
-            },
-            world,
-        ))
+        Ok(BatchCtx {
+            reference: reference.to_string(),
+            template_name,
+            template_tag,
+            manifest_hash,
+            retain_days,
+            entrypoint_content,
+            file_system,
+            fonts,
+            options,
+        })
     }
 
     /// Render a single input against the warm world and persist its artifacts +
@@ -1582,7 +1594,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     async fn render_one(
         &self,
         ctx: &BatchCtx,
-        world: &mut papermake::PapermakeWorld,
+        world: &mut Option<papermake::PapermakeWorld>,
         data: &serde_json::Value,
     ) -> Result<(String, bool), RegistryError> {
         let data_bytes = serde_json::to_vec(data)?;
@@ -1601,21 +1613,22 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
 
         let start_time = std::time::Instant::now();
-        let placeholder_world = papermake::PapermakeWorld::with_file_system(
-            ctx.entrypoint_content.clone(),
-            "{}".to_string(),
-            ctx.file_system.clone(),
-        );
-        let owned_world = std::mem::replace(world, placeholder_world);
+        // Take the warm world to hand ownership to the blocking task. On success
+        // it is returned and put back; on error it was moved into the failed (or
+        // timed-out, un-cancellable) task and is gone, so rebuild a fresh
+        // fonts-aware world. Rebuilding matters: a world lacking the template's
+        // bundled fonts would silently render later items with fallback fonts.
+        let owned_world = world.take().unwrap_or_else(|| ctx.build_world());
         let outcome: Result<papermake::RenderResult, String> = match self
             .render_typst_cached_blocking(ctx, owned_world, data.clone())
             .await
         {
             Ok((updated_world, outcome)) => {
-                *world = updated_world;
+                *world = Some(updated_world);
                 outcome.map_err(|e| e.to_string())
             }
             Err(e) => {
+                *world = Some(ctx.build_world());
                 tracing::error!(
                     reference = %ctx.reference,
                     render_id = %render_id,
@@ -4094,6 +4107,55 @@ Hello #data.name"#
         let done = registry.get_batch_job(&job_id).await.unwrap();
         assert_eq!(done.status, JobStatus::Completed);
         assert_eq!(done.done, 1);
+    }
+
+    #[tokio::test]
+    async fn test_render_error_rebuilds_world_and_batch_continues() {
+        use crate::batch::BatchInput;
+
+        // A near-zero render timeout forces every item down the render-error
+        // path, which consumes the warm world. render_one must rebuild the world
+        // (as Some, via the fonts-aware constructor) each time, so the batch
+        // keeps running instead of panicking on a taken/None world or silently
+        // continuing with a fonts-less placeholder.
+        let registry = Registry::new(
+            MemoryStorage::new(),
+            crate::render_storage::MemoryRenderStorage::new(),
+        )
+        .with_render_limits(2, std::time::Duration::from_nanos(1));
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+
+        let inputs: Vec<BatchInput> = ["A", "B", "C"]
+            .iter()
+            .map(|n| BatchInput {
+                data: serde_json::json!({ "name": n }),
+                key: None,
+            })
+            .collect();
+        let job = registry
+            .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
+            .await
+            .unwrap();
+        let job_id = job.job_id.clone();
+
+        let t0 = time::OffsetDateTime::now_utc();
+        let (meta, shard, sinputs) = registry
+            .claim_next_shard("w", 60, 3, t0)
+            .await
+            .unwrap()
+            .unwrap();
+        // Completes without panicking even though every item errors.
+        registry
+            .run_claimed_shard(meta, shard, sinputs, 60)
+            .await
+            .unwrap();
+
+        let view = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(view.done, 0);
+        assert_eq!(view.failed, 3);
     }
 
     #[tokio::test]
