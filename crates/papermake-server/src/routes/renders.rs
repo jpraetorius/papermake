@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+    http::header::{CONTENT_DISPOSITION, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS},
     response::Response,
     routing::get,
 };
@@ -122,6 +122,9 @@ pub async fn get_render_pdf(
     // panicking.
     Response::builder()
         .header(CONTENT_TYPE, "application/pdf")
+        // Serve the caller-influenced bytes with their declared type only: never
+        // let a browser sniff them as HTML and execute script in this origin.
+        .header(X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(
             CONTENT_DISPOSITION,
             format!("inline; filename=\"render-{render_id}.pdf\""),
@@ -196,6 +199,11 @@ mod tests {
         assert_eq!(
             pdf.headers().get(header::CONTENT_TYPE).unwrap(),
             "application/pdf"
+        );
+        // The inline PDF must not be content-sniffed as HTML in this origin.
+        assert_eq!(
+            pdf.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
         );
         assert!(
             pdf.headers()

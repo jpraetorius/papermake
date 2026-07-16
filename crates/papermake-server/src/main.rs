@@ -434,7 +434,26 @@ fn create_router(state: AppState) -> Router {
                 )
                 .layer(DefaultBodyLimit::max(state.config.request_body_limit_bytes)),
         )
+        // Set `nosniff` on every response, including `/api`. The SSR UI router
+        // adds its own richer header set (CSP, framing); this outermost layer
+        // makes sure API responses — notably the `inline` PDF download, which
+        // serves caller-influenced bytes same-origin — cannot be content-sniffed
+        // and executed as HTML in the application's own origin.
+        .layer(axum::middleware::from_fn(set_nosniff))
         .with_state(state)
+}
+
+/// Add `X-Content-Type-Options: nosniff` to a response.
+async fn set_nosniff(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 /// API routes
@@ -507,5 +526,39 @@ Hello #data.name"#
 
     pub(crate) async fn response_json(response: Response<Body>) -> Value {
         serde_json::from_slice(&response_bytes(response).await).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn nosniff_is_set_on_responses_outside_the_ui_router() {
+        // `/health` is not served by the SSR UI router (which sets its own
+        // headers), so a `nosniff` here proves the global layer covers every
+        // response — including `/api`.
+        let app = create_router(test_support::state(test_support::registry()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .unwrap(),
+            "nosniff",
+        );
     }
 }
