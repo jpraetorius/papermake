@@ -227,7 +227,7 @@ Lists recent render records from the analytics aggregate.
 
 | Query | Default | Meaning |
 |---|---:|---|
-| `limit` | `50` | Page size |
+| `limit` | `50` | Page size, clamped to a maximum of `200` |
 | `offset` | `0` | Number of items to skip |
 
 Each record includes `render_id`, timestamp, template reference, manifest hash,
