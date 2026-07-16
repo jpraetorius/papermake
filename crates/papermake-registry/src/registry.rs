@@ -1303,10 +1303,15 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         {
             Ok(prepared) => prepared,
             Err(e) => {
-                // Template couldn't be loaded — the whole shard fails.
-                shard.done = 0;
-                shard.failed = shard.len;
-                shard.status = ShardStatus::Failed;
+                // A prepare error is often transient (e.g. an S3 hiccup loading
+                // the manifest or entrypoint). Marking the shard Failed here
+                // would bypass the max_attempts poison guard in
+                // claim_next_shard and terminally fail the whole shard on the
+                // first blip. Release it back to claimable instead and let
+                // repeated failures trip that guard. `attempts` (bumped at claim
+                // time) is preserved, so a genuinely broken template still gets
+                // poisoned after max_attempts.
+                shard.status = ShardStatus::Pending;
                 shard.owner = None;
                 shard.lease_expires_at = None;
                 shard.updated_at = time::OffsetDateTime::now_utc();
@@ -2447,6 +2452,66 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 mod tests {
     use super::*;
     use crate::{S3Storage, bundle::TemplateMetadata, storage::blob_storage::MemoryStorage};
+
+    /// Blob storage that can be toggled to fail `get` for `manifests/…` keys,
+    /// simulating a transient storage error while loading a template. All other
+    /// operations delegate to an inner in-memory store.
+    struct FlakyManifestStorage {
+        inner: MemoryStorage,
+        fail_manifest_get: std::sync::atomic::AtomicBool,
+    }
+
+    impl FlakyManifestStorage {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStorage::new(),
+                fail_manifest_get: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+        fn set_fail(&self, fail: bool) {
+            self.fail_manifest_get.store(fail, Ordering::Relaxed);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobStorage for FlakyManifestStorage {
+        async fn put(
+            &self,
+            key: &str,
+            data: Vec<u8>,
+        ) -> Result<(), crate::storage::blob_storage::StorageError> {
+            self.inner.put(key, data).await
+        }
+        async fn get(
+            &self,
+            key: &str,
+        ) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
+            if key.starts_with("manifests/") && self.fail_manifest_get.load(Ordering::Relaxed) {
+                return Err(crate::storage::blob_storage::StorageError::Backend(
+                    "injected manifest get failure".to_string(),
+                ));
+            }
+            self.inner.get(key).await
+        }
+        async fn exists(
+            &self,
+            key: &str,
+        ) -> Result<bool, crate::storage::blob_storage::StorageError> {
+            self.inner.exists(key).await
+        }
+        async fn delete(
+            &self,
+            key: &str,
+        ) -> Result<(), crate::storage::blob_storage::StorageError> {
+            self.inner.delete(key).await
+        }
+        async fn list_keys(
+            &self,
+            prefix: &str,
+        ) -> Result<Vec<String>, crate::storage::blob_storage::StorageError> {
+            self.inner.list_keys(prefix).await
+        }
+    }
 
     fn create_test_bundle() -> TemplateBundle {
         let metadata = TemplateMetadata::new("Test Template", "test@example.com");
@@ -3965,6 +4030,70 @@ Hello #data.name"#
         assert_eq!(done.failed, 0);
         // The failure meta was overwritten by a successful re-render.
         assert!(registry.read_meta_success(&det_id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_transient_prepare_error_releases_shard_for_retry() {
+        use crate::batch::{BatchInput, JobStatus, ShardStatus};
+
+        let registry = Registry::new(
+            FlakyManifestStorage::new(),
+            crate::render_storage::MemoryRenderStorage::new(),
+        );
+        registry
+            .publish(create_test_bundle(), "batch", "latest")
+            .await
+            .unwrap();
+
+        let inputs = vec![BatchInput {
+            data: serde_json::json!({ "name": "A" }),
+            key: None,
+        }];
+        let job = registry
+            .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
+            .await
+            .unwrap();
+        let job_id = job.job_id.clone();
+
+        // First attempt: prepare_batch fails on a (transient) manifest get error.
+        registry.storage.set_fail(true);
+        let t0 = time::OffsetDateTime::now_utc();
+        let (meta, shard, sinputs) = registry
+            .claim_next_shard("w1", 60, 3, t0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(shard.attempts, 1);
+        assert!(
+            registry
+                .run_claimed_shard(meta, shard, sinputs, 60)
+                .await
+                .is_err()
+        );
+
+        // The shard is released back to claimable, not terminally Failed, and
+        // its attempt count is preserved for the poison guard.
+        let shards = registry.list_job_shards(&job_id).await.unwrap();
+        assert_eq!(shards[0].status, ShardStatus::Pending);
+        assert_eq!(shards[0].attempts, 1);
+        assert!(shards[0].owner.is_none());
+
+        // Storage recovers; a later worker reclaims and completes the shard.
+        registry.storage.set_fail(false);
+        let (meta2, shard2, sinputs2) = registry
+            .claim_next_shard("w2", 60, 3, t0)
+            .await
+            .unwrap()
+            .expect("released shard is reclaimable");
+        assert_eq!(shard2.attempts, 2);
+        registry
+            .run_claimed_shard(meta2, shard2, sinputs2, 60)
+            .await
+            .unwrap();
+
+        let done = registry.get_batch_job(&job_id).await.unwrap();
+        assert_eq!(done.status, JobStatus::Completed);
+        assert_eq!(done.done, 1);
     }
 
     #[tokio::test]
