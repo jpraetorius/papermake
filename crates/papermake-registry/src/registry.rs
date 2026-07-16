@@ -79,6 +79,16 @@ impl BatchCtx {
     }
 }
 
+/// A resolved template ready to render: its manifest hash + parsed manifest,
+/// the entrypoint source, and the hydrated file system and bundled fonts.
+struct LoadedTemplate {
+    manifest_hash: String,
+    manifest: Manifest,
+    entrypoint_content: String,
+    file_system: Arc<dyn papermake::RenderFileSystem>,
+    fonts: Vec<Font>,
+}
+
 /// Stable, order-independent tag describing a render's PDF export options, used
 /// to discriminate content-addressed render ids. Empty for plain PDF 1.7 (so
 /// plain renders keep their historical ids); non-empty (e.g. `"a-2b"`) yields a
@@ -592,6 +602,63 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         Ok(bytes.as_ref().clone())
     }
 
+    /// Load and parse a manifest by hash (cached, immutable).
+    async fn load_manifest(&self, manifest_hash: &str) -> Result<Manifest, RegistryError> {
+        let manifest_key = ContentAddress::manifest_key(manifest_hash);
+        let bytes = self.get_immutable(&manifest_key).await.map_err(|e| {
+            RegistryError::Storage(StorageError::backend(format!(
+                "Failed to load manifest {}: {}",
+                manifest_hash, e
+            )))
+        })?;
+        Manifest::from_bytes(&bytes).map_err(|e| {
+            RegistryError::ContentAddressing(crate::error::ContentAddressingError::manifest_error(
+                e.to_string(),
+            ))
+        })
+    }
+
+    /// Load a manifest's entrypoint (`main.typ`) source as UTF-8 (cached blob).
+    async fn load_entrypoint(&self, manifest: &Manifest) -> Result<String, RegistryError> {
+        let entrypoint_hash = manifest.entrypoint_hash().ok_or_else(|| {
+            RegistryError::Template(crate::error::TemplateError::invalid(
+                "Manifest missing entrypoint hash",
+            ))
+        })?;
+        let bytes = self
+            .get_immutable(&ContentAddress::blob_key(entrypoint_hash))
+            .await
+            .map_err(|e| {
+                RegistryError::Storage(StorageError::backend(format!(
+                    "Failed to load entrypoint file: {}",
+                    e
+                )))
+            })?;
+        String::from_utf8(bytes).map_err(|e| {
+            RegistryError::Template(crate::error::TemplateError::invalid(format!(
+                "Entrypoint file is not valid UTF-8: {}",
+                e
+            )))
+        })
+    }
+
+    /// Resolve a reference and load everything needed to render it: manifest,
+    /// entrypoint source, and the hydrated file system + bundled fonts. This is
+    /// the single template-load path shared by synchronous and batch renders.
+    async fn load_template(&self, reference: &str) -> Result<LoadedTemplate, RegistryError> {
+        let manifest_hash = self.resolve(reference).await?;
+        let manifest = self.load_manifest(&manifest_hash).await?;
+        let entrypoint_content = self.load_entrypoint(&manifest).await?;
+        let (file_system, fonts) = self.hydrate_file_system(reference, &manifest).await?;
+        Ok(LoadedTemplate {
+            manifest_hash,
+            manifest,
+            entrypoint_content,
+            file_system,
+            fonts,
+        })
+    }
+
     /// Render a template to PDF using JSON data
     ///
     /// This method implements the end-to-end template rendering workflow:
@@ -653,81 +720,20 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
             "registry render started",
         );
 
-        // Step 1: Resolve the template reference to get manifest hash
-        let manifest_hash = self.resolve(reference).await?;
+        // Resolve + load manifest, entrypoint, and hydrated file system/fonts.
+        let LoadedTemplate {
+            entrypoint_content,
+            file_system,
+            fonts,
+            ..
+        } = self.load_template(reference).await?;
         tracing::debug!(
             reference = %reference,
-            manifest_hash = %manifest_hash,
             elapsed_ms = started.elapsed().as_millis() as u64,
-            "registry render resolved reference",
+            "registry render loaded template",
         );
 
-        // Step 2: Load the manifest from storage
-        let manifest_key = ContentAddress::manifest_key(&manifest_hash);
-        tracing::debug!(
-            reference = %reference,
-            manifest_key = %manifest_key,
-            "registry render loading manifest",
-        );
-        let manifest_bytes = self.get_immutable(&manifest_key).await.map_err(|e| {
-            RegistryError::Storage(StorageError::backend(format!(
-                "Failed to load manifest {}: {}",
-                manifest_hash, e
-            )))
-        })?;
-
-        let manifest = Manifest::from_bytes(&manifest_bytes).map_err(|e| {
-            RegistryError::ContentAddressing(crate::error::ContentAddressingError::manifest_error(
-                e.to_string(),
-            ))
-        })?;
-        tracing::debug!(
-            reference = %reference,
-            files = manifest.files.len(),
-            entrypoint = %manifest.entrypoint,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "registry render loaded manifest",
-        );
-
-        // Step 3: Get the entrypoint content
-        let entrypoint_hash = manifest.entrypoint_hash().ok_or_else(|| {
-            RegistryError::Template(crate::error::TemplateError::invalid(
-                "Manifest missing entrypoint hash",
-            ))
-        })?;
-
-        let entrypoint_key = ContentAddress::blob_key(entrypoint_hash);
-        tracing::debug!(
-            reference = %reference,
-            entrypoint_key = %entrypoint_key,
-            "registry render loading entrypoint",
-        );
-        let entrypoint_bytes = self.get_immutable(&entrypoint_key).await.map_err(|e| {
-            RegistryError::Storage(StorageError::backend(format!(
-                "Failed to load entrypoint file: {}",
-                e
-            )))
-        })?;
-
-        let entrypoint_content = String::from_utf8(entrypoint_bytes).map_err(|e| {
-            RegistryError::Template(crate::error::TemplateError::invalid(format!(
-                "Entrypoint file is not valid UTF-8: {}",
-                e
-            )))
-        })?;
-        tracing::debug!(
-            reference = %reference,
-            entrypoint_bytes = entrypoint_content.len(),
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "registry render loaded entrypoint",
-        );
-
-        // Step 4: Hydrate template files/assets before entering Typst. Typst's
-        // file callbacks are synchronous, so doing async blob reads from inside
-        // them can block the Tokio runtime under load.
-        let (file_system, fonts) = self.hydrate_file_system(reference, &manifest).await?;
-
-        // Step 5: Render the template using papermake
+        // Render the template using papermake
         tracing::debug!(
             reference = %reference,
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1675,48 +1681,17 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         let template_name = parsed_ref.name.clone();
         let template_tag = parsed_ref.tag.unwrap_or_else(|| "latest".to_string());
 
-        let manifest_hash = self.resolve(reference).await?;
-        let manifest_key = ContentAddress::manifest_key(&manifest_hash);
-        let manifest_bytes = self.get_immutable(&manifest_key).await.map_err(|e| {
-            RegistryError::Storage(StorageError::backend(format!(
-                "Failed to load manifest {}: {}",
-                manifest_hash, e
-            )))
-        })?;
-        let manifest = Manifest::from_bytes(&manifest_bytes).map_err(|e| {
-            RegistryError::ContentAddressing(crate::error::ContentAddressingError::manifest_error(
-                e.to_string(),
-            ))
-        })?;
-        let per_template_retain = manifest.metadata.retain_days;
-        let entrypoint_hash = manifest
-            .entrypoint_hash()
-            .ok_or_else(|| {
-                RegistryError::Template(crate::error::TemplateError::invalid(
-                    "Manifest missing entrypoint hash",
-                ))
-            })?
-            .clone();
-        let entrypoint_bytes = self
-            .get_immutable(&ContentAddress::blob_key(&entrypoint_hash))
-            .await
-            .map_err(|e| {
-                RegistryError::Storage(StorageError::backend(format!(
-                    "Failed to load entrypoint file: {}",
-                    e
-                )))
-            })?;
-        let entrypoint_content = String::from_utf8(entrypoint_bytes).map_err(|e| {
-            RegistryError::Template(crate::error::TemplateError::invalid(format!(
-                "Entrypoint file is not valid UTF-8: {}",
-                e
-            )))
-        })?;
+        let LoadedTemplate {
+            manifest_hash,
+            manifest,
+            entrypoint_content,
+            file_system,
+            fonts,
+        } = self.load_template(reference).await?;
 
-        let (file_system, fonts) = self.hydrate_file_system(reference, &manifest).await?;
         let retain_days = crate::render_storage::retention::effective_retain_days(
             retain_override,
-            per_template_retain,
+            manifest.metadata.retain_days,
             self.default_retention_days,
         );
 
@@ -1797,21 +1772,18 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     .put(&ContentAddress::render_pdf_key(&render_id), pdf)
                     .await
                     .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
-                let record = RenderRecord {
-                    render_id: render_id.clone(),
+                let record = RenderRecord::from_outcome(
+                    render_id.clone(),
                     timestamp,
-                    template_ref: ctx.reference.clone(),
-                    template_name: ctx.template_name.clone(),
-                    template_tag: ctx.template_tag.clone(),
-                    manifest_hash: ctx.manifest_hash.clone(),
+                    ctx.reference.clone(),
+                    ctx.template_name.clone(),
+                    ctx.template_tag.clone(),
+                    ctx.manifest_hash.clone(),
                     data_hash,
-                    pdf_hash,
-                    success: true,
                     duration_ms,
-                    pdf_size_bytes,
-                    error: None,
                     expiry_date,
-                };
+                    Ok((pdf_hash, pdf_size_bytes)),
+                );
                 (record, true)
             }
             other => {
@@ -1831,21 +1803,18 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                     }
                     Err(e) => e,
                 };
-                let record = RenderRecord {
-                    render_id: render_id.clone(),
+                let record = RenderRecord::from_outcome(
+                    render_id.clone(),
                     timestamp,
-                    template_ref: ctx.reference.clone(),
-                    template_name: ctx.template_name.clone(),
-                    template_tag: ctx.template_tag.clone(),
-                    manifest_hash: ctx.manifest_hash.clone(),
+                    ctx.reference.clone(),
+                    ctx.template_name.clone(),
+                    ctx.template_tag.clone(),
+                    ctx.manifest_hash.clone(),
                     data_hash,
-                    pdf_hash: String::new(),
-                    success: false,
                     duration_ms,
-                    pdf_size_bytes: 0,
-                    error: Some(error),
                     expiry_date,
-                };
+                    Err(error),
+                );
                 (record, false)
             }
         };
@@ -2304,21 +2273,18 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 let expiry_date =
                     crate::render_storage::retention::expiry_date(timestamp.date(), retain_days);
 
-                let record = RenderRecord {
-                    render_id: render_id.clone(),
+                let record = RenderRecord::from_outcome(
+                    render_id.clone(),
                     timestamp,
-                    template_ref: reference.to_string(),
+                    reference.to_string(),
                     template_name,
                     template_tag,
                     manifest_hash,
                     data_hash,
-                    pdf_hash: pdf_hash.clone(),
-                    success: true,
                     duration_ms,
-                    pdf_size_bytes: pdf_bytes.len() as u32,
-                    error: None,
                     expiry_date,
-                };
+                    Ok((pdf_hash.clone(), pdf_bytes.len() as u32)),
+                );
 
                 // Persist the record as `renders/{id}/meta.json` so by-id lookups
                 // (get_render/get_render_pdf) resolve directly and immediately.
@@ -2376,21 +2342,18 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 let expiry_date =
                     crate::render_storage::retention::expiry_date(timestamp.date(), retain_days);
 
-                let record = RenderRecord {
+                let record = RenderRecord::from_outcome(
                     render_id,
                     timestamp,
-                    template_ref: reference.to_string(),
+                    reference.to_string(),
                     template_name,
                     template_tag,
-                    manifest_hash: "unknown".to_string(), // Placeholder for failed resolution
+                    "unknown".to_string(), // Placeholder for failed resolution
                     data_hash,
-                    pdf_hash: String::new(),
-                    success: false,
                     duration_ms,
-                    pdf_size_bytes: 0,
-                    error: Some(render_error.to_string()),
                     expiry_date,
-                };
+                    Err(render_error.to_string()),
+                );
 
                 // Persist the failure meta.json (no PDF) so get_render_pdf can
                 // distinguish "render failed" (4xx) from "unknown id" (404).
@@ -2429,33 +2392,8 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     /// the editor. Resolves reference → manifest → entrypoint blob.
     pub async fn get_template_source(&self, reference: &str) -> Result<String, RegistryError> {
         let manifest_hash = self.resolve(reference).await?;
-        let manifest_key = ContentAddress::manifest_key(&manifest_hash);
-        let manifest_bytes = self.get_immutable(&manifest_key).await.map_err(|e| {
-            RegistryError::Storage(StorageError::backend(format!(
-                "Failed to load manifest {}: {}",
-                manifest_hash, e
-            )))
-        })?;
-        let manifest = Manifest::from_bytes(&manifest_bytes).map_err(|e| {
-            RegistryError::ContentAddressing(crate::error::ContentAddressingError::manifest_error(
-                e.to_string(),
-            ))
-        })?;
-        let entrypoint_hash = manifest.entrypoint_hash().ok_or_else(|| {
-            RegistryError::Template(crate::error::TemplateError::invalid(
-                "Manifest missing entrypoint hash",
-            ))
-        })?;
-        let bytes = self
-            .get_immutable(&ContentAddress::blob_key(entrypoint_hash))
-            .await
-            .map_err(|e| RegistryError::Storage(StorageError::backend(e.to_string())))?;
-        String::from_utf8(bytes).map_err(|e| {
-            RegistryError::Template(crate::error::TemplateError::invalid(format!(
-                "Entrypoint file is not valid UTF-8: {}",
-                e
-            )))
-        })
+        let manifest = self.load_manifest(&manifest_hash).await?;
+        self.load_entrypoint(&manifest).await
     }
 
     /// Fetch the full aggregated analytics summary (for the SSR dashboard).

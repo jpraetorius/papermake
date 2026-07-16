@@ -96,6 +96,44 @@ impl RenderRecord {
             expiry_date: None,
         }
     }
+
+    /// Build a record for a persisted render with a known id and expiry, from a
+    /// success/failure `outcome`: `Ok((pdf_hash, pdf_size_bytes))` for a
+    /// successful render, `Err(error)` for a failed one. Shared by the
+    /// synchronous and batch render paths.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_outcome(
+        render_id: String,
+        timestamp: OffsetDateTime,
+        template_ref: String,
+        template_name: String,
+        template_tag: String,
+        manifest_hash: String,
+        data_hash: String,
+        duration_ms: u32,
+        expiry_date: Option<Date>,
+        outcome: Result<(String, u32), String>,
+    ) -> Self {
+        let (pdf_hash, pdf_size_bytes, success, error) = match outcome {
+            Ok((pdf_hash, pdf_size_bytes)) => (pdf_hash, pdf_size_bytes, true, None),
+            Err(error) => (String::new(), 0, false, Some(error)),
+        };
+        Self {
+            render_id,
+            timestamp,
+            template_ref,
+            template_name,
+            template_tag,
+            manifest_hash,
+            data_hash,
+            pdf_hash,
+            success,
+            duration_ms,
+            pdf_size_bytes,
+            error,
+            expiry_date,
+        }
+    }
 }
 
 /// Analytics data point for render volume over time
