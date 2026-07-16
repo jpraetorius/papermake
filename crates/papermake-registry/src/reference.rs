@@ -222,6 +222,25 @@ impl Reference {
         Ok(())
     }
 
+    /// Validate the `name` (optionally `namespace/name`) and `tag` used to build
+    /// a `refs/<name>/<tag>` storage key, before any key is constructed.
+    ///
+    /// This mirrors how [`Reference::parse`] (and therefore `resolve`) splits a
+    /// reference — at most one `/`, separating namespace from name — so a tag
+    /// that publishes is always resolvable, and rejects `/`-nesting, `..`,
+    /// uppercase, out-of-charset, and over-length inputs that would otherwise
+    /// flow straight into S3 key construction.
+    pub(crate) fn validate_ref_parts(name: &str, tag: &str) -> Result<(), ReferenceError> {
+        match name.rfind('/') {
+            Some(pos) => {
+                Self::validate_namespace(&name[..pos])?;
+                Self::validate_name(&name[pos + 1..])?;
+            }
+            None => Self::validate_name(name)?,
+        }
+        Self::validate_tag(tag)
+    }
+
     /// Check if reference includes hash verification
     pub fn has_hash_verification(&self) -> bool {
         self.hash.is_some()
@@ -275,6 +294,32 @@ impl std::fmt::Display for Reference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_ref_parts_accepts_resolvable_names_and_rejects_unsafe_ones() {
+        // Valid: plain name and single-level namespace/name, valid tags.
+        assert!(Reference::validate_ref_parts("invoice", "latest").is_ok());
+        assert!(Reference::validate_ref_parts("john/invoice", "v1.0.0").is_ok());
+
+        // Rejected: anything that would build an unresolvable or unsafe key.
+        for (name, tag) in [
+            ("Invoice", "latest"),       // uppercase
+            ("invoice", "Latest"),       // uppercase tag
+            ("a/b/c", "latest"),         // multi-level namespace (parse can't round-trip)
+            ("../etc/passwd", "latest"), // traversal
+            ("invoice", "../x"),         // traversal in tag
+            ("in voice", "latest"),      // space
+            ("invoice/", "latest"),      // empty trailing segment
+            ("/invoice", "latest"),      // empty leading segment
+            ("invoice", ""),             // empty tag
+            ("", "latest"),              // empty name
+        ] {
+            assert!(
+                Reference::validate_ref_parts(name, tag).is_err(),
+                "expected {name:?}:{tag:?} to be rejected",
+            );
+        }
+    }
 
     #[test]
     fn test_parse_simple_name() {

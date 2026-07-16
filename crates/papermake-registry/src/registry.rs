@@ -267,6 +267,12 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         namespace: &str,
         tag: &str,
     ) -> Result<String, RegistryError> {
+        // Step 0: Validate the name/tag at the library boundary so no caller can
+        // write refs with '/', '..', uppercase, or over-length segments that
+        // resolve() could never find (or that a filesystem backend could turn
+        // into path traversal).
+        Reference::validate_ref_parts(namespace, tag)?;
+
         // Step 1: Validate the bundle
         bundle.validate().map_err(|e| {
             RegistryError::Template(crate::error::TemplateError::invalid(e.to_string()))
@@ -346,6 +352,9 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         name: &str,
         tag: &str,
     ) -> Result<DeleteSummary, RegistryError> {
+        // Reject unsafe name/tag before constructing any key (see `publish`).
+        Reference::validate_ref_parts(name, tag)?;
+
         let ref_key = ContentAddress::ref_key(name, tag);
 
         // Resolve the ref → manifest hash (not-found if the version is missing).
@@ -2695,6 +2704,47 @@ Hello #data.name"#
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), RegistryError::Template(_)));
+    }
+
+    #[tokio::test]
+    async fn test_publish_and_delete_reject_unsafe_names() {
+        let registry = Registry::new_storage_only(MemoryStorage::new());
+
+        // Unsafe names/tags are rejected at the library boundary, before any key
+        // is written — regardless of caller (the HTTP layer decodes %2F to '/').
+        for (name, tag) in [
+            ("Invoice", "latest"),
+            ("../evil", "latest"),
+            ("a/b/c", "latest"),
+            ("ok", "../x"),
+        ] {
+            let published = registry.publish(create_test_bundle(), name, tag).await;
+            assert!(
+                matches!(published, Err(RegistryError::Reference(_))),
+                "publish {name}:{tag} -> {published:?}",
+            );
+            let deleted = registry.delete_version(name, tag).await;
+            assert!(
+                matches!(deleted, Err(RegistryError::Reference(_))),
+                "delete {name}:{tag} -> {deleted:?}",
+            );
+        }
+        // No phantom refs were created.
+        assert!(
+            registry
+                .storage
+                .list_keys("refs/")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        // A valid name still publishes and resolves.
+        registry
+            .publish(create_test_bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        assert!(registry.resolve("invoice:latest").await.is_ok());
     }
 
     #[tokio::test]
