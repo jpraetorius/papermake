@@ -102,13 +102,15 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         // idempotent; artifacts remain keyed by render_id under `renders/{id}/`.
         let data_bytes = serde_json::to_vec(data)?;
         let data_hash = ContentAddress::hash(&data_bytes);
-        let manifest_res = self.resolve(reference).await;
+        let loaded_template = self.load_template(reference).await;
         let opts_tag = render_options_tag(options);
-        let render_id = match &manifest_res {
-            Ok(manifest_hash) => {
-                ContentAddress::content_render_id_with_options(manifest_hash, &data_hash, &opts_tag)
-            }
-            // Resolution failed: still record a deterministic failure id keyed by
+        let render_id = match &loaded_template {
+            Ok(loaded) => ContentAddress::content_render_id_with_options(
+                &loaded.manifest_hash,
+                &data_hash,
+                &opts_tag,
+            ),
+            // Loading failed: still record a deterministic failure id keyed by
             // the reference so repeated identical failures dedupe too.
             Err(_) => {
                 ContentAddress::content_render_id_with_options(reference, &data_hash, &opts_tag)
@@ -143,17 +145,21 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         // Step 4: Measure total operation time including resolution.
         let start_time = std::time::Instant::now();
 
-        // Step 5: Render - a failed resolution (captured above) is recorded as a
-        // failure render below.
+        // Step 5: Render - a failed template load (captured above) is recorded
+        // as a failure render below.
         tracing::debug!(
             reference = %reference,
             render_id = %render_id,
-            "registry render_and_store resolving and rendering",
+            "registry render_and_store rendering loaded template",
         );
-        let result: Result<(String, Vec<u8>), RegistryError> = async {
-            let manifest_hash = manifest_res?;
-            let pdf_bytes = self.render_with_options(reference, data, options).await?;
-            Ok((manifest_hash, pdf_bytes))
+        let result: Result<(String, Option<u32>, Vec<u8>), RegistryError> = async {
+            let loaded = loaded_template?;
+            let manifest_hash = loaded.manifest_hash.clone();
+            let per_template_retention = loaded.manifest.metadata.retain_days;
+            let pdf_bytes = self
+                .render_loaded_template(reference, loaded, data, options)
+                .await?;
+            Ok((manifest_hash, per_template_retention, pdf_bytes))
         }
         .await;
 
@@ -168,7 +174,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         // Step 6: Build the render record, persist artifacts + meta.json, stage
         // the analytics record.
         match result {
-            Ok((manifest_hash, pdf_bytes)) => {
+            Ok((manifest_hash, per_template_retention, pdf_bytes)) => {
                 let pdf_hash = ContentAddress::hash(&pdf_bytes);
 
                 // Store the PDF at `renders/{id}/pdf`.
@@ -189,10 +195,9 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
 
                 // Resolve effective retention: per-render → per-template → global.
                 let timestamp = time::OffsetDateTime::now_utc();
-                let per_template = self.template_retain_days(&manifest_hash).await;
                 let retain_days = crate::render_storage::retention::effective_retain_days(
                     retain_override,
-                    per_template,
+                    per_template_retention,
                     self.default_retention_days,
                 );
                 let expiry_date =
@@ -297,16 +302,6 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
                 Err(render_error)
             }
         }
-    }
-
-    /// Best-effort lookup of a template's per-template default retention from
-    /// its manifest metadata. Returns `None` on any load/parse issue (the caller
-    /// then falls back to the global default).
-    pub(crate) async fn template_retain_days(&self, manifest_hash: &str) -> Option<u32> {
-        let manifest_key = ContentAddress::manifest_key(manifest_hash);
-        let bytes = self.get_immutable(&manifest_key).await.ok()?;
-        let manifest = Manifest::from_bytes(&bytes).ok()?;
-        manifest.metadata.retain_days
     }
 
     /// Fetch the entrypoint (`main.typ`) source for a template reference, for

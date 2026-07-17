@@ -26,7 +26,10 @@ const REF_CACHE_CAP: usize = 4096;
 /// mutable, so this is deliberately short: a republish on another instance
 /// becomes visible within this window; a republish on this instance updates the
 /// entry immediately.
+#[cfg(not(test))]
 const REF_CACHE_TTL: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const REF_CACHE_TTL: Duration = Duration::from_millis(50);
 
 /// Whether a bundle path is a font file Typst can use (TTF/OTF/TTC).
 fn is_font_path(path: &str) -> bool {

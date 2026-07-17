@@ -92,6 +92,74 @@ impl BlobStorage for CountingStorage {
     }
 }
 
+/// Blob storage that moves `refs/invoice/latest` while a render is being
+/// persisted. This simulates a concurrent publisher on another server instance
+/// after a tracked render has resolved a mutable tag but before it compiles.
+#[derive(Clone)]
+struct MoveLatestOnRenderDataStorage {
+    inner: std::sync::Arc<MemoryStorage>,
+    latest_ref_key: String,
+    replacement_manifest_hash: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MoveLatestOnRenderDataStorage {
+    fn new(latest_ref_key: impl Into<String>) -> Self {
+        Self {
+            inner: std::sync::Arc::new(MemoryStorage::new()),
+            latest_ref_key: latest_ref_key.into(),
+            replacement_manifest_hash: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            fired: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn move_latest_to(&self, manifest_hash: String) {
+        *self.replacement_manifest_hash.lock().unwrap() = Some(manifest_hash);
+    }
+}
+
+#[async_trait::async_trait]
+impl BlobStorage for MoveLatestOnRenderDataStorage {
+    async fn put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<(), crate::storage::blob_storage::StorageError> {
+        if key.starts_with("renders/")
+            && key.ends_with("/data")
+            && !self.fired.swap(true, Ordering::Relaxed)
+        {
+            let replacement = self.replacement_manifest_hash.lock().unwrap().clone();
+            if let Some(manifest_hash) = replacement {
+                self.inner
+                    .put(&self.latest_ref_key, manifest_hash.into_bytes())
+                    .await?;
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            }
+        }
+        self.inner.put(key, data).await
+    }
+
+    async fn get(&self, key: &str) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
+        self.inner.get(key).await
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool, crate::storage::blob_storage::StorageError> {
+        self.inner.exists(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), crate::storage::blob_storage::StorageError> {
+        self.inner.delete(key).await
+    }
+
+    async fn list_keys(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, crate::storage::blob_storage::StorageError> {
+        self.inner.list_keys(prefix).await
+    }
+}
+
 /// Blob storage that delays each render-output `put` (`renders/…`) by a fixed
 /// amount, so a batch run's item loop deterministically spans the heartbeat
 /// interval and exercises the mid-run lease-renewal path. All other operations
@@ -200,6 +268,18 @@ Hello #data.name"#
     TemplateBundle::new(main_content, metadata)
         .add_file("assets/logo.png", b"fake_png_data".to_vec())
         .with_schema(br#"{"type": "object", "properties": {"name": {"type": "string"}}}"#.to_vec())
+}
+
+fn versioned_bundle(label: &str) -> TemplateBundle {
+    let metadata = TemplateMetadata::new(label, "test@example.com");
+    let main_content = format!(
+        r#"#let data = json(bytes(sys.inputs.data))
+= {label}
+Hello #data.name"#
+    )
+    .into_bytes();
+
+    TemplateBundle::new(main_content, metadata)
 }
 
 #[tokio::test]
@@ -935,6 +1015,44 @@ async fn test_registry_render_different_data() {
 
     // PDFs should be different (different content)
     assert_ne!(pdf1, pdf2);
+}
+
+#[tokio::test]
+async fn render_and_store_uses_one_resolved_template_version() {
+    let storage = MoveLatestOnRenderDataStorage::new("refs/invoice/latest");
+    let render_storage = crate::render_storage::MemoryRenderStorage::new();
+    let registry = Registry::new(storage.clone(), render_storage);
+
+    let v1_hash = registry
+        .publish(versioned_bundle("Version One"), "invoice", "v1")
+        .await
+        .unwrap();
+    let latest_hash = registry
+        .publish(versioned_bundle("Version One"), "invoice", "latest")
+        .await
+        .unwrap();
+    assert_eq!(latest_hash, v1_hash);
+    let v2_hash = registry
+        .publish(versioned_bundle("Version Two"), "invoice", "v2")
+        .await
+        .unwrap();
+    storage.move_latest_to(v2_hash);
+
+    let data = serde_json::json!({ "name": "Alice" });
+    let v1_pdf = registry.render("invoice:v1", &data).await.unwrap();
+    let v2_pdf = registry.render("invoice:v2", &data).await.unwrap();
+    assert_ne!(v1_pdf, v2_pdf);
+
+    let result = registry
+        .render_and_store("invoice:latest", &data)
+        .await
+        .unwrap();
+    let stored_pdf = registry.get_render_pdf(&result.render_id).await.unwrap();
+    let record = registry.get_render_meta(&result.render_id).await.unwrap();
+
+    assert_eq!(stored_pdf, v1_pdf);
+    assert_ne!(stored_pdf, v2_pdf);
+    assert_eq!(record.manifest_hash, v1_hash);
 }
 
 #[tokio::test]

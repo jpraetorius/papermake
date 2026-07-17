@@ -63,22 +63,37 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         );
 
         // Resolve + load manifest, entrypoint, and hydrated file system/fonts.
-        let LoadedTemplate {
-            entrypoint_content,
-            file_system,
-            fonts,
-            ..
-        } = self.load_template(reference).await?;
+        let loaded = self.load_template(reference).await?;
         tracing::debug!(
             reference = %reference,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "registry render loaded template",
         );
 
-        // Render the template using papermake
+        self.render_loaded_template(reference, loaded, data, options)
+            .await
+    }
+
+    /// Render an already-resolved template. This keeps callers that track
+    /// content-addressed output tied to the same immutable manifest they used
+    /// for render-id and metadata decisions.
+    pub(crate) async fn render_loaded_template(
+        &self,
+        reference: &str,
+        loaded: LoadedTemplate,
+        data: &serde_json::Value,
+        options: &RenderOptions,
+    ) -> Result<Vec<u8>, RegistryError> {
+        let started = std::time::Instant::now();
+        let LoadedTemplate {
+            entrypoint_content,
+            file_system,
+            fonts,
+            ..
+        } = loaded;
+
         tracing::debug!(
             reference = %reference,
-            elapsed_ms = started.elapsed().as_millis() as u64,
             "registry render invoking typst",
         );
         let render_result = self
