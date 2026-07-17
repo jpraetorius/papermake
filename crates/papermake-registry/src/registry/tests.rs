@@ -57,11 +57,16 @@ impl BlobStorage for FlakyManifestStorage {
 struct CountingStorage {
     inner: MemoryStorage,
     gets: std::sync::Mutex<usize>,
+    immutable_gets: std::sync::Mutex<usize>,
 }
 
 impl CountingStorage {
     fn total_gets(&self) -> usize {
         *self.gets.lock().unwrap()
+    }
+
+    fn immutable_gets(&self) -> usize {
+        *self.immutable_gets.lock().unwrap()
     }
 }
 
@@ -76,6 +81,9 @@ impl BlobStorage for CountingStorage {
     }
     async fn get(&self, key: &str) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
         *self.gets.lock().unwrap() += 1;
+        if key.starts_with("blobs/") || key.starts_with("manifests/") {
+            *self.immutable_gets.lock().unwrap() += 1;
+        }
         self.inner.get(key).await
     }
     async fn exists(&self, key: &str) -> Result<bool, crate::storage::blob_storage::StorageError> {
@@ -544,14 +552,15 @@ async fn immutable_reads_are_cached_across_renders() {
         .await
         .unwrap();
 
-    // A second identical render must not read any immutable object (manifest,
-    // entrypoint, assets) or the tag from storage again — everything is cached.
-    let before = registry.storage.total_gets();
+    // A second render must not read any immutable object (manifest, entrypoint,
+    // assets) again. Mutable refs are intentionally short-TTL cached and are
+    // covered by the dedicated ref-cache tests.
+    let before = registry.storage.immutable_gets();
     registry
         .render_and_store("invoice:latest", &serde_json::json!({ "name": "B" }))
         .await
         .unwrap();
-    assert_eq!(registry.storage.total_gets(), before);
+    assert_eq!(registry.storage.immutable_gets(), before);
 }
 
 #[tokio::test]
