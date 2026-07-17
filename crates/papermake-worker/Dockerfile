@@ -20,6 +20,15 @@ RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     cargo build --locked --release -p papermake-worker && \
     cp ./target/release/papermake-worker /bin/worker
 
+# Provides the compiled binary. CI overrides this stage with a prebuilt binary:
+#   docker build --build-context dist=./dist ...
+# where dist/papermake-worker is the release binary the test stage already
+# compiled, so the image build skips the (slow, sometimes flaky) in-Docker
+# compile above. Without that flag — local `docker compose build`, GitHub
+# Actions — it falls back to the binary the `build` stage just produced.
+FROM scratch AS dist
+COPY --from=build /bin/worker /papermake-worker
+
 # Distroless runtime: ships glibc, libssl3, ca-certificates, and a nonroot
 # user (uid 65532) — no shell, no package manager, nothing else. The `cc`
 # variant adds libgcc/libstdc++ needed by the dynamically-linked Rust binary.
@@ -30,8 +39,8 @@ FROM gcr.io/distroless/cc-debian13:nonroot AS final
 # FONTS_DIR is a `:`-separated list of directories.
 ENV FONTS_DIR=/fonts
 
-# Copy the executable from the "build" stage.
-COPY --from=build /bin/worker /app/worker
+# Copy the executable from the dist stage (prebuilt in CI, else compiled above).
+COPY --from=dist /papermake-worker /app/worker
 
 # What the container should run when it is started.
 CMD ["/app/worker"]

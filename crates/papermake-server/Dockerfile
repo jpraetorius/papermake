@@ -20,6 +20,15 @@ RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     cargo build --locked --release -p papermake-server && \
     cp ./target/release/papermake-server /bin/server
 
+# Provides the compiled binary. CI overrides this stage with a prebuilt binary:
+#   docker build --build-context dist=./dist ...
+# where dist/papermake-server is the release binary the test stage already
+# compiled, so the image build skips the (slow, sometimes flaky) in-Docker
+# compile above. Without that flag — local `docker compose build`, GitHub
+# Actions — it falls back to the binary the `build` stage just produced.
+FROM scratch AS dist
+COPY --from=build /bin/server /papermake-server
+
 # Distroless runtime: ships glibc, libssl3, ca-certificates, and a nonroot
 # user (uid 65532) — no shell, no package manager, nothing else. The `cc`
 # variant adds libgcc/libstdc++ needed by the dynamically-linked Rust binary.
@@ -30,8 +39,7 @@ FROM gcr.io/distroless/cc-debian13:nonroot AS final
 # rebuild. FONTS_DIR is a `:`-separated list of directories; missing dirs are
 # skipped.
 ENV FONTS_DIR=/fonts
-CMD ["/app/server"]
 
-# Copy the executable from the "build" stage last; this is the layer that
-# changes when application code changes.
-COPY --from=build /bin/server /app/server
+# Copy the executable last; this is the layer that changes with app code.
+COPY --from=dist /papermake-server /app/server
+CMD ["/app/server"]
