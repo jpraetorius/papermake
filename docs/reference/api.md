@@ -8,6 +8,9 @@ root.
 - JSON responses wrap successful single objects as `{ "data": ... }`.
 - List responses add `pagination`.
 - Errors use `{ "error": "...", "status": <code> }`.
+- Every response — API, health, PDF, and UI — carries
+  `X-Content-Type-Options: nosniff`, so clients must trust the declared
+  `Content-Type` rather than sniffing the body.
 - The generated OpenAPI 3.1 spec is available at `GET /api/openapi.json`.
 
 ## Health
@@ -242,7 +245,8 @@ success flag, duration, PDF size, error, and expiry date.
 
 ### `GET /api/renders/{render_id}/pdf`
 
-Downloads the rendered PDF as `application/pdf`.
+Downloads the rendered PDF as `application/pdf`, served inline with
+`X-Content-Type-Options: nosniff` so browsers do not re-interpret the bytes.
 
 | Status | Meaning |
 |---:|---|
