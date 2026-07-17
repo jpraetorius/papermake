@@ -336,6 +336,10 @@ pub async fn get_template_metadata(
         .get_template_info(&parsed_ref.full_name())
         .await?
         .ok_or_else(|| ApiError::template_not_found(&reference))?;
+    let metadata = state
+        .registry
+        .get_template_metadata_for_reference(&reference)
+        .await?;
 
     let tag = parsed_ref.tag_or_default();
     let response_data = TemplateMetadataResponse {
@@ -344,7 +348,7 @@ pub async fn get_template_metadata(
         tag: tag.to_string(),
         tags: template.tags.clone(),
         manifest_hash,
-        metadata: template.metadata.clone(),
+        metadata,
         reference: format!("{}:{}", template.full_name(), tag),
     };
 
@@ -429,5 +433,59 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["invoice"]);
+    }
+
+    #[tokio::test]
+    async fn metadata_response_uses_requested_tag_manifest() {
+        use crate::test_support;
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use tower::ServiceExt;
+
+        fn bundle_with_metadata(name: &str) -> TemplateBundle {
+            TemplateBundle::new(
+                br#"#let data = json(bytes(sys.inputs.data))
+= Test
+Hello #data.name"#
+                    .to_vec(),
+                TemplateMetadata::new(name, "test@example.com"),
+            )
+        }
+
+        let registry = test_support::registry();
+        registry
+            .publish(bundle_with_metadata("Version One"), "invoice", "v1")
+            .await
+            .unwrap();
+        registry
+            .publish(bundle_with_metadata("Latest Version"), "invoice", "latest")
+            .await
+            .unwrap();
+        let app = router().with_state(test_support::state(registry));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/invoice:v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test_support::response_json(response).await;
+        assert_eq!(body["data"]["tag"].as_str(), Some("v1"));
+        assert_eq!(
+            body["data"]["metadata"]["name"].as_str(),
+            Some("Version One")
+        );
+        assert_eq!(
+            body["data"]["tags"].as_array().unwrap().len(),
+            2,
+            "tag list still describes the whole template"
+        );
     }
 }

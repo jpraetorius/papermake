@@ -201,6 +201,16 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         )))
     }
 
+    /// Load metadata from the exact manifest addressed by a template reference.
+    pub async fn get_template_metadata_for_reference(
+        &self,
+        reference: &str,
+    ) -> Result<crate::bundle::TemplateMetadata, RegistryError> {
+        let manifest_hash = self.resolve(reference).await?;
+        let manifest = self.load_manifest(&manifest_hash).await?;
+        Ok(manifest.metadata)
+    }
+
     /// Parse a reference key to extract namespace/name path and tag
     ///
     /// Examples:

@@ -45,6 +45,11 @@ pub trait ServerRegistry: Send + Sync {
 
     async fn get_template_info(&self, name: &str) -> RegistryApiResult<Option<TemplateInfo>>;
 
+    async fn get_template_metadata_for_reference(
+        &self,
+        reference: &str,
+    ) -> RegistryApiResult<papermake_registry::bundle::TemplateMetadata>;
+
     async fn publish(
         &self,
         bundle: TemplateBundle,
@@ -119,6 +124,13 @@ where
 
     async fn get_template_info(&self, name: &str) -> RegistryApiResult<Option<TemplateInfo>> {
         Registry::get_template_info(self, name).await
+    }
+
+    async fn get_template_metadata_for_reference(
+        &self,
+        reference: &str,
+    ) -> RegistryApiResult<papermake_registry::bundle::TemplateMetadata> {
+        Registry::get_template_metadata_for_reference(self, reference).await
     }
 
     async fn publish(
