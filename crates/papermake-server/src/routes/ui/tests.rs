@@ -413,3 +413,123 @@ fn render_error_fragment_omits_empty_detail() {
     assert!(without.contains(&t.t("render-failed")));
     assert!(!without.contains("<p>"));
 }
+
+/// Render store that fails every analytics `summary()` read but otherwise
+/// behaves like the in-memory store. Lets the dashboard handler be driven with a
+/// backend whose analytics are down.
+struct AnalyticsDownStorage {
+    inner: papermake_registry::render_storage::MemoryRenderStorage,
+}
+
+#[async_trait::async_trait]
+impl papermake_registry::render_storage::RenderStorage for AnalyticsDownStorage {
+    async fn store_render(
+        &self,
+        record: papermake_registry::render_storage::types::RenderRecord,
+    ) -> Result<(), papermake_registry::render_storage::types::RenderStorageError> {
+        self.inner.store_render(record).await
+    }
+    async fn get_render(
+        &self,
+        render_id: &str,
+    ) -> Result<
+        Option<papermake_registry::render_storage::types::RenderRecord>,
+        papermake_registry::render_storage::types::RenderStorageError,
+    > {
+        self.inner.get_render(render_id).await
+    }
+    async fn list_recent_renders(
+        &self,
+        limit: u32,
+    ) -> Result<
+        Vec<papermake_registry::render_storage::types::RenderRecord>,
+        papermake_registry::render_storage::types::RenderStorageError,
+    > {
+        self.inner.list_recent_renders(limit).await
+    }
+    async fn list_template_renders(
+        &self,
+        template_name: &str,
+        limit: u32,
+    ) -> Result<
+        Vec<papermake_registry::render_storage::types::RenderRecord>,
+        papermake_registry::render_storage::types::RenderStorageError,
+    > {
+        self.inner.list_template_renders(template_name, limit).await
+    }
+    async fn render_volume_over_time(
+        &self,
+        days: u32,
+    ) -> Result<
+        Vec<papermake_registry::render_storage::types::VolumePoint>,
+        papermake_registry::render_storage::types::RenderStorageError,
+    > {
+        self.inner.render_volume_over_time(days).await
+    }
+    async fn total_renders_per_template(
+        &self,
+    ) -> Result<
+        Vec<papermake_registry::render_storage::types::TemplateStats>,
+        papermake_registry::render_storage::types::RenderStorageError,
+    > {
+        self.inner.total_renders_per_template().await
+    }
+    async fn average_duration_over_time(
+        &self,
+        days: u32,
+    ) -> Result<
+        Vec<papermake_registry::render_storage::types::DurationPoint>,
+        papermake_registry::render_storage::types::RenderStorageError,
+    > {
+        self.inner.average_duration_over_time(days).await
+    }
+    async fn summary(
+        &self,
+    ) -> Result<
+        papermake_registry::render_storage::summary::Summary,
+        papermake_registry::render_storage::types::RenderStorageError,
+    > {
+        Err(
+            papermake_registry::render_storage::types::RenderStorageError::Query(
+                "analytics backend down".to_string(),
+            ),
+        )
+    }
+}
+
+#[tokio::test]
+async fn dashboard_returns_ok_with_a_notice_when_the_analytics_backend_errors() {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use papermake_registry::Registry;
+    use papermake_registry::storage::blob_storage::MemoryStorage;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    // A registry whose analytics summary read fails, wrapped as the server's
+    // dyn registry. This drives the handler (not just the pure page function).
+    let registry = Registry::new(
+        MemoryStorage::new(),
+        AnalyticsDownStorage {
+            inner: papermake_registry::render_storage::MemoryRenderStorage::new(),
+        },
+    );
+    let state = crate::AppState {
+        registry: Arc::new(registry),
+        config: crate::config::ServerConfig::default(),
+    };
+    let app = router().with_state(state);
+
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    // A backend outage must degrade to a notice, not a 500.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(
+        String::from_utf8_lossy(&body).contains(&en().t("analytics-unavailable")),
+        "dashboard should surface the analytics-unavailable notice",
+    );
+}

@@ -151,6 +151,34 @@ fn render_capacity_check_trips_when_all_slots_are_leaked() {
 }
 
 #[tokio::test]
+async fn track_leaked_render_self_heals_when_the_task_finishes() {
+    let registry = Registry::new_storage_only(MemoryStorage::new())
+        .with_render_limits(2, std::time::Duration::from_secs(1));
+    assert_eq!(registry.leaked_renders.load(Ordering::Relaxed), 0);
+
+    // Stand in for a timed-out-but-still-running render: a task we hold open,
+    // then release. `track_leaked_render` counts it immediately and watches the
+    // handle so the count drops once it finishes on its own.
+    let (release, wait) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        let _ = wait.await;
+    });
+    registry.track_leaked_render(handle);
+    assert_eq!(registry.leaked_renders.load(Ordering::Relaxed), 1);
+
+    // Let the "render" finish; the watcher must return the count to zero, so a
+    // slow-but-terminating render self-heals rather than exhausting capacity.
+    release.send(()).unwrap();
+    for _ in 0..200 {
+        if registry.leaked_renders.load(Ordering::Relaxed) == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(registry.leaked_renders.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
 async fn test_registry_publish() {
     let storage = MemoryStorage::new();
     let registry = Registry::new_storage_only(storage);
@@ -1708,7 +1736,10 @@ async fn heartbeat_renews_lease_and_blocks_reclaim_while_owned() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(shard.lease_expires_at, Some(t0 + time::Duration::seconds(60)));
+    assert_eq!(
+        shard.lease_expires_at,
+        Some(t0 + time::Duration::seconds(60))
+    );
 
     // A heartbeat mid-run, while we still own the shard, renews the lease
     // forward from `now` and reports success.

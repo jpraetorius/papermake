@@ -535,7 +535,10 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str::<RenderRecord>(l).unwrap().render_id)
             .collect();
-        assert_eq!(ids, vec!["r3".to_string(), "r4".to_string(), "r5".to_string()]);
+        assert_eq!(
+            ids,
+            vec!["r3".to_string(), "r4".to_string(), "r5".to_string()]
+        );
     }
 
     #[tokio::test]
