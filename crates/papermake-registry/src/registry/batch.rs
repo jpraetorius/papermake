@@ -57,6 +57,7 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         retain_override: Option<u32>,
         options: &RenderOptions,
     ) -> Result<BatchJob, RegistryError> {
+        let options = options.canonicalized();
         let job_id = uuid::Uuid::now_v7().to_string();
         let total = inputs.len();
         let shard_size = self.batch_shard_size.max(1);

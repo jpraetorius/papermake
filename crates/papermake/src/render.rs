@@ -137,10 +137,21 @@ impl RenderOptions {
             pdf_standards: vec![PdfStandard::A3b],
         }
     }
+
+    /// Canonical form used for render identity and PDF export. Explicit PDF
+    /// 1.7 is the default, so it is represented by an empty standards list.
+    pub fn canonicalized(&self) -> Self {
+        if self.pdf_standards.as_slice() == [PdfStandard::V1_7] {
+            Self::default()
+        } else {
+            self.clone()
+        }
+    }
 }
 
 /// Build typst-pdf export options from [`RenderOptions`].
 fn pdf_options(options: &RenderOptions) -> Result<PdfOptions> {
+    let options = options.canonicalized();
     let standards: Vec<typst_pdf::PdfStandard> = options
         .pdf_standards
         .iter()
@@ -159,7 +170,10 @@ fn pdf_options(options: &RenderOptions) -> Result<PdfOptions> {
     // doesn't set one (`document.date` is auto), fall back to the current time,
     // like `typst compile` does. Plain PDF output stays timestamp-free (and thus
     // byte-reproducible).
-    let timestamp = (!options.pdf_standards.is_empty())
+    let timestamp = options
+        .pdf_standards
+        .iter()
+        .any(PdfStandard::requires_fallback_timestamp)
         .then(current_timestamp)
         .flatten();
     Ok(PdfOptions {
@@ -167,6 +181,19 @@ fn pdf_options(options: &RenderOptions) -> Result<PdfOptions> {
         timestamp,
         ..Default::default()
     })
+}
+
+impl PdfStandard {
+    fn requires_fallback_timestamp(&self) -> bool {
+        matches!(
+            self,
+            PdfStandard::A2a
+                | PdfStandard::A2b
+                | PdfStandard::A3a
+                | PdfStandard::A3b
+                | PdfStandard::A4
+        )
+    }
 }
 
 /// The current UTC time as a typst-pdf [`Timestamp`], if representable.
@@ -477,6 +504,16 @@ mod tests {
         let pdf = assert_successful_pdf(result);
         // No PDF/A conformance metadata without a requested standard.
         assert!(!contains(&pdf, b"pdfaid"));
+    }
+
+    #[test]
+    fn explicit_pdf_1_7_matches_default_render_bytes() {
+        let default = assert_successful_pdf(render_with(&RenderOptions::default()));
+        let explicit = assert_successful_pdf(render_with(&RenderOptions {
+            pdf_standards: vec![PdfStandard::V1_7],
+        }));
+
+        assert_eq!(default, explicit);
     }
 
     #[test]

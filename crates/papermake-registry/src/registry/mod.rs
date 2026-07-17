@@ -98,6 +98,7 @@ pub(crate) struct LoadedTemplate {
 /// distinct id so PDF/A output never collides with the plain render of the same
 /// `(template, data)`.
 fn render_options_tag(options: &RenderOptions) -> String {
+    let options = options.canonicalized();
     if options.pdf_standards.is_empty() {
         return String::new();
     }

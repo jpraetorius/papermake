@@ -320,6 +320,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn render_template_treats_explicit_plain_pdf_as_default() {
+        let registry = test_support::registry();
+        registry
+            .publish(test_support::bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        let app = router().with_state(test_support::state(registry));
+
+        let render = |body: &'static str| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/invoice:latest")
+                            .header(CONTENT_TYPE, "application/json")
+                            .body(Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                test_support::response_json(response).await
+            }
+        };
+
+        let default = render(r#"{"data":{"name":"Alice"}}"#).await;
+        let explicit = render(r#"{"data":{"name":"Alice"},"pdf_standard":"1.7"}"#).await;
+
+        assert_eq!(default["data"]["render_id"], explicit["data"]["render_id"]);
+        assert_eq!(default["data"]["pdf_hash"], explicit["data"]["pdf_hash"]);
+    }
+
+    #[tokio::test]
     async fn render_template_reports_compile_failure_as_unprocessable() {
         let registry = test_support::registry();
         registry
