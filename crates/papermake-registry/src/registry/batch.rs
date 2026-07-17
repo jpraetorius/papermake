@@ -233,19 +233,25 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
     /// Returns `false` when another worker has reclaimed the shard (its `owner`
     /// in storage no longer matches ours) — the caller must abandon its run so
     /// the shard is not rendered to completion twice. Returns `true` after a
-    /// successful renewal. A storage read error is treated as "still ours"
-    /// (fail open): dropping a healthy run on a transient blip is worse than the
-    /// rare double-render the content-addressed design already tolerates.
+    /// successful renewal.
+    ///
+    /// A storage read error is treated as "still ours" (fail open): dropping a
+    /// healthy run on a transient blip is worse than the rare double-render the
+    /// content-addressed design already tolerates. On that error we keep running
+    /// but *skip* the renewal write, so a blip can never clobber the descriptor
+    /// of a worker that legitimately reclaimed the shard. A single missed beat
+    /// is harmless — heartbeats run well inside the lease TTL — and only a
+    /// sustained read outage lets the lease lapse, which is the correct outcome.
     pub(crate) async fn heartbeat_shard(
         &self,
         shard: &mut Shard,
         lease_ttl_secs: u64,
         now: time::OffsetDateTime,
     ) -> bool {
-        if let Ok(current) = self.get_shard(&shard.job_id, shard.index).await
-            && current.owner != shard.owner
-        {
-            return false;
+        match self.get_shard(&shard.job_id, shard.index).await {
+            Ok(current) if current.owner != shard.owner => return false,
+            Ok(_) => {}
+            Err(_) => return true,
         }
         shard.lease_expires_at = Some(now + time::Duration::seconds(lease_ttl_secs as i64));
         shard.updated_at = now;

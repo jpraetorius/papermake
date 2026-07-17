@@ -92,6 +92,104 @@ impl BlobStorage for CountingStorage {
     }
 }
 
+/// Blob storage that delays each render-output `put` (`renders/…`) by a fixed
+/// amount, so a batch run's item loop deterministically spans the heartbeat
+/// interval and exercises the mid-run lease-renewal path. All other operations
+/// delegate to an inner in-memory store without delay.
+struct SlowRenderStorage {
+    inner: MemoryStorage,
+    put_delay: std::time::Duration,
+}
+
+impl SlowRenderStorage {
+    fn new(put_delay: std::time::Duration) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            put_delay,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl BlobStorage for SlowRenderStorage {
+    async fn put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<(), crate::storage::blob_storage::StorageError> {
+        if key.starts_with("renders/") {
+            tokio::time::sleep(self.put_delay).await;
+        }
+        self.inner.put(key, data).await
+    }
+    async fn get(&self, key: &str) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
+        self.inner.get(key).await
+    }
+    async fn exists(&self, key: &str) -> Result<bool, crate::storage::blob_storage::StorageError> {
+        self.inner.exists(key).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), crate::storage::blob_storage::StorageError> {
+        self.inner.delete(key).await
+    }
+    async fn list_keys(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, crate::storage::blob_storage::StorageError> {
+        self.inner.list_keys(prefix).await
+    }
+}
+
+/// Blob storage that can be toggled to fail `get` for shard-descriptor keys
+/// (`…/shard.json`), simulating a transient read error during a lease
+/// heartbeat. All other operations delegate to an inner in-memory store.
+struct FlakyShardStorage {
+    inner: MemoryStorage,
+    fail_shard_get: std::sync::atomic::AtomicBool,
+}
+
+impl FlakyShardStorage {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            fail_shard_get: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+    fn set_fail(&self, fail: bool) {
+        self.fail_shard_get.store(fail, Ordering::Relaxed);
+    }
+}
+
+#[async_trait::async_trait]
+impl BlobStorage for FlakyShardStorage {
+    async fn put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<(), crate::storage::blob_storage::StorageError> {
+        self.inner.put(key, data).await
+    }
+    async fn get(&self, key: &str) -> Result<Vec<u8>, crate::storage::blob_storage::StorageError> {
+        if key.ends_with("/shard.json") && self.fail_shard_get.load(Ordering::Relaxed) {
+            return Err(crate::storage::blob_storage::StorageError::Backend(
+                "injected shard get failure".to_string(),
+            ));
+        }
+        self.inner.get(key).await
+    }
+    async fn exists(&self, key: &str) -> Result<bool, crate::storage::blob_storage::StorageError> {
+        self.inner.exists(key).await
+    }
+    async fn delete(&self, key: &str) -> Result<(), crate::storage::blob_storage::StorageError> {
+        self.inner.delete(key).await
+    }
+    async fn list_keys(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<String>, crate::storage::blob_storage::StorageError> {
+        self.inner.list_keys(prefix).await
+    }
+}
+
 fn create_test_bundle() -> TemplateBundle {
     let metadata = TemplateMetadata::new("Test Template", "test@example.com");
     let main_content = br#"#let data = json(bytes(sys.inputs.data))
@@ -1812,6 +1910,149 @@ async fn heartbeat_aborts_when_shard_was_reclaimed() {
         .await
         .unwrap();
     assert_eq!(persisted.owner.as_deref(), Some("worker-b"));
+}
+
+/// End-to-end guard for commit f8fe352: a worker that is actively rendering a
+/// shard must abandon it — mid-loop, before writing results or marking it done —
+/// the moment its heartbeat sees another worker now owns the shard. The helper
+/// (`heartbeat_shard`) is covered above in isolation; this drives the actual
+/// `run_claimed_shard` loop so the run-loop wiring that enforces "no double
+/// render" is exercised, not just asserted by inspection.
+#[tokio::test]
+async fn run_claimed_shard_abandons_when_reclaimed_mid_run() {
+    use crate::batch::{BatchInput, ShardStatus};
+
+    // Delay each render-output write so the item loop reliably spans the
+    // (clamped) 1s heartbeat interval and a mid-run heartbeat actually fires.
+    let registry = Registry::new(
+        SlowRenderStorage::new(std::time::Duration::from_millis(400)),
+        crate::render_storage::MemoryRenderStorage::new(),
+    )
+    .with_shard_size(12);
+    registry
+        .publish(create_test_bundle(), "batch", "latest")
+        .await
+        .unwrap();
+    // One shard with many items: the run abandons long before draining them.
+    let inputs: Vec<BatchInput> = (0..12)
+        .map(|i| BatchInput {
+            data: serde_json::json!({ "name": format!("n{i}") }),
+            key: None,
+        })
+        .collect();
+    let job = registry
+        .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
+        .await
+        .unwrap();
+    let job_id = job.job_id.clone();
+
+    let t0 = time::OffsetDateTime::now_utc();
+    let (meta, shard_a, sinputs) = registry
+        .claim_next_shard("worker-a", 60, 3, t0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shard_a.owner.as_deref(), Some("worker-a"));
+
+    // Simulate a second worker reclaiming the shard while worker-a renders:
+    // storage now records worker-b as the owner with a live lease.
+    let mut reclaimed = registry.get_shard(&job_id, shard_a.index).await.unwrap();
+    reclaimed.owner = Some("worker-b".to_string());
+    reclaimed.status = ShardStatus::Running;
+    reclaimed.lease_expires_at = Some(t0 + time::Duration::seconds(600));
+    registry.put_shard(&reclaimed).await.unwrap();
+
+    // Worker-a runs with a short lease so its heartbeat fires within the loop;
+    // it must return Ok (a clean abandonment, not an error) partway through.
+    registry
+        .run_claimed_shard(meta, shard_a, sinputs, 1, || false)
+        .await
+        .unwrap();
+
+    // Worker-a neither finalized the shard nor clobbered worker-b's ownership.
+    let after = registry.get_shard(&job_id, 0).await.unwrap();
+    assert_eq!(after.owner.as_deref(), Some("worker-b"));
+    assert_eq!(after.status, ShardStatus::Running);
+    // No results.json was written, so the shard was not completed twice.
+    assert!(
+        !registry
+            .storage
+            .exists(&layout::shard_results_key(&job_id, 0))
+            .await
+            .unwrap()
+    );
+    // The pending marker survives, so worker-b can still finish the shard.
+    assert!(
+        registry
+            .storage
+            .exists(&layout::pending_key(&job_id, 0))
+            .await
+            .unwrap()
+    );
+}
+
+/// The heartbeat's documented fail-open behavior: a transient storage read
+/// error is treated as "still ours" (returns `true`, keeps the run alive), but
+/// it must *skip* the renewal write so a blip can never overwrite the
+/// descriptor of a worker that has legitimately reclaimed the shard.
+#[tokio::test]
+async fn heartbeat_fails_open_without_clobbering_on_read_error() {
+    use crate::batch::{BatchInput, ShardStatus};
+
+    let registry = Registry::new(
+        FlakyShardStorage::new(),
+        crate::render_storage::MemoryRenderStorage::new(),
+    );
+    registry
+        .publish(create_test_bundle(), "batch", "latest")
+        .await
+        .unwrap();
+    let inputs = vec![BatchInput {
+        data: serde_json::json!({ "name": "A" }),
+        key: None,
+    }];
+    registry
+        .enqueue_batch_job("batch:latest", &inputs, None, &RenderOptions::default())
+        .await
+        .unwrap();
+
+    let t0 = time::OffsetDateTime::now_utc();
+    let (_m, mut shard_a, _i) = registry
+        .claim_next_shard("worker-a", 60, 3, t0)
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Another worker's descriptor is what lives in storage now.
+    let mut owned_by_b = registry
+        .get_shard(&shard_a.job_id, shard_a.index)
+        .await
+        .unwrap();
+    owned_by_b.owner = Some("worker-b".to_string());
+    owned_by_b.status = ShardStatus::Running;
+    owned_by_b.lease_expires_at = Some(t0 + time::Duration::seconds(600));
+    registry.put_shard(&owned_by_b).await.unwrap();
+    let lease_before = owned_by_b.lease_expires_at;
+
+    // The ownership read fails; the heartbeat keeps worker-a running (true)...
+    registry.storage.set_fail(true);
+    let renewed_lease = shard_a.lease_expires_at;
+    assert!(
+        registry
+            .heartbeat_shard(&mut shard_a, 60, t0 + time::Duration::seconds(30))
+            .await
+    );
+    // ...it did not extend its own copy's lease...
+    assert_eq!(shard_a.lease_expires_at, renewed_lease);
+
+    // ...and, crucially, it did not write over worker-b's descriptor.
+    registry.storage.set_fail(false);
+    let persisted = registry
+        .get_shard(&shard_a.job_id, shard_a.index)
+        .await
+        .unwrap();
+    assert_eq!(persisted.owner.as_deref(), Some("worker-b"));
+    assert_eq!(persisted.lease_expires_at, lease_before);
 }
 
 #[tokio::test]
