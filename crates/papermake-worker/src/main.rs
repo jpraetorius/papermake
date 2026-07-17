@@ -80,6 +80,18 @@ fn env_u64(key: &str, default: u64) -> u64 {
     env_u64_value(key, value.as_deref(), default)
 }
 
+/// Poll/act interval in seconds: the role default, overridable by
+/// `WORKER_INTERVAL_SECONDS`, clamped to at least 1s. A 0 (or an invalid value
+/// parsed as 0) would busy-loop the poll against S3.
+fn interval_seconds(role: Role, value: Option<&str>) -> u64 {
+    env_u64_value(
+        "WORKER_INTERVAL_SECONDS",
+        value,
+        default_interval_seconds(role),
+    )
+    .max(1)
+}
+
 fn env_u64_value(key: &str, value: Option<&str>, default: u64) -> u64 {
     match value {
         Some(v) => v.parse().unwrap_or_else(|_| {
@@ -144,8 +156,8 @@ async fn main() {
 
     // Poll/act cadence, defaulted by role (env overrides): render polls fast to
     // pick up new jobs quickly; maintenance aggregates/prunes on a slower beat.
-    // Clamp to >= 1s: a 0 interval would busy-loop the poll against S3.
-    let interval = env_u64("WORKER_INTERVAL_SECONDS", default_interval_seconds(role)).max(1);
+    let interval_env = std::env::var("WORKER_INTERVAL_SECONDS").ok();
+    let interval = interval_seconds(role, interval_env.as_deref());
     let analytics_retention_days = env_u32("ANALYTICS_RETENTION_DAYS", 30);
     let job_retention_days = env_u32("JOB_RETENTION_DAYS", 7);
     let lease_secs = env_u64("WORKER_LEASE_SECONDS", 120);
@@ -358,5 +370,17 @@ mod tests {
         assert_eq!(env_u32_value("TEST", Some("7"), 3), 7);
         assert_eq!(env_u32_value("TEST", Some("-1"), 3), 3);
         assert_eq!(env_u32_value("TEST", None, 3), 3);
+    }
+
+    #[test]
+    fn interval_is_clamped_to_at_least_one_second() {
+        // A 0 (or a non-numeric value that falls back then clamps) must not
+        // busy-loop the poll.
+        assert_eq!(interval_seconds(Role::Render, Some("0")), 1);
+        // A valid override is respected as-is.
+        assert_eq!(interval_seconds(Role::Render, Some("15")), 15);
+        // Unset uses the role default (which is already >= 1).
+        assert_eq!(interval_seconds(Role::Render, None), 5);
+        assert_eq!(interval_seconds(Role::Maintenance, None), 30);
     }
 }
