@@ -215,7 +215,7 @@ Returns a page of item results ordered by input index.
 
 | Query | Default | Meaning |
 |---|---:|---|
-| `limit` | `1000` | Page size |
+| `limit` | `1000` | Page size, clamped to a maximum of `1000` |
 | `offset` | `0` | Number of items to skip |
 
 ```json

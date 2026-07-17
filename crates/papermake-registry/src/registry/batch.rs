@@ -539,7 +539,10 @@ impl<S: BlobStorage + 'static, R: RenderStorage + 'static> Registry<S, R> {
         if limit == 0 || offset >= meta.total {
             return Ok(Vec::new());
         }
-        let end = (offset + limit).min(meta.total);
+        let end = offset.saturating_add(limit).min(meta.total);
+        if end <= offset {
+            return Ok(Vec::new());
+        }
         let shard_size = meta.shard_size.max(1);
         let mut out = Vec::new();
         for k in (offset / shard_size)..=((end - 1) / shard_size) {

@@ -88,6 +88,7 @@ mod tests {
             "/api/render/{reference}/batch",
             "/api/templates",
             "/api/jobs/{job_id}",
+            "/api/jobs/{job_id}/items",
             "/api/analytics/volume",
             "/health",
         ] {
@@ -99,5 +100,6 @@ mod tests {
         );
         // PDF/A option surfaced on the render request.
         assert!(json.contains("pdf_standard"), "spec missing pdf_standard");
+        assert!(json.contains("max 1000"), "spec missing job item limit cap");
     }
 }

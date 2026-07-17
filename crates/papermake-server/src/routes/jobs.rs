@@ -14,6 +14,8 @@ use crate::{
     models::ApiResponse,
 };
 
+const MAX_JOB_ITEMS_LIMIT: usize = 1000;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/{job_id}", get(get_job))
@@ -68,7 +70,7 @@ fn default_limit() -> usize {
     params(
         ("job_id" = String, Path, description = "Batch job id"),
         ("offset" = Option<usize>, Query, description = "Items to skip (default 0)"),
-        ("limit" = Option<usize>, Query, description = "Max items to return (default 1000)"),
+        ("limit" = Option<usize>, Query, description = "Max items to return (default 1000, max 1000)"),
     ),
     responses(
         (status = 200, description = "Item → render_id page", body = crate::models::api::JobItemsApiResponse),
@@ -81,9 +83,10 @@ pub async fn get_job_items(
     Path(job_id): Path<String>,
     Query(q): Query<ItemsQuery>,
 ) -> ApiResult<Json<ApiResponse<Vec<BatchItem>>>> {
+    let limit = q.limit.min(MAX_JOB_ITEMS_LIMIT);
     let items = state
         .registry
-        .list_job_items(&job_id, q.offset, q.limit)
+        .list_job_items(&job_id, q.offset, limit)
         .await
         .map_err(ApiError::Registry)?;
     Ok(Json(ApiResponse::new(items)))
@@ -168,5 +171,51 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn job_items_accepts_extreme_limit_without_overflowing() {
+        let registry = test_support::registry();
+        registry
+            .publish(test_support::bundle(), "invoice", "latest")
+            .await
+            .unwrap();
+        let job = registry
+            .enqueue_batch_job(
+                "invoice:latest",
+                &[
+                    BatchInput {
+                        data: serde_json::json!({ "name": "Alice" }),
+                        key: None,
+                    },
+                    BatchInput {
+                        data: serde_json::json!({ "name": "Bob" }),
+                        key: None,
+                    },
+                ],
+                Some(0),
+                &RenderOptions::default(),
+            )
+            .await
+            .unwrap();
+        let app = router().with_state(test_support::state(registry));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/{}/items?offset=1&limit={}",
+                        job.job_id,
+                        usize::MAX
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test_support::response_json(response).await;
+        assert_eq!(body["data"].as_array().unwrap().len(), 0);
     }
 }

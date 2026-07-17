@@ -1773,6 +1773,15 @@ async fn test_batch_job_enqueue_claim_run() {
         let pdf = registry.get_render_pdf(render_id).await.unwrap();
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // Extreme caller-supplied limits stay bounded by the job's real item range
+    // and do not overflow pagination math.
+    let tail = registry
+        .list_job_items(&job_id, 1, usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(tail.len(), 1);
+    assert_eq!(tail[0].index, 1);
 }
 
 #[tokio::test]
