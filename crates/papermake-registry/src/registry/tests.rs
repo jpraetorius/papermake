@@ -475,6 +475,21 @@ async fn test_registry_publish_invalid_bundle() {
 }
 
 #[tokio::test]
+async fn publish_rejects_invalid_bundle_paths_before_writing_blobs() {
+    let storage = MemoryStorage::new();
+    let registry = Registry::new_storage_only(storage);
+    let bundle = create_test_bundle().add_file("main.typ", b"override".to_vec());
+
+    let result = registry.publish(bundle, "test", "latest").await;
+
+    assert!(result.is_err());
+    assert!(
+        registry.storage.is_empty(),
+        "invalid bundle publish must not write content blobs"
+    );
+}
+
+#[tokio::test]
 async fn test_publish_and_delete_reject_unsafe_names() {
     let registry = Registry::new_storage_only(MemoryStorage::new());
 

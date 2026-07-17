@@ -160,8 +160,36 @@ impl TemplateBundle {
             })?;
         }
 
+        for path in self.files.keys() {
+            validate_bundle_file_path(path)?;
+        }
+
         Ok(())
     }
+}
+
+fn validate_bundle_file_path(path: &str) -> Result<(), TemplateValidationError> {
+    if path.trim().is_empty() {
+        return Err(TemplateValidationError::InvalidFilePath(
+            "path cannot be empty".into(),
+        ));
+    }
+    if path == "main.typ" {
+        return Err(TemplateValidationError::InvalidFilePath(
+            "main.typ must be provided through the main_typ field".into(),
+        ));
+    }
+    if path.starts_with('/') {
+        return Err(TemplateValidationError::InvalidFilePath(
+            "path cannot be absolute".into(),
+        ));
+    }
+    if path.contains("..") {
+        return Err(TemplateValidationError::InvalidFilePath(
+            "path cannot contain '..' segments".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Information about a template in the registry
@@ -218,6 +246,9 @@ pub enum TemplateValidationError {
 
     #[error("Invalid schema: {0}")]
     InvalidSchema(String),
+
+    #[error("Invalid file path: {0}")]
+    InvalidFilePath(String),
 }
 
 #[cfg(test)]
@@ -386,6 +417,35 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             TemplateValidationError::InvalidSchema(_)
+        ));
+    }
+
+    #[test]
+    fn test_template_bundle_validation_rejects_unsafe_file_paths() {
+        let metadata = sample_metadata();
+        let content = sample_template_content();
+
+        for path in ["", "/absolute.typ", "../escape.typ", "assets/../escape.typ"] {
+            let bundle = TemplateBundle::new(content.clone(), metadata.clone())
+                .add_file(path, b"x".to_vec());
+            let result = bundle.validate();
+            assert!(matches!(
+                result,
+                Err(TemplateValidationError::InvalidFilePath(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn test_template_bundle_validation_rejects_main_typ_as_extra_file() {
+        let metadata = sample_metadata();
+        let content = sample_template_content();
+        let bundle = TemplateBundle::new(content, metadata).add_file("main.typ", b"x".to_vec());
+
+        let result = bundle.validate();
+        assert!(matches!(
+            result,
+            Err(TemplateValidationError::InvalidFilePath(_))
         ));
     }
 }
