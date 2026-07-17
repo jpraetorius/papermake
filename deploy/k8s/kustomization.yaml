@@ -9,7 +9,6 @@ resources:
   - server-service.yaml
   - render-worker-deployment.yaml
   - maintenance-worker-deployment.yaml
-  - ingress.yaml
 images:
   - name: papermake-server
     newName: papermake-server

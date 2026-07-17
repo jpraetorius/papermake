@@ -26,9 +26,11 @@ Replace the placeholder credentials in `deploy/k8s/secret.example.yaml`, or
 replace that resource with your normal Kubernetes secret management flow. Do not
 commit real credentials.
 
-Set the hostname and TLS annotations for your ingress controller in
-`deploy/k8s/ingress.yaml`, or remove `ingress.yaml` from `kustomization.yaml`
-and expose the service another way.
+The base kustomization does not create an Ingress by default because Papermake
+has no built-in authentication. If you expose it beyond a private network,
+configure TLS, authentication, authorization, and rate limits at your edge
+first, then add `deploy/k8s/ingress.yaml` to `deploy/k8s/kustomization.yaml` or
+expose the service through your normal gateway.
 
 ## Deploy
 

@@ -6,7 +6,6 @@ This directory contains a plain Kubernetes base for running Papermake with:
 - one scalable render worker deployment;
 - one single-replica maintenance worker deployment;
 - one ClusterIP service;
-- one optional Ingress;
 - one ConfigMap and one Secret for runtime configuration.
 
 It assumes you provide:
@@ -43,9 +42,11 @@ stringData:
 Do not commit real credentials. In a real environment, replace the example
 Secret with your normal secret management flow.
 
-Edit `ingress.yaml` for your hostname and TLS setup, or remove it from
-`kustomization.yaml` and expose the service through another ingress controller,
-gateway, or port-forward.
+The base does not expose an Ingress by default because Papermake has no built-in
+authentication. If you expose it beyond a private network, configure TLS,
+authentication, authorization, and rate limits at your edge first, then add
+`ingress.yaml` to `kustomization.yaml` or expose the service through your normal
+gateway.
 
 ## Apply
 
