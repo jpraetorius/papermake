@@ -142,17 +142,27 @@ impl<B: BlobStorage> S3BufferedRenderStorage<B> {
         let unix_millis = (now.unix_timestamp_nanos() / 1_000_000) as u128;
 
         // Analytics raw (full records, partitioned by render date).
-        let mut body = String::new();
+        let mut by_render_date: std::collections::BTreeMap<time::Date, Vec<&RenderRecord>> =
+            std::collections::BTreeMap::new();
         for record in drained {
-            body.push_str(&serde_json::to_string(record)?);
-            body.push('\n');
+            by_render_date
+                .entry(record.timestamp.date())
+                .or_default()
+                .push(record);
         }
-        let raw_seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let raw_key = layout::raw_key(now.date(), &self.instance_id, unix_millis, raw_seq);
-        self.blob
-            .put(&raw_key, body.into_bytes())
-            .await
-            .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+        for (render_date, records) in by_render_date {
+            let mut body = String::new();
+            for record in records {
+                body.push_str(&serde_json::to_string(record)?);
+                body.push('\n');
+            }
+            let raw_seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            let raw_key = layout::raw_key(render_date, &self.instance_id, unix_millis, raw_seq);
+            self.blob
+                .put(&raw_key, body.into_bytes())
+                .await
+                .map_err(|e| RenderStorageError::Query(e.to_string()))?;
+        }
 
         // Expiry index (render_ids grouped by expiry date).
         let mut by_expiry: std::collections::BTreeMap<time::Date, Vec<&str>> =
@@ -389,6 +399,37 @@ mod tests {
             .collect();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].template_name, "invoice");
+    }
+
+    #[tokio::test]
+    async fn test_flush_partitions_raw_records_by_render_date() {
+        let blob = Arc::new(MemoryStorage::new());
+        let store = S3BufferedRenderStorage::new(blob.clone(), Some("inst-1".to_string()), 1000);
+        let d1 = time::macros::date!(2026 - 07 - 09);
+        let d2 = time::macros::date!(2026 - 07 - 10);
+
+        let mut r1 = record("invoice");
+        r1.render_id = "r1".to_string();
+        r1.timestamp = time::macros::datetime!(2026-07-09 23:59:00 UTC);
+        let mut r2 = record("letter");
+        r2.render_id = "r2".to_string();
+        r2.timestamp = time::macros::datetime!(2026-07-10 00:01:00 UTC);
+
+        store.store_render(r1).await.unwrap();
+        store.store_render(r2).await.unwrap();
+        store.flush().await.unwrap();
+
+        let d1_keys = blob.list_keys(&layout::raw_date_prefix(d1)).await.unwrap();
+        let d2_keys = blob.list_keys(&layout::raw_date_prefix(d2)).await.unwrap();
+        assert_eq!(d1_keys.len(), 1);
+        assert_eq!(d2_keys.len(), 1);
+        assert_eq!(blob.list_keys(layout::RAW_PREFIX).await.unwrap().len(), 2);
+
+        let d1_body = String::from_utf8(blob.get(&d1_keys[0]).await.unwrap()).unwrap();
+        let d2_body = String::from_utf8(blob.get(&d2_keys[0]).await.unwrap()).unwrap();
+        assert!(d1_body.contains("\"render_id\":\"r1\""));
+        assert!(!d1_body.contains("\"render_id\":\"r2\""));
+        assert!(d2_body.contains("\"render_id\":\"r2\""));
     }
 
     #[tokio::test]
