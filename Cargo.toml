@@ -7,3 +7,6 @@ members = [
     "crates/papermake-server",
     "crates/papermake-worker",
 ]
+
+[patch.crates-io]
+citationberg = { path = "vendor/citationberg" }

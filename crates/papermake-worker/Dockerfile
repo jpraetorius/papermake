@@ -14,6 +14,7 @@ WORKDIR /app
 RUN --mount=type=bind,source=Cargo.toml,target=Cargo.toml \
     --mount=type=bind,source=Cargo.lock,target=Cargo.lock \
     --mount=type=bind,source=crates,target=crates \
+    --mount=type=bind,source=vendor,target=vendor \
     --mount=type=cache,target=/app/target/,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/registry/,sharing=locked \

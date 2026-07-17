@@ -1,5 +1,6 @@
 # Keep the build context small. The fallback (source) build only needs
-# Cargo.toml, Cargo.lock, and crates/, so everything below is safe to exclude.
+# Cargo.toml, Cargo.lock, crates/, and vendor/, so everything below is safe to
+# exclude.
 .git
 .github
 .gitlab
