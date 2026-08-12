@@ -37,7 +37,7 @@ fn test_render_pdf() {
     if let Ok(page) = file.get_page(0)
         && let Ok(resources) = page.resources()
     {
-        for (_, font_lazy) in resources.fonts.iter() {
+        for font_lazy in resources.fonts.values() {
             let Ok(font_ref) = font_lazy.load(&file) else {
                 continue;
             };
