@@ -50,11 +50,30 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Tests run in the release profile so they share `target/release` with
+      # the build step below. Compiling the workspace once in one profile is
+      # much cheaper than a dev compile for tests plus a release compile for
+      # the shipped binaries.
       - name: Run tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --release
 
       - name: Build workspace
         run: cargo build --workspace --locked --release
+
+      # Hand the release binaries to the image job so no Rust is compiled
+      # inside Docker; the Dockerfiles consume this via `dist=./dist`.
+      - name: Stage release binaries
+        run: |
+          install -Dm755 target/release/papermake-server dist/papermake-server
+          install -Dm755 target/release/papermake-worker dist/papermake-worker
+
+      - name: Upload release binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
 
   docker:
     name: Build Docker images
@@ -106,6 +125,18 @@ jobs:
           IMAGE_REGISTRY: ${{ vars.IMAGE_REGISTRY }}
           IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE }}
 
+      # The release binaries the rust job already compiled. Passing them as the
+      # `dist` build context overrides that stage in both Dockerfiles, so the
+      # in-image `cargo build` never runs.
+      - name: Download release binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist
+
+      - name: Restore binary permissions
+        run: chmod +x dist/papermake-server dist/papermake-worker
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
@@ -114,6 +145,7 @@ jobs:
         with:
           context: .
           file: crates/papermake-server/Dockerfile
+          build-contexts: dist=./dist
           push: false
           tags: ${{ env.SERVER_TAGS }}
           cache-from: type=gha,scope=papermake-server
@@ -124,6 +156,7 @@ jobs:
         with:
           context: .
           file: crates/papermake-worker/Dockerfile
+          build-contexts: dist=./dist
           push: false
           tags: ${{ env.WORKER_TAGS }}
           cache-from: type=gha,scope=papermake-worker
@@ -143,6 +176,7 @@ jobs:
         with:
           context: .
           file: crates/papermake-server/Dockerfile
+          build-contexts: dist=./dist
           push: true
           tags: ${{ env.SERVER_TAGS }}
           cache-from: type=gha,scope=papermake-server
@@ -154,6 +188,7 @@ jobs:
         with:
           context: .
           file: crates/papermake-worker/Dockerfile
+          build-contexts: dist=./dist
           push: true
           tags: ${{ env.WORKER_TAGS }}
           cache-from: type=gha,scope=papermake-worker

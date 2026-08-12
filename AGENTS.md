@@ -45,6 +45,11 @@ cargo test --workspace
 cargo clippy --workspace --all-targets
 ```
 
+CI runs the tests with `--release` so the test run and the shipped binaries
+share one `target/release` and the workspace compiles only once. Tests must
+therefore pass with optimizations on: do not let a test depend on debug builds
+being slow, and give timing-sensitive tests a wide margin.
+
 Useful local commands:
 
 ```bash

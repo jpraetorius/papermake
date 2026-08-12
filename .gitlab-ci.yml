@@ -49,7 +49,10 @@ test-and-build-crates:
     - rustup component add rustfmt
   script:
     - cargo fmt --all -- --check
-    - cargo test --workspace --locked
+    # Tests run in the release profile so they share `target/release` with the
+    # build below. Dev and release are separate target dirs with no shared
+    # artifacts, so testing in dev meant compiling the whole tree twice.
+    - cargo test --workspace --locked --release
     - cargo build --workspace --locked --release
     - install -Dm755 target/release/papermake-server dist/papermake-server
     - install -Dm755 target/release/papermake-worker dist/papermake-worker

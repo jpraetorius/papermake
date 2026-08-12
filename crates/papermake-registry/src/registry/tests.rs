@@ -278,6 +278,26 @@ Hello #data.name"#
         .with_schema(br#"{"type": "object", "properties": {"name": {"type": "string"}}}"#.to_vec())
 }
 
+/// A bundle whose render is far too slow to finish inside a near-zero render
+/// timeout. `render_timeout` never drops below a 1ms floor (see
+/// `remaining_timeout` in `registry::render`), so a template that renders in
+/// well under a millisecond — which the tiny [`create_test_bundle`] does once
+/// optimizations are on — would win the race and never reach the timeout path.
+/// The bulk content here keeps the timeout deterministic in every profile.
+fn create_slow_test_bundle() -> TemplateBundle {
+    let metadata = TemplateMetadata::new("Slow Test Template", "test@example.com");
+    let main_content = br#"#let data = json(bytes(sys.inputs.data))
+= Slow Test Template
+Hello #data.name
+#for _ in range(60) [
+  #lorem(40)
+]"#
+    .to_vec();
+
+    TemplateBundle::new(main_content, metadata)
+        .with_schema(br#"{"type": "object", "properties": {"name": {"type": "string"}}}"#.to_vec())
+}
+
 fn versioned_bundle(label: &str) -> TemplateBundle {
     let metadata = TemplateMetadata::new(label, "test@example.com");
     let main_content = format!(
@@ -2348,13 +2368,16 @@ async fn test_render_error_rebuilds_world_and_batch_continues() {
     // (as Some, via the fonts-aware constructor) each time, so the batch
     // keeps running instead of panicking on a taken/None world or silently
     // continuing with a fonts-less placeholder.
+    //
+    // The template is deliberately slow to render; see
+    // [`create_slow_test_bundle`] for why a trivial one is not enough here.
     let registry = Registry::new(
         MemoryStorage::new(),
         crate::render_storage::MemoryRenderStorage::new(),
     )
     .with_render_limits(2, std::time::Duration::from_nanos(1));
     registry
-        .publish(create_test_bundle(), "batch", "latest")
+        .publish(create_slow_test_bundle(), "batch", "latest")
         .await
         .unwrap();
 
