@@ -33,7 +33,7 @@ COPY --from=build /bin/worker /papermake-worker
 # Distroless runtime: ships glibc, libssl3, ca-certificates, and a nonroot
 # user (uid 65532) — no shell, no package manager, nothing else. The `cc`
 # variant adds libgcc/libstdc++ needed by the dynamically-linked Rust binary.
-FROM gcr.io/distroless/cc-debian13:nonroot AS final
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775 AS final
 
 # No fonts baked in beyond Typst's embedded set; the worker scans the same
 # mounted /fonts volume as the server so batch renders match single renders.
