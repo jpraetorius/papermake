@@ -33,7 +33,7 @@ COPY --from=build /bin/server /papermake-server
 # Distroless runtime: ships glibc, libssl3, ca-certificates, and a nonroot
 # user (uid 65532) — no shell, no package manager, nothing else. The `cc`
 # variant adds libgcc/libstdc++ needed by the dynamically-linked Rust binary.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:a77defd6fedbb3392b175ba8ea3d1c22be963c1597c248c3ba987ddd80bfb512 AS final
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:c31ff9abcb1910f3ab25c7957bdaf0bfe12a01eb546e8df2282f1c8f682b606c AS final
 
 # No fonts are baked into the image beyond Typst's embedded set. Scan a mounted
 # /fonts volume so operators add fonts by dropping files in the mount — no
