@@ -33,4 +33,4 @@ urlencoding = "2.1"
 maud = { version = "0.27", features = ["axum"] }
 fluent-templates = "0.15"
 unic-langid = "0.9"
-utoipa = { version = "5", features = ["axum_extras", "time"] }
+utoipa = { version = "6", features = ["axum_extras", "time"] }
